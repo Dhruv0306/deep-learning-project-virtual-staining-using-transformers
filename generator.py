@@ -66,11 +66,11 @@ class Generator(nn.Module):
         ]
 
         # Downsampling: reduce spatial resolution and expand channels.
-        # Three layers: 64 -> 128 -> 256 -> 512 channels, H/W reduced by 8x.
+        # Two layers: 64 -> 128 -> 256 channels, H/W reduced by 4x.
         in_features = 64
         out_features = in_features * 2
 
-        for _ in range(3):  # Three downsampling layers
+        for _ in range(2):  # Two downsampling layers
             model += [
                 nn.Conv2d(
                     in_features,
@@ -90,10 +90,10 @@ class Generator(nn.Module):
         model += [SwinTransformerBottleneck(dim=in_features, n_blocks=n_blocks, window_size=8)]
 
         # Upsampling: restore spatial resolution and reduce channels.
-        # Three layers: 512 -> 256 -> 128 -> 64 channels, H/W increased by 8x.
+        # Two layers: 256 -> 128 -> 64 channels, H/W increased by 4x.
         out_features = in_features // 2
 
-        for _ in range(3):  # Three upsampling layers
+        for _ in range(2):  # Two upsampling layers
             model += [
                 nn.ConvTranspose2d(
                     in_features,
@@ -166,7 +166,7 @@ def init_weights(net):
 # CycleGAN needs two generators for bidirectional translation:
 # - G_AB (Unstained -> Stained)
 # - G_BA (Stained -> Unstained)
-def getGenerators():
+def getGenerators(n_blocks=9):
     """
     Create and initialize two generators for CycleGAN.
 
@@ -181,8 +181,8 @@ def getGenerators():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create two generators with identical architecture.
-    G_AB = Generator().to(device)  # Generator Unstained -> Stained
-    G_BA = Generator().to(device)  # Generator Stained -> Unstained
+    G_AB = Generator(n_blocks=n_blocks).to(device)  # Generator Unstained -> Stained
+    G_BA = Generator(n_blocks=n_blocks).to(device)  # Generator Stained -> Unstained
 
     # Apply weight initialization to both generators.
     G_AB.apply(init_weights)
@@ -200,4 +200,4 @@ def getGenerators():
 
 
 if __name__ == "__main__":
-    G_AB, G_BA = getGenerators()
+    G_AB, G_BA = getGenerators(n_blocks=6)

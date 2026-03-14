@@ -73,14 +73,16 @@ class WindowAttention(nn.Module):
     Args:
         dim (int): Feature dimension.
         num_heads (int): Number of attention heads.
+        window_size (int): Window size for relative position bias.
     """
 
-    def __init__(self, dim, num_heads):
+    def __init__(self, dim, num_heads, window_size):
 
         super(WindowAttention, self).__init__()
 
         self.dim = dim
         self.num_heads = num_heads
+        self.window_size = window_size
         self.head_dim = dim // num_heads
 
         self.scale = self.head_dim**-0.5
@@ -89,7 +91,32 @@ class WindowAttention(nn.Module):
 
         self.proj = nn.Linear(dim, dim)
 
-    def forward(self, x):
+        # Relative position bias table
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros(
+                (2 * window_size - 1) * (2 * window_size - 1),
+                num_heads,
+            )
+        )
+
+        coords_h = torch.arange(window_size)
+        coords_w = torch.arange(window_size)
+        coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"))
+
+        coords_flatten = torch.flatten(coords, 1)
+
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+
+        relative_coords[:, :, 0] += window_size - 1
+        relative_coords[:, :, 1] += window_size - 1
+        relative_coords[:, :, 0] *= 2 * window_size - 1
+
+        relative_position_index = relative_coords.sum(-1)
+
+        self.register_buffer("relative_position_index", relative_position_index)
+
+    def forward(self, x, attn_mask=None):
         """
         Args:
             x (Tensor): Input tensor of shape (B, N, C),
@@ -106,6 +133,28 @@ class WindowAttention(nn.Module):
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
+        relative_position_index = self.get_buffer("relative_position_index")
+        if relative_position_index is None:
+            raise RuntimeError("relative_position_index buffer is missing.")
+
+        relative_position_bias = self.relative_position_bias_table[
+            relative_position_index.reshape(-1)
+        ].view(
+            self.window_size * self.window_size,
+            self.window_size * self.window_size,
+            -1,
+        )
+
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+
+        attn = attn + relative_position_bias.unsqueeze(0)
+
+        if attn_mask is not None:
+            nW = attn_mask.shape[0]
+            attn = attn.view(B // nW, nW, self.num_heads, N, N)
+            attn = attn + attn_mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+
         attn = attn.softmax(dim=-1)
 
         out = attn @ v
@@ -115,6 +164,37 @@ class WindowAttention(nn.Module):
         out = self.proj(out)
 
         return out
+
+
+def create_mask(H, W, window_size, shift_size, device):
+    img_mask = torch.zeros((1, H, W, 1), device=device)
+
+    cnt = 0
+
+    for h in (
+        slice(0, -window_size),
+        slice(-window_size, -shift_size),
+        slice(-shift_size, None),
+    ):
+        for w in (
+            slice(0, -window_size),
+            slice(-window_size, -shift_size),
+            slice(-shift_size, None),
+        ):
+            img_mask[:, h, w, :] = cnt
+            cnt += 1
+
+    mask_windows = window_partition(img_mask, window_size)
+
+    mask_windows = mask_windows.view(-1, window_size * window_size)
+
+    attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0))
+
+    attn_mask = attn_mask.masked_fill(attn_mask == 0, float(0.0))
+
+    return attn_mask
 
 
 class SwinTransformerBlock(nn.Module):
@@ -139,7 +219,7 @@ class SwinTransformerBlock(nn.Module):
 
         self.norm1 = nn.LayerNorm(dim)
 
-        self.attn = WindowAttention(dim, num_heads)
+        self.attn = WindowAttention(dim, num_heads, window_size)
 
         self.norm2 = nn.LayerNorm(dim)
 
@@ -155,7 +235,7 @@ class SwinTransformerBlock(nn.Module):
         # Convert to channels-last for window partitioning.
         x = x.permute(0, 2, 3, 1)  # B, H, W, C
 
-        # Shift feature map for alternating blocks (no attention mask applied).
+        # Shift feature map for alternating blocks.
         if self.shift_size > 0:
             x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
 
@@ -166,7 +246,13 @@ class SwinTransformerBlock(nn.Module):
 
         windows = self.norm1(windows)
 
-        attn_windows = self.attn(windows)
+        attn_mask = None
+        if self.shift_size > 0:
+            attn_mask = create_mask(
+                H, W, self.window_size, self.shift_size, device=x.device
+            )
+
+        attn_windows = self.attn(windows, attn_mask=attn_mask)
 
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
 
