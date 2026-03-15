@@ -1,5 +1,5 @@
 """
-Training loop for the CycleGAN model.
+Training loop for the CycleGAN/UVCGAN model.
 
 Handles data loading, model setup, loss computation, optimization, logging,
 validation, early stopping, and final evaluation.
@@ -28,7 +28,9 @@ from testing import run_testing
 from validation import calculate_metrics, run_validation
 
 
-def train(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None):
+def train(
+    epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None
+):
     """
     Train CycleGAN generators and discriminators.
 
@@ -52,16 +54,17 @@ def train(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_s
         epoch_size=3000 if epoch_size is None else epoch_size
     )
     # Initialize models.
-    G_AB, G_BA = getGenerators()
+    G_AB, G_BA = getGenerators(use_checkpoint=True)
     D_A, D_B = getDiscriminators()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Composite CycleGAN loss with perceptual components.
+    # Composite CycleGAN loss with perceptual components and gradient penalty.
     loss_fn = CycleGANLoss(
         lambda_cycle=10.0,
         lambda_identity=5.0,
         lambda_cycle_perceptual=0.1,
         lambda_identity_perceptual=0.05,
+        lambda_gp=10.0,
         device=device,
     )
     # Mixed precision is used only when CUDA is available.
@@ -214,8 +217,12 @@ def train(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_s
         # Store batch-level history for this epoch.
         history[epoch + 1] = epoch_step
         writer.add_scalar("Loss/Generator", epoch_loss_G / len(train_loader), epoch + 1)
-        writer.add_scalar("Loss/Discriminator_A", epoch_loss_D_A / len(train_loader), epoch + 1)
-        writer.add_scalar("Loss/Discriminator_B", epoch_loss_D_B / len(train_loader), epoch + 1)
+        writer.add_scalar(
+            "Loss/Discriminator_A", epoch_loss_D_A / len(train_loader), epoch + 1
+        )
+        writer.add_scalar(
+            "Loss/Discriminator_B", epoch_loss_D_B / len(train_loader), epoch + 1
+        )
 
         # Periodically flush training history to CSV to avoid large memory usage.
         if (epoch + 1) % 5 == 0:

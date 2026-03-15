@@ -1,183 +1,260 @@
 """
-Generator definition for CycleGAN.
+Generator definition for UVCGAN.
 
-Includes a ResNet-based generator, weight initialization, and a helper
-to build the two generators required for bidirectional translation.
+Includes:
+- UVCGAN-style U-Net + ViT generator (default)
+- Weight initialization helpers
+- Helper to build the two generators required for bidirectional translation
 """
 
 # Imports
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 
 
-# CycleGAN Generator Structure
-"""
-CycleGAN Generator Architecture:
-    Input (256x256x3)
-    ->
-    7x7 Conv - Initial feature extraction with reflection padding
-    ->
-    Downsample (Conv stride 2) x2 - Reduce spatial dimensions while increasing channels
-    ->
-    ResNet Blocks x6 (or x9 for 256x256) - Feature transformation while preserving structure
-    ->
-    Upsample x2 (ConvTranspose) - Restore spatial dimensions while reducing channels
-    ->
-    7x7 Conv - Final feature mapping to output channels
-    ->
-    Tanh - Output activation to range [-1, 1]
-"""
+# ---------------------------
+# UVCGAN Generator (U-Net + ViT)
+# ---------------------------
 
 
-# Residual Block (Core Component)
-# This preserves structure -- extremely important in tissue morphology.
-class ResnetBlock(nn.Module):
+def _get_1d_sincos_pos_embed(embed_dim, pos):
     """
-    Residual block with skip connections for the CycleGAN generator.
-
-    Uses reflection padding to avoid border artifacts and instance normalization
-    for better style transfer performance. The skip connection helps preserve
-    important structural information during transformation.
+    Build 1D sine-cosine positional embeddings.
 
     Args:
-        dim (int): Number of input and output channels.
+        embed_dim (int): Embedding dimension.
+        pos (torch.Tensor): Positions (N,).
+    """
+    if embed_dim % 2 != 0:
+        raise ValueError("embed_dim must be even for sin/cos positional embedding.")
+    omega = torch.arange(embed_dim // 2, device=pos.device, dtype=pos.dtype)
+    omega = 1.0 / (10000 ** (omega / (embed_dim / 2)))
+    out = pos[:, None] * omega[None, :]
+    return torch.cat([torch.sin(out), torch.cos(out)], dim=1)
+
+
+def _get_2d_sincos_pos_embed(embed_dim, height, width, device, dtype):
+    """
+    Build 2D sine-cosine positional embeddings for (H, W) grid.
+    """
+    if embed_dim % 2 != 0:
+        raise ValueError("embed_dim must be even for 2D sin/cos positional embedding.")
+
+    grid_h = torch.arange(height, device=device, dtype=dtype)
+    grid_w = torch.arange(width, device=device, dtype=dtype)
+    grid = torch.meshgrid(grid_h, grid_w, indexing="ij")
+    grid_h_flat = grid[0].reshape(-1)
+    grid_w_flat = grid[1].reshape(-1)
+
+    embed_h = _get_1d_sincos_pos_embed(embed_dim // 2, grid_h_flat)
+    embed_w = _get_1d_sincos_pos_embed(embed_dim // 2, grid_w_flat)
+    return torch.cat([embed_h, embed_w], dim=1)
+
+
+class ReZeroTransformerBlock(nn.Module):
+    """
+    Transformer block with ReZero residual scaling.
     """
 
-    def __init__(self, dim):
-        super(ResnetBlock, self).__init__()
+    def __init__(self, dim, num_heads=8, mlp_ratio=4.0, dropout=0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.norm2 = nn.LayerNorm(dim)
+        hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout),
+        )
+        self.alpha_attn = nn.Parameter(torch.tensor(0.0))
+        self.alpha_ffn = nn.Parameter(torch.tensor(0.0))
 
-        # Sequential block with two conv layers, normalization, and activation.
-        # Reflection padding helps avoid border artifacts in image generation.
-        self.block = nn.Sequential(
-            nn.ReflectionPad2d(1),  # Pad with reflection to maintain image boundaries
-            nn.Conv2d(dim, dim, kernel_size=3, bias=False),  # 3x3 convolution
-            nn.InstanceNorm2d(dim),  # Instance normalization for style transfer
-            nn.ReLU(True),  # ReLU activation with inplace operation
-            nn.ReflectionPad2d(1),  # Second reflection padding
-            nn.Conv2d(dim, dim, kernel_size=3, bias=False),  # Second 3x3 convolution
-            nn.InstanceNorm2d(dim),  # Second instance normalization (no activation)
+    def forward(self, x):
+        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        x = x + self.alpha_attn * attn_out
+        x = x + self.alpha_ffn * self.mlp(self.norm2(x))
+        return x
+
+
+class PixelwiseViT(nn.Module):
+    """
+    Pixelwise Vision Transformer operating on flattened spatial tokens.
+    """
+
+    def __init__(self, dim, depth=4, num_heads=8, mlp_ratio=4.0, dropout=0.0):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [
+                ReZeroTransformerBlock(
+                    dim=dim, num_heads=num_heads, mlp_ratio=mlp_ratio, dropout=dropout
+                )
+                for _ in range(depth)
+            ]
         )
 
     def forward(self, x):
-        """
-        Forward pass with residual connection.
+        # x: (N, C, H, W) -> tokens: (N, H*W, C)
+        n, c, h, w = x.shape
+        tokens = x.flatten(2).transpose(1, 2)
+        pos = _get_2d_sincos_pos_embed(
+            embed_dim=c, height=h, width=w, device=x.device, dtype=x.dtype
+        )
+        tokens = tokens + pos.unsqueeze(0)
+        for block in self.blocks:
+            tokens = block(tokens)
+        return tokens.transpose(1, 2).reshape(n, c, h, w)
 
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, dim, height, width).
 
-        Returns:
-            torch.Tensor: Output tensor with same shape as input.
-        """
-        # Add input to the output of the block (residual connection).
-        return x + self.block(x)
-
-
-# Generator Model
-class ResnetGenerator(nn.Module):
-    """
-    ResNet-based generator for CycleGAN.
-
-    This generator uses an encoder-decoder architecture with residual blocks
-    in the middle. It is designed for image-to-image translation tasks where
-    preserving structural information is crucial.
-
-    Architecture:
-    - Encoder: 7x7 conv + 2 downsampling layers.
-    - Transformer: n_blocks residual blocks.
-    - Decoder: 2 upsampling layers + 7x7 conv + tanh.
-
-    Args:
-        input_nc (int): Number of input channels (default: 3 for RGB).
-        output_nc (int): Number of output channels (default: 3 for RGB).
-        n_blocks (int): Number of residual blocks (default: 9 for 256x256 images).
-    """
-
-    def __init__(self, input_nc=3, output_nc=3, n_blocks=9):
-        super(ResnetGenerator, self).__init__()
-
-        model = []
-
-        # Initial 7x7 convolution - feature extraction from input image.
-        # Uses reflection padding to avoid border artifacts.
-        model += [
-            nn.ReflectionPad2d(3),  # Pad by 3 pixels on each side for 7x7 kernel
-            nn.Conv2d(input_nc, 64, kernel_size=7, bias=False),  # 7x7 conv to 64 channels
-            nn.InstanceNorm2d(64),  # Instance normalization
-            nn.ReLU(True),  # ReLU activation
-        ]
-
-        # Downsampling - reduce spatial dimensions while increasing feature channels.
-        # Two downsampling layers: 64->128->256 channels, size/4.
-        in_features = 64
-        out_features = in_features * 2
-
-        for _ in range(2):  # Two downsampling layers
-            model += [
-                nn.Conv2d(
-                    in_features,
-                    out_features,
-                    kernel_size=3,
-                    stride=2,  # Stride 2 for downsampling
-                    padding=1,  # Maintain spatial relationships
-                    bias=False,
-                ),
-                nn.InstanceNorm2d(out_features),
-                nn.ReLU(True),
-            ]
-            in_features = out_features
-            out_features *= 2  # Double channels for next layer
-
-        # Residual blocks - feature transformation while preserving structure.
-        # These blocks allow the network to learn complex transformations
-        # while maintaining important structural information through skip connections.
-        for _ in range(n_blocks):
-            model += [ResnetBlock(in_features)]
-
-        # Upsampling - restore spatial dimensions while reducing feature channels.
-        # Two upsampling layers: 256->128->64 channels, size*4.
-        out_features = in_features // 2
-
-        for _ in range(2):  # Two upsampling layers
-            model += [
-                nn.ConvTranspose2d(
-                    in_features,
-                    out_features,
-                    kernel_size=3,
-                    stride=2,  # Stride 2 for upsampling
-                    padding=1,
-                    output_padding=1,  # Ensure correct output size
-                    bias=False,
-                ),
-                nn.InstanceNorm2d(out_features),
-                nn.ReLU(True),
-            ]
-            in_features = out_features
-            out_features = in_features // 2  # Halve channels for next layer
-
-        # Final layer - map features to output image.
-        # 7x7 convolution to output channels with tanh activation.
-        model += [
-            nn.ReflectionPad2d(3),  # Reflection padding for 7x7 kernel
-            nn.Conv2d(64, output_nc, kernel_size=7),  # Final 7x7 conv to output channels
-            nn.Tanh(),  # Tanh activation to output range [-1, 1]
-        ]
-
-        # Combine all layers into a sequential model.
-        self.model = nn.Sequential(*model)
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.InstanceNorm2d(out_channels),
+            nn.ReLU(True),
+        )
 
     def forward(self, x):
-        """
-        Forward pass through the generator.
+        return self.block(x)
 
-        Args:
-            x (torch.Tensor): Input image tensor of shape
-                (batch_size, input_nc, height, width).
 
-        Returns:
-            torch.Tensor: Generated image tensor of shape
-                (batch_size, output_nc, height, width).
-        """
-        return self.model(x)
+class DownsampleBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                bias=False,
+            ),
+            nn.InstanceNorm2d(out_channels),
+            nn.ReLU(True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class UpsampleBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.InstanceNorm2d(out_channels),
+            nn.ReLU(True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class ViTUNetGenerator(nn.Module):
+    """
+    UVCGAN-style generator: U-Net backbone with a ViT bottleneck.
+    """
+
+    def __init__(
+        self,
+        input_nc=3,
+        output_nc=3,
+        base_channels=64,
+        vit_depth=4,
+        vit_heads=8,
+        vit_mlp_ratio=4.0,
+        vit_dropout=0.0,
+        use_checkpoint=False,
+    ):
+        super().__init__()
+        self.use_checkpoint = use_checkpoint
+        c1, c2, c3, c4 = (
+            base_channels,
+            base_channels * 2,
+            base_channels * 4,
+            base_channels * 8,
+        )
+
+        self.enc1 = ConvBlock(input_nc, c1)
+        self.down1 = DownsampleBlock(c1, c2)
+        self.enc2 = ConvBlock(c2, c2)
+        self.down2 = DownsampleBlock(c2, c3)
+        self.enc3 = ConvBlock(c3, c3)
+        self.down3 = DownsampleBlock(c3, c4)
+        self.enc4 = ConvBlock(c4, c4)
+        self.down4 = DownsampleBlock(c4, c4)
+
+        self.bottleneck = ConvBlock(c4, c4)
+        self.vit = PixelwiseViT(
+            dim=c4,
+            depth=vit_depth,
+            num_heads=vit_heads,
+            mlp_ratio=vit_mlp_ratio,
+            dropout=vit_dropout,
+        )
+
+        self.up1 = UpsampleBlock(c4, c4)
+        self.dec1 = ConvBlock(c4 + c4, c4)
+        self.up2 = UpsampleBlock(c4, c3)
+        self.dec2 = ConvBlock(c3 + c3, c3)
+        self.up3 = UpsampleBlock(c3, c2)
+        self.dec3 = ConvBlock(c2 + c2, c2)
+        self.up4 = UpsampleBlock(c2, c1)
+        self.dec4 = ConvBlock(c1 + c1, c1)
+
+        self.out_conv = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(c1, output_nc, kernel_size=7),
+            nn.Tanh(),
+        )
+
+    def _cp(self, fn, *args):
+        if self.use_checkpoint and self.training:
+            return checkpoint.checkpoint(fn, *args, use_reentrant=False)
+        return fn(*args)
+
+    def _dec1(self, x, skip):
+        return self.dec1(torch.cat((x, skip), dim=1))
+
+    def _dec2(self, x, skip):
+        return self.dec2(torch.cat((x, skip), dim=1))
+
+    def _dec3(self, x, skip):
+        return self.dec3(torch.cat((x, skip), dim=1))
+
+    def _dec4(self, x, skip):
+        return self.dec4(torch.cat((x, skip), dim=1))
+
+    def forward(self, x):
+        e1 = self._cp(self.enc1, x)
+        d1 = self._cp(self.down1, e1)
+        e2 = self._cp(self.enc2, d1)
+        d2 = self._cp(self.down2, e2)
+        e3 = self._cp(self.enc3, d2)
+        d3 = self._cp(self.down3, e3)
+        e4 = self._cp(self.enc4, d3)
+        d4 = self._cp(self.down4, e4)
+
+        b = self._cp(self.bottleneck, d4)
+        b = self._cp(self.vit, b)
+
+        u1 = self._cp(self.up1, b)
+        u1 = self._cp(self._dec1, u1, e4)
+        u2 = self._cp(self.up2, u1)
+        u2 = self._cp(self._dec2, u2, e3)
+        u3 = self._cp(self.up3, u2)
+        u3 = self._cp(self._dec3, u3, e2)
+        u4 = self._cp(self.up4, u3)
+        u4 = self._cp(self._dec4, u4, e1)
+        return self._cp(self.out_conv, u4)
 
 
 # Weight Initialization
@@ -197,6 +274,10 @@ def init_weights(net):
         if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
             # Normal initialization with mean=0, std=0.02 for conv layers.
             nn.init.normal_(m.weight.data, 0.0, 0.02)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight.data)
+            if m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
         # Initialize instance normalization layers.
         elif isinstance(m, nn.InstanceNorm2d):
             if m.weight is not None:
@@ -211,7 +292,7 @@ def init_weights(net):
 # CycleGAN needs two generators for bidirectional translation:
 # - G_AB (Unstained -> Stained)
 # - G_BA (Stained -> Unstained)
-def getGenerators():
+def getGenerators(use_checkpoint=False):
     """
     Create and initialize two generators for CycleGAN.
 
@@ -220,14 +301,14 @@ def getGenerators():
     different transformations.
 
     Returns:
-        tuple: (G_AB, G_BA) - Two initialized ResNet generators.
+        tuple: (G_AB, G_BA) - Two initialized UVCGAN generators.
     """
     # Determine device (GPU if available, otherwise CPU).
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create two generators with identical architecture.
-    G_AB = ResnetGenerator().to(device)  # Generator Unstained -> Stained
-    G_BA = ResnetGenerator().to(device)  # Generator Stained -> Unstained
+    G_AB = ViTUNetGenerator(use_checkpoint=use_checkpoint).to(device)
+    G_BA = ViTUNetGenerator(use_checkpoint=use_checkpoint).to(device)
 
     # Apply weight initialization to both generators.
     G_AB.apply(init_weights)

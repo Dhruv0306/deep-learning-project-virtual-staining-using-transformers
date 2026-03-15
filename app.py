@@ -4,7 +4,7 @@ from torchvision.utils import save_image
 from PIL import Image
 from PIL import ImageFile
 import math
-from generator import ResnetGenerator
+from generator import ViTUNetGenerator
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -16,8 +16,8 @@ def load_model(checkpoint_path=None, device="cpu"):
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    G_AB = ResnetGenerator().to(device)
-    G_BA = ResnetGenerator().to(device)
+    G_AB = ViTUNetGenerator().to(device)
+    G_BA = ViTUNetGenerator().to(device)
 
     G_AB.load_state_dict(checkpoint["G_AB"])
     G_BA.load_state_dict(checkpoint["G_BA"])

@@ -105,12 +105,14 @@ class CycleGANLoss:
         lambda_identity=5.0,
         lambda_cycle_perceptual=0.1,
         lambda_identity_perceptual=0.05,
+        lambda_gp=10.0,
         device=None,
     ):
         self.lambda_cycle = lambda_cycle
         self.lambda_identity = lambda_identity
         self.lambda_cycle_perceptual = lambda_cycle_perceptual
         self.lambda_identity_perceptual = lambda_identity_perceptual
+        self.lambda_gp = lambda_gp
 
         self.device = (
             device
@@ -127,6 +129,30 @@ class CycleGANLoss:
         # Keep independent replay buffers across training steps for both domains.
         self.fake_A_buffer = ReplayBuffer()
         self.fake_B_buffer = ReplayBuffer()
+
+    def gradient_penalty(self, D, real, fake):
+        """
+        Gradient penalty for improved training stability.
+        """
+        batch_size = real.size(0)
+        epsilon = torch.rand(batch_size, 1, 1, 1, device=real.device)
+        with torch.autocast(device_type=real.device.type, enabled=False):
+            real_f = real.detach().float()
+            fake_f = fake.detach().float()
+            interpolated = (epsilon * real_f + (1.0 - epsilon) * fake_f).requires_grad_(
+                True
+            )
+            pred = D(interpolated)
+            grad = torch.autograd.grad(
+                outputs=pred,
+                inputs=interpolated,
+                grad_outputs=torch.ones_like(pred),
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]
+            grad = grad.view(batch_size, -1)
+            return ((grad.norm(2, dim=1) - 1.0) ** 2).mean()
 
     def get_identity_lambda(self, epoch, total_epochs):
         """
@@ -243,6 +269,11 @@ class CycleGANLoss:
 
         # Total
         loss_D = (loss_real + loss_fake) * 0.5
+
+        # Optional gradient penalty for stability.
+        if self.lambda_gp > 0:
+            gp = self.gradient_penalty(D, real, fake)
+            loss_D = loss_D + self.lambda_gp * gp
 
         return loss_D
 
