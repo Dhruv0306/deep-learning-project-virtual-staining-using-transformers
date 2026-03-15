@@ -158,10 +158,11 @@ def translate_image_from_patches(
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    model_path = input("Enter model path: ")
 
     # Load the model
     G_AB, G_BA = load_model(
-        checkpoint_path="data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_2026_02_24_18_30_51\\final_checkpoint_epoch_200.pth",
+        checkpoint_path=model_path,
         device=device,
     )
 
