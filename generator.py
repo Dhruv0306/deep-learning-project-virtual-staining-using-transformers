@@ -1,29 +1,27 @@
 """
 Generator definition for CycleGAN.
 
-Includes a hybrid encoder/decoder generator with a Swin-Transformer
-bottleneck, weight initialization, and a helper to build the two
-generators required for bidirectional translation.
+Includes a ResNet-based generator, weight initialization, and a helper
+to build the two generators required for bidirectional translation.
 """
 
 # Imports
 import torch
 import torch.nn as nn
-from swin_blocks import SwinTransformerBottleneck
 
 
-# CycleGAN Generator Structure (as implemented here)
+# CycleGAN Generator Structure
 """
 CycleGAN Generator Architecture:
-    Input (H x W x C)
+    Input (256x256x3)
     ->
     7x7 Conv - Initial feature extraction with reflection padding
     ->
-    Downsample (Conv stride 2) x3 - Reduce spatial dimensions while increasing channels
+    Downsample (Conv stride 2) x2 - Reduce spatial dimensions while increasing channels
     ->
-    Swin Transformer bottleneck xN - Local self-attention with windowed shifts
+    ResNet Blocks x6 (or x9 for 256x256) - Feature transformation while preserving structure
     ->
-    Upsample x3 (ConvTranspose) - Restore spatial dimensions while reducing channels
+    Upsample x2 (ConvTranspose) - Restore spatial dimensions while reducing channels
     ->
     7x7 Conv - Final feature mapping to output channels
     ->
@@ -31,33 +29,76 @@ CycleGAN Generator Architecture:
 """
 
 
-# Generator Model
-class Generator(nn.Module):
+# Residual Block (Core Component)
+# This preserves structure -- extremely important in tissue morphology.
+class ResnetBlock(nn.Module):
     """
-    Hybrid encoder/decoder generator for CycleGAN with a Swin bottleneck.
+    Residual block with skip connections for the CycleGAN generator.
 
-    This generator uses a CNN encoder-decoder with a transformer bottleneck
-    for image-to-image translation tasks where spatial structure should be
-    preserved while allowing flexible feature transformation.
+    Uses reflection padding to avoid border artifacts and instance normalization
+    for better style transfer performance. The skip connection helps preserve
+    important structural information during transformation.
+
+    Args:
+        dim (int): Number of input and output channels.
+    """
+
+    def __init__(self, dim):
+        super(ResnetBlock, self).__init__()
+
+        # Sequential block with two conv layers, normalization, and activation.
+        # Reflection padding helps avoid border artifacts in image generation.
+        self.block = nn.Sequential(
+            nn.ReflectionPad2d(1),  # Pad with reflection to maintain image boundaries
+            nn.Conv2d(dim, dim, kernel_size=3, bias=False),  # 3x3 convolution
+            nn.InstanceNorm2d(dim),  # Instance normalization for style transfer
+            nn.ReLU(True),  # ReLU activation with inplace operation
+            nn.ReflectionPad2d(1),  # Second reflection padding
+            nn.Conv2d(dim, dim, kernel_size=3, bias=False),  # Second 3x3 convolution
+            nn.InstanceNorm2d(dim),  # Second instance normalization (no activation)
+        )
+
+    def forward(self, x):
+        """
+        Forward pass with residual connection.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, dim, height, width).
+
+        Returns:
+            torch.Tensor: Output tensor with same shape as input.
+        """
+        # Add input to the output of the block (residual connection).
+        return x + self.block(x)
+
+
+# Generator Model
+class ResnetGenerator(nn.Module):
+    """
+    ResNet-based generator for CycleGAN.
+
+    This generator uses an encoder-decoder architecture with residual blocks
+    in the middle. It is designed for image-to-image translation tasks where
+    preserving structural information is crucial.
 
     Architecture:
-    - Encoder: 7x7 conv + 3 downsampling layers.
-    - Bottleneck: Swin Transformer blocks (n_blocks).
-    - Decoder: 3 upsampling layers + 7x7 conv + tanh.
+    - Encoder: 7x7 conv + 2 downsampling layers.
+    - Transformer: n_blocks residual blocks.
+    - Decoder: 2 upsampling layers + 7x7 conv + tanh.
 
     Args:
         input_nc (int): Number of input channels (default: 3 for RGB).
         output_nc (int): Number of output channels (default: 3 for RGB).
-        n_blocks (int): Number of transformer blocks in the bottleneck.
+        n_blocks (int): Number of residual blocks (default: 9 for 256x256 images).
     """
 
     def __init__(self, input_nc=3, output_nc=3, n_blocks=9):
-        super(Generator, self).__init__()
+        super(ResnetGenerator, self).__init__()
 
         model = []
 
-        # Initial 7x7 convolution for low-level feature extraction.
-        # Reflection padding reduces edge artifacts.
+        # Initial 7x7 convolution - feature extraction from input image.
+        # Uses reflection padding to avoid border artifacts.
         model += [
             nn.ReflectionPad2d(3),  # Pad by 3 pixels on each side for 7x7 kernel
             nn.Conv2d(input_nc, 64, kernel_size=7, bias=False),  # 7x7 conv to 64 channels
@@ -65,8 +106,8 @@ class Generator(nn.Module):
             nn.ReLU(True),  # ReLU activation
         ]
 
-        # Downsampling: reduce spatial resolution and expand channels.
-        # Two layers: 64 -> 128 -> 256 channels, H/W reduced by 4x.
+        # Downsampling - reduce spatial dimensions while increasing feature channels.
+        # Two downsampling layers: 64->128->256 channels, size/4.
         in_features = 64
         out_features = in_features * 2
 
@@ -86,11 +127,14 @@ class Generator(nn.Module):
             in_features = out_features
             out_features *= 2  # Double channels for next layer
 
-        # Swin Transformer bottleneck for localized self-attention.
-        model += [SwinTransformerBottleneck(dim=in_features, n_blocks=n_blocks, window_size=8)]
+        # Residual blocks - feature transformation while preserving structure.
+        # These blocks allow the network to learn complex transformations
+        # while maintaining important structural information through skip connections.
+        for _ in range(n_blocks):
+            model += [ResnetBlock(in_features)]
 
-        # Upsampling: restore spatial resolution and reduce channels.
-        # Two layers: 256 -> 128 -> 64 channels, H/W increased by 4x.
+        # Upsampling - restore spatial dimensions while reducing feature channels.
+        # Two upsampling layers: 256->128->64 channels, size*4.
         out_features = in_features // 2
 
         for _ in range(2):  # Two upsampling layers
@@ -110,7 +154,8 @@ class Generator(nn.Module):
             in_features = out_features
             out_features = in_features // 2  # Halve channels for next layer
 
-        # Final layer: map features to output image with tanh activation.
+        # Final layer - map features to output image.
+        # 7x7 convolution to output channels with tanh activation.
         model += [
             nn.ReflectionPad2d(3),  # Reflection padding for 7x7 kernel
             nn.Conv2d(64, output_nc, kernel_size=7),  # Final 7x7 conv to output channels
@@ -166,7 +211,7 @@ def init_weights(net):
 # CycleGAN needs two generators for bidirectional translation:
 # - G_AB (Unstained -> Stained)
 # - G_BA (Stained -> Unstained)
-def getGenerators(n_blocks=9):
+def getGenerators():
     """
     Create and initialize two generators for CycleGAN.
 
@@ -175,14 +220,14 @@ def getGenerators(n_blocks=9):
     different transformations.
 
     Returns:
-        tuple: (G_AB, G_BA) - Two initialized generator instances.
+        tuple: (G_AB, G_BA) - Two initialized ResNet generators.
     """
     # Determine device (GPU if available, otherwise CPU).
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create two generators with identical architecture.
-    G_AB = Generator(n_blocks=n_blocks).to(device)  # Generator Unstained -> Stained
-    G_BA = Generator(n_blocks=n_blocks).to(device)  # Generator Stained -> Unstained
+    G_AB = ResnetGenerator().to(device)  # Generator Unstained -> Stained
+    G_BA = ResnetGenerator().to(device)  # Generator Stained -> Unstained
 
     # Apply weight initialization to both generators.
     G_AB.apply(init_weights)
@@ -200,4 +245,4 @@ def getGenerators(n_blocks=9):
 
 
 if __name__ == "__main__":
-    G_AB, G_BA = getGenerators(n_blocks=6)
+    G_AB, G_BA = getGenerators()
