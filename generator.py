@@ -211,7 +211,7 @@ def init_weights(net):
 # CycleGAN needs two generators for bidirectional translation:
 # - G_AB (Unstained -> Stained)
 # - G_BA (Stained -> Unstained)
-def getGenerators():
+def getGenerators(n_blocks=9):
     """
     Create and initialize two generators for CycleGAN.
 
@@ -226,8 +226,8 @@ def getGenerators():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create two generators with identical architecture.
-    G_AB = ResnetGenerator().to(device)  # Generator Unstained -> Stained
-    G_BA = ResnetGenerator().to(device)  # Generator Stained -> Unstained
+    G_AB = ResnetGenerator(n_blocks=n_blocks).to(device)  # Generator Unstained -> Stained
+    G_BA = ResnetGenerator(n_blocks=n_blocks).to(device)  # Generator Stained -> Unstained
 
     # Apply weight initialization to both generators.
     G_AB.apply(init_weights)
@@ -245,4 +245,4 @@ def getGenerators():
 
 
 if __name__ == "__main__":
-    G_AB, G_BA = getGenerators()
+    G_AB, G_BA = getGenerators(n_blocks=9)
