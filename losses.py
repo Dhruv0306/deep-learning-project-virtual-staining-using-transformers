@@ -8,6 +8,7 @@ with GAN, cycle-consistency, identity, and perceptual terms.
 # Imports
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 from replay_buffer import ReplayBuffer
 
@@ -26,9 +27,10 @@ class VGGPerceptualLoss(nn.Module):
     pretrained ImageNet weights and keeps all parameters frozen.
     """
 
-    def __init__(self):
+    def __init__(self, resize_to=128):
         super(VGGPerceptualLoss, self).__init__()
         self.eval()
+        self.resize_to = resize_to
         vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
         self.slice1 = nn.Sequential(*list(vgg.children())[:4])  # relu1_2
         self.slice2 = nn.Sequential(*list(vgg.children())[4:9])  # relu2_2
@@ -58,6 +60,16 @@ class VGGPerceptualLoss(nn.Module):
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
+
+        if self.resize_to is not None:
+            h, w = x.shape[-2], x.shape[-1]
+            if h != self.resize_to or w != self.resize_to:
+                x = F.interpolate(
+                    x, size=(self.resize_to, self.resize_to), mode="bilinear", align_corners=False
+                )
+                y = F.interpolate(
+                    y, size=(self.resize_to, self.resize_to), mode="bilinear", align_corners=False
+                )
 
         x = self.normalize(x)
         y = self.normalize(y)
@@ -106,6 +118,7 @@ class CycleGANLoss:
         lambda_cycle_perceptual=0.1,
         lambda_identity_perceptual=0.05,
         lambda_gp=10.0,
+        perceptual_resize=128,
         device=None,
     ):
         self.lambda_cycle = lambda_cycle
@@ -113,6 +126,7 @@ class CycleGANLoss:
         self.lambda_cycle_perceptual = lambda_cycle_perceptual
         self.lambda_identity_perceptual = lambda_identity_perceptual
         self.lambda_gp = lambda_gp
+        self.perceptual_resize = perceptual_resize
 
         self.device = (
             device
@@ -124,7 +138,9 @@ class CycleGANLoss:
         self.criterion_GAN = nn.MSELoss()  # LSGAN
         self.criterion_cycle = nn.L1Loss()
         self.criterion_identity = nn.L1Loss()
-        self.criterion_perceptual = VGGPerceptualLoss().to(device=self.device)
+        self.criterion_perceptual = VGGPerceptualLoss(
+            resize_to=self.perceptual_resize
+        ).to(device=self.device)
 
         # Keep independent replay buffers across training steps for both domains.
         self.fake_A_buffer = ReplayBuffer()
