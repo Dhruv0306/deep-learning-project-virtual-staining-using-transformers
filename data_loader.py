@@ -167,7 +167,7 @@ def getDataLoader(epoch_size=None):
         num_workers=4,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         drop_last=True,
     )
 

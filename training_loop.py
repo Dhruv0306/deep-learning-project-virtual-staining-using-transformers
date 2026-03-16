@@ -54,7 +54,7 @@ def train(
         epoch_size=3000 if epoch_size is None else epoch_size
     )
     # Initialize models.
-    G_AB, G_BA = getGenerators(use_checkpoint=True)
+    G_AB, G_BA = getGenerators()
     D_A, D_B = getDiscriminators()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

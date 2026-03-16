@@ -10,7 +10,6 @@ Includes:
 # Imports
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as checkpoint
 
 
 # ---------------------------
@@ -172,10 +171,8 @@ class ViTUNetGenerator(nn.Module):
         vit_heads=8,
         vit_mlp_ratio=4.0,
         vit_dropout=0.0,
-        use_checkpoint=False,
     ):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
         c1, c2, c3, c4 = (
             base_channels,
             base_channels * 2,
@@ -216,45 +213,28 @@ class ViTUNetGenerator(nn.Module):
             nn.Tanh(),
         )
 
-    def _cp(self, fn, *args):
-        if self.use_checkpoint and self.training:
-            return checkpoint.checkpoint(fn, *args, use_reentrant=False)
-        return fn(*args)
-
-    def _dec1(self, x, skip):
-        return self.dec1(torch.cat((x, skip), dim=1))
-
-    def _dec2(self, x, skip):
-        return self.dec2(torch.cat((x, skip), dim=1))
-
-    def _dec3(self, x, skip):
-        return self.dec3(torch.cat((x, skip), dim=1))
-
-    def _dec4(self, x, skip):
-        return self.dec4(torch.cat((x, skip), dim=1))
-
     def forward(self, x):
-        e1 = self._cp(self.enc1, x)
-        d1 = self._cp(self.down1, e1)
-        e2 = self._cp(self.enc2, d1)
-        d2 = self._cp(self.down2, e2)
-        e3 = self._cp(self.enc3, d2)
-        d3 = self._cp(self.down3, e3)
-        e4 = self._cp(self.enc4, d3)
-        d4 = self._cp(self.down4, e4)
+        e1 = self.enc1(x)
+        d1 = self.down1(e1)
+        e2 = self.enc2(d1)
+        d2 = self.down2(e2)
+        e3 = self.enc3(d2)
+        d3 = self.down3(e3)
+        e4 = self.enc4(d3)
+        d4 = self.down4(e4)
 
-        b = self._cp(self.bottleneck, d4)
-        b = self._cp(self.vit, b)
+        b = self.bottleneck(d4)
+        b = self.vit(b)
 
-        u1 = self._cp(self.up1, b)
-        u1 = self._cp(self._dec1, u1, e4)
-        u2 = self._cp(self.up2, u1)
-        u2 = self._cp(self._dec2, u2, e3)
-        u3 = self._cp(self.up3, u2)
-        u3 = self._cp(self._dec3, u3, e2)
-        u4 = self._cp(self.up4, u3)
-        u4 = self._cp(self._dec4, u4, e1)
-        return self._cp(self.out_conv, u4)
+        u1 = self.up1(b)
+        u1 = self.dec1(torch.cat((u1, e4), dim=1))
+        u2 = self.up2(u1)
+        u2 = self.dec2(torch.cat((u2, e3), dim=1))
+        u3 = self.up3(u2)
+        u3 = self.dec3(torch.cat((u3, e2), dim=1))
+        u4 = self.up4(u3)
+        u4 = self.dec4(torch.cat((u4, e1), dim=1))
+        return self.out_conv(u4)
 
 
 # Weight Initialization
@@ -292,7 +272,7 @@ def init_weights(net):
 # CycleGAN needs two generators for bidirectional translation:
 # - G_AB (Unstained -> Stained)
 # - G_BA (Stained -> Unstained)
-def getGenerators(use_checkpoint=False):
+def getGenerators():
     """
     Create and initialize two generators for CycleGAN.
 
@@ -307,8 +287,8 @@ def getGenerators(use_checkpoint=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create two generators with identical architecture.
-    G_AB = ViTUNetGenerator(use_checkpoint=use_checkpoint).to(device)
-    G_BA = ViTUNetGenerator(use_checkpoint=use_checkpoint).to(device)
+    G_AB = ViTUNetGenerator().to(device)
+    G_BA = ViTUNetGenerator().to(device)
 
     # Apply weight initialization to both generators.
     G_AB.apply(init_weights)
