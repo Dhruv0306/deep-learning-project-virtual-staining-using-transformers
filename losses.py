@@ -172,14 +172,14 @@ class CycleGANLoss:
 
     def get_identity_lambda(self, epoch, total_epochs):
         """
-        Decay the identity loss after 55% of training.
+        Decay the identity loss after 50% of training.
 
         This helps stabilize early training but reduces the identity constraint
         later so generators can better focus on translation.
         """
-        if epoch <= 0.55 * total_epochs:
+        if epoch <= 0.50 * total_epochs:
             return self.lambda_identity
-        return self.lambda_identity * (0.997 ** (epoch - 0.55 * total_epochs))
+        return self.lambda_identity * (0.997 ** (epoch - 0.5 * total_epochs))
 
     def generator_loss(self, real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, total_epochs):
         """
@@ -276,7 +276,7 @@ class CycleGANLoss:
         """
         # Real loss (LSGAN uses targets close to 1).
         pred_real = D(real)
-        loss_real = self.criterion_GAN(pred_real, 0.95 * torch.ones_like(pred_real))
+        loss_real = self.criterion_GAN(pred_real, 0.97 * torch.ones_like(pred_real))
 
         # Fake loss (use buffered fakes to reduce model oscillation).
         fake_buffer = replay_buffer.push_and_pop(fake) if replay_buffer else fake

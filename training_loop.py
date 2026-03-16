@@ -62,9 +62,10 @@ def train(
     loss_fn = CycleGANLoss(
         lambda_cycle=10.0,
         lambda_identity=5.0,
-        lambda_cycle_perceptual=0.1,
-        lambda_identity_perceptual=0.05,
+        lambda_cycle_perceptual=0.2,
+        lambda_identity_perceptual=0.1,
         lambda_gp=10.0,
+        perceptual_resize=160,
         device=device,
     )
     # Mixed precision is used only when CUDA is available.

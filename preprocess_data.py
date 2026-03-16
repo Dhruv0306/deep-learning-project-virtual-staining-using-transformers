@@ -42,6 +42,28 @@ def extract_patches_pil(img, patch_size=256, stride=256):
     return patches
 
 
+def estimate_tissue_fraction(patch, white_thresh=220, sat_thresh=0.05):
+    """
+    Estimate tissue coverage in a patch using simple color heuristics.
+
+    Args:
+        patch (PIL.Image.Image): RGB patch.
+        white_thresh (int): RGB threshold for near-white background.
+        sat_thresh (float): Saturation threshold for low-color background.
+
+    Returns:
+        float: Fraction of pixels likely to be tissue.
+    """
+    arr = np.asarray(patch).astype(np.float32)
+    maxc = arr.max(axis=2)
+    minc = arr.min(axis=2)
+    sat = (maxc - minc) / (maxc + 1e-6)
+    is_white = (arr > white_thresh).all(axis=2)
+    is_low_sat = sat < sat_thresh
+    background = is_white | is_low_sat
+    return 1.0 - background.mean()
+
+
 def split_filenames(file_list, train_ratio=0.8, seed=42):
     """
     Split a list of filenames into train and test subsets.
@@ -62,7 +84,15 @@ def split_filenames(file_list, train_ratio=0.8, seed=42):
     return file_list[:split_idx], file_list[split_idx:]
 
 
-def save_patches(image_path, save_dir, patch_size=256):
+def save_patches(
+    image_path,
+    save_dir,
+    patch_size=256,
+    tissue_threshold=0.1,
+    background_keep_ratio=0.1,
+    white_thresh=220,
+    sat_thresh=0.05,
+):
     """
     Load an image, extract patches, and write them as PNGs.
 
@@ -70,6 +100,10 @@ def save_patches(image_path, save_dir, patch_size=256):
         image_path (str): Path to the source image.
         save_dir (str): Directory to save patches.
         patch_size (int): Square patch size.
+        tissue_threshold (float): Minimum tissue fraction to keep as tissue patch.
+        background_keep_ratio (float): Probability of keeping a background patch.
+        white_thresh (int): RGB threshold for near-white background.
+        sat_thresh (float): Saturation threshold for low-color background.
     """
     # Convert to RGB to guarantee 3-channel patches for CycleGAN-style datasets.
     img = Image.open(image_path).convert("RGB")
@@ -79,10 +113,25 @@ def save_patches(image_path, save_dir, patch_size=256):
     base = os.path.splitext(os.path.basename(image_path))[0]
     print(f"Processing Patch for image {base}")
 
+    kept_tissue = 0
+    kept_background = 0
     for i, patch in enumerate(patches):
-        # Keep the patch as 8-bit RGB; normalization is handled during data loading.
-        patch = patch.resize((patch_size, patch_size), Image.Resampling.BICUBIC)
-        patch.save(os.path.join(save_dir, f"{base}_{i}.png"))
+        tissue_fraction = estimate_tissue_fraction(
+            patch, white_thresh=white_thresh, sat_thresh=sat_thresh
+        )
+        is_tissue = tissue_fraction >= tissue_threshold
+        keep_background = np.random.rand() < background_keep_ratio
+        if is_tissue or keep_background:
+            # Keep the patch as 8-bit RGB; normalization is handled during data loading.
+            patch = patch.resize((patch_size, patch_size), Image.Resampling.BICUBIC)
+            patch.save(os.path.join(save_dir, f"{base}_{i}.png"))
+            if is_tissue:
+                kept_tissue += 1
+            else:
+                kept_background += 1
+    print(
+        f"Saved patches for {base}: tissue={kept_tissue} background={kept_background}"
+    )
 
 
 def main():
@@ -110,6 +159,13 @@ def main():
         plt.title("Sample Unstained Tissue Image")
         plt.axis("off")
 
+    # Patch filtering controls.
+    tissue_threshold = 0.1
+    background_keep_ratio = 0.1
+    white_thresh = 220
+    sat_thresh = 0.05
+    np.random.seed(42)
+
     # CycleGAN-style output folders.
     os.makedirs(f"{DATASET_DIR}\\trainA", exist_ok=True)
     os.makedirs(f"{DATASET_DIR}\\trainB", exist_ok=True)
@@ -128,13 +184,27 @@ def main():
     print(f"Saving Unstained TRAIN patches")
     for img_name in trainA_files:
         # Unstained images become domain A.
-        save_patches(os.path.join(UNSTAINED_DIR, img_name), f"{DATASET_DIR}\\trainA")
+        save_patches(
+            os.path.join(UNSTAINED_DIR, img_name),
+            f"{DATASET_DIR}\\trainA",
+            tissue_threshold=tissue_threshold,
+            background_keep_ratio=background_keep_ratio,
+            white_thresh=white_thresh,
+            sat_thresh=sat_thresh,
+        )
     print(f"Saved Unstained Train Patch")
 
     print(f"Saving Unstained TEST patches")
     for img_name in testA_files:
         # Unstained images become domain A.
-        save_patches(os.path.join(UNSTAINED_DIR, img_name), f"{DATASET_DIR}\\testA")
+        save_patches(
+            os.path.join(UNSTAINED_DIR, img_name),
+            f"{DATASET_DIR}\\testA",
+            tissue_threshold=tissue_threshold,
+            background_keep_ratio=background_keep_ratio,
+            white_thresh=white_thresh,
+            sat_thresh=sat_thresh,
+        )
     print(f"Saved Unstained TEST Patch")
 
     print(f"Saving Stained Images Patch")
@@ -149,13 +219,27 @@ def main():
     print(f"Saving Stained TRAIN patches")
     for img_name in trainB_files:
         # Stained images become domain B.
-        save_patches(os.path.join(STAINED_DIR, img_name), f"{DATASET_DIR}\\trainB")
+        save_patches(
+            os.path.join(STAINED_DIR, img_name),
+            f"{DATASET_DIR}\\trainB",
+            tissue_threshold=tissue_threshold,
+            background_keep_ratio=background_keep_ratio,
+            white_thresh=white_thresh,
+            sat_thresh=sat_thresh,
+        )
     print(f"Saved Stained Train Patch")
 
     print(f"Saving Stained TEST patches")
     for img_name in testB_files:
         # Stained images become domain B.
-        save_patches(os.path.join(STAINED_DIR, img_name), f"{DATASET_DIR}\\testB")
+        save_patches(
+            os.path.join(STAINED_DIR, img_name),
+            f"{DATASET_DIR}\\testB",
+            tissue_threshold=tissue_threshold,
+            background_keep_ratio=background_keep_ratio,
+            white_thresh=white_thresh,
+            sat_thresh=sat_thresh,
+        )
     print(f"Saved Stained TEST Patch")
 
 
