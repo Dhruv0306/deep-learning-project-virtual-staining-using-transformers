@@ -260,7 +260,7 @@ class CycleGANLoss:
         """
         # Real loss (LSGAN uses targets close to 1).
         pred_real = D(real)
-        loss_real = self.criterion_GAN(pred_real, 0.8 * torch.ones_like(pred_real))
+        loss_real = self.criterion_GAN(pred_real, 0.95 * torch.ones_like(pred_real))
 
         # Fake loss (use buffered fakes to reduce model oscillation).
         fake_buffer = replay_buffer.push_and_pop(fake) if replay_buffer else fake

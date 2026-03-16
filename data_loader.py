@@ -162,12 +162,12 @@ def getDataLoader(epoch_size=None):
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=8,
+        batch_size=4,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=True,
     )
 
