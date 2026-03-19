@@ -28,6 +28,7 @@ import torch.optim as optim
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard import SummaryWriter
+from typing import Optional
 
 from advanced_losses import AdvancedCycleGANLoss
 from config import UVCGANConfig, get_default_config
@@ -92,11 +93,7 @@ def _global_grad_norm(parameters) -> float:
     Returns:
         Gradient norm as a Python float (0.0 when no gradients exist).
     """
-    grads = [
-        p.grad.detach().float()
-        for p in parameters
-        if p.grad is not None
-    ]
+    grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
         return 0.0
     return float(torch.norm(torch.stack([g.norm() for g in grads])))
@@ -107,7 +104,7 @@ def _global_grad_norm(parameters) -> float:
 # ---------------------------------------------------------------------------
 
 
-def train_v2(cfg: UVCGANConfig = None):
+def train_v2(cfg: Optional[UVCGANConfig] = None):
     """
     Train the UVCGAN v2 generators and multi-scale discriminators.
 
@@ -181,9 +178,7 @@ def train_v2(cfg: UVCGANConfig = None):
     early_stopping = EarlyStopping(
         patience=max(
             1,
-            math.ceil(
-                tcfg.early_stopping_patience / tcfg.early_stopping_interval
-            ),
+            math.ceil(tcfg.early_stopping_patience / tcfg.early_stopping_interval),
         ),
         min_delta=1e-5,
         divergence_threshold=tcfg.divergence_threshold,
@@ -294,9 +289,7 @@ def train_v2(cfg: UVCGANConfig = None):
             scaler.scale(loss_D_A).backward()
             if tcfg.grad_clip_norm > 0.0:
                 scaler.unscale_(optimizer_D_A)
-                torch.nn.utils.clip_grad_norm_(
-                    D_A.parameters(), tcfg.grad_clip_norm
-                )
+                torch.nn.utils.clip_grad_norm_(D_A.parameters(), tcfg.grad_clip_norm)
             scaler.step(optimizer_D_A)
             scaler.update()
 
@@ -308,9 +301,7 @@ def train_v2(cfg: UVCGANConfig = None):
             scaler.scale(loss_D_B).backward()
             if tcfg.grad_clip_norm > 0.0:
                 scaler.unscale_(optimizer_D_B)
-                torch.nn.utils.clip_grad_norm_(
-                    D_B.parameters(), tcfg.grad_clip_norm
-                )
+                torch.nn.utils.clip_grad_norm_(D_B.parameters(), tcfg.grad_clip_norm)
             scaler.step(optimizer_D_B)
             scaler.update()
 
@@ -376,9 +367,7 @@ def train_v2(cfg: UVCGANConfig = None):
 
         # ---- Checkpoint ----
         if (epoch + 1) % 20 == 0:
-            ckpt_path = os.path.join(
-                model_dir, f"checkpoint_epoch_{epoch + 1}.pth"
-            )
+            ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -419,9 +408,7 @@ def train_v2(cfg: UVCGANConfig = None):
                 writer=writer,
                 epoch=epoch + 1,
             )
-            avg_ssim = (
-                avg_metrics.get("ssim_A", 0) + avg_metrics.get("ssim_B", 0)
-            ) / 2
+            avg_ssim = (avg_metrics.get("ssim_A", 0) + avg_metrics.get("ssim_B", 0)) / 2
             tracked_losses = {
                 "G": avg_loss_G,
                 "D_A": avg_loss_D_A,
@@ -441,7 +428,9 @@ def train_v2(cfg: UVCGANConfig = None):
             )
             writer.add_scalar("EarlyStopping/avg_ssim", avg_ssim, epoch + 1)
             writer.add_scalar("EarlyStopping/loss_G", avg_loss_G, epoch + 1)
-            writer.add_scalar("EarlyStopping/counter", early_stopping.counter, epoch + 1)
+            writer.add_scalar(
+                "EarlyStopping/counter", early_stopping.counter, epoch + 1
+            )
 
             if should_stop:
                 print(f"Early stopping triggered at epoch {epoch + 1}.")

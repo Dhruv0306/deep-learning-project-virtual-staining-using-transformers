@@ -64,7 +64,7 @@ def _conv_block(
     )
     if use_spectral:
         conv = spectral_norm(conv)
-    layers = [conv]
+    layers: list[nn.Module] = [conv]
     if use_norm:
         layers.append(nn.InstanceNorm2d(out_channels))
     layers.append(nn.LeakyReLU(0.2, inplace=True))
@@ -94,7 +94,7 @@ class SpectralNormDiscriminator(nn.Module):
         use_spectral_norm: bool = True,
     ):
         super().__init__()
-        layers = [
+        layers: list[nn.Module] = [
             # First layer – no normalisation on the input.
             _conv_block(
                 input_nc,
@@ -243,10 +243,13 @@ def getDiscriminatorsV2(
         base_channels=base_channels,
         n_layers=n_layers,
         num_scales=num_scales,
-        use_spectral_norm=use_spectral_norm,
     )
-    D_A = MultiScaleDiscriminator(**kwargs).to(device)
-    D_B = MultiScaleDiscriminator(**kwargs).to(device)
+    D_A = MultiScaleDiscriminator(**kwargs, use_spectral_norm=use_spectral_norm).to(
+        device
+    )
+    D_B = MultiScaleDiscriminator(**kwargs, use_spectral_norm=use_spectral_norm).to(
+        device
+    )
 
     D_A.apply(init_weights)
     D_B.apply(init_weights)

@@ -294,7 +294,9 @@ class CrossDomainFusion(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def forward(self, feat_self: torch.Tensor, feat_other: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, feat_self: torch.Tensor, feat_other: torch.Tensor
+    ) -> torch.Tensor:
         """
         Fuse own skip features with the other generator's skip features.
 
@@ -390,17 +392,11 @@ class ViTUNetGeneratorV2(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.down1 = DownBlock(c1, c2)
-        self.res_enc1 = nn.Sequential(
-            ResidualConvBlock(c2), ResidualConvBlock(c2)
-        )
+        self.res_enc1 = nn.Sequential(ResidualConvBlock(c2), ResidualConvBlock(c2))
         self.down2 = DownBlock(c2, c3)
-        self.res_enc2 = nn.Sequential(
-            ResidualConvBlock(c3), ResidualConvBlock(c3)
-        )
+        self.res_enc2 = nn.Sequential(ResidualConvBlock(c3), ResidualConvBlock(c3))
         self.down3 = DownBlock(c3, c4)
-        self.res_enc3 = nn.Sequential(
-            ResidualConvBlock(c4), ResidualConvBlock(c4)
-        )
+        self.res_enc3 = nn.Sequential(ResidualConvBlock(c4), ResidualConvBlock(c4))
         self.down4 = DownBlock(c4, c4)
 
         # ---- Bottleneck ----
@@ -625,17 +621,24 @@ def getGeneratorsV2(
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    kwargs = dict(
-        base_channels=base_channels,
-        vit_depth=vit_depth,
-        vit_heads=vit_heads,
+    G_AB = ViTUNetGeneratorV2(
+        base_channels=int(base_channels),
+        vit_depth=int(vit_depth),
+        vit_heads=int(vit_heads),
         vit_mlp_ratio=vit_mlp_ratio,
         vit_dropout=vit_dropout,
         layerscale_init=layerscale_init,
-        use_cross_domain=use_cross_domain,
-    )
-    G_AB = ViTUNetGeneratorV2(**kwargs).to(device)
-    G_BA = ViTUNetGeneratorV2(**kwargs).to(device)
+        use_cross_domain=bool(use_cross_domain),
+    ).to(device)
+    G_BA = ViTUNetGeneratorV2(
+        base_channels=int(base_channels),
+        vit_depth=int(vit_depth),
+        vit_heads=int(vit_heads),
+        vit_mlp_ratio=vit_mlp_ratio,
+        vit_dropout=vit_dropout,
+        layerscale_init=layerscale_init,
+        use_cross_domain=bool(use_cross_domain),
+    ).to(device)
 
     G_AB.apply(init_weights_v2)
     G_BA.apply(init_weights_v2)

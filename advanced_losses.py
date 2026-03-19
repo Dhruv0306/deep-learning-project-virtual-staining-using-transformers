@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from typing import Optional
 
 from replay_buffer import ReplayBuffer
 
@@ -47,10 +48,10 @@ class VGGPerceptualLossV2(nn.Module):
         self.weights = weights
 
         vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
-        self.slice1 = nn.Sequential(*list(vgg.children())[:4])    # relu1_2
-        self.slice2 = nn.Sequential(*list(vgg.children())[4:9])   # relu2_2
+        self.slice1 = nn.Sequential(*list(vgg.children())[:4])  # relu1_2
+        self.slice2 = nn.Sequential(*list(vgg.children())[4:9])  # relu2_2
         self.slice3 = nn.Sequential(*list(vgg.children())[9:18])  # relu3_4
-        self.slice4 = nn.Sequential(*list(vgg.children())[18:27]) # relu4_4
+        self.slice4 = nn.Sequential(*list(vgg.children())[18:27])  # relu4_4
 
         self.register_buffer(
             "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -63,7 +64,9 @@ class VGGPerceptualLossV2(nn.Module):
             param.requires_grad = False
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mean) / self.std
+        mean: torch.Tensor = self.mean.to(x.device).to(x.dtype)  # type: ignore
+        std: torch.Tensor = self.std.to(x.device).to(x.dtype)  # type: ignore
+        return (x - mean) / std
 
     def _extract(self, x: torch.Tensor):
         h1 = self.slice1(x)
@@ -109,8 +112,8 @@ class VGGPerceptualLossV2(nn.Module):
         yf = self._extract(y)
 
         loss = sum(
-            w * F.l1_loss(xfi, yfi)
-            for w, xfi, yfi in zip(self.weights, xf, yf)
+            (w * F.l1_loss(xfi, yfi) for w, xfi, yfi in zip(self.weights, xf, yf)),
+            torch.tensor(0.0, device=x.device),
         )
         return loss
 
@@ -212,7 +215,7 @@ class ContrastiveLoss(nn.Module):
         Returns:
             Scalar contrastive loss.
         """
-        z_a = self._project(anchor)    # (N, proj_dim)
+        z_a = self._project(anchor)  # (N, proj_dim)
         z_p = self._project(positive)  # (N, proj_dim)
         z_n = self._project(negative)  # (N, proj_dim)
 
@@ -257,7 +260,9 @@ class WGANGPLoss:
             Scalar generator loss.
         """
         if isinstance(disc_fake_outputs, (list, tuple)):
-            return -sum(o.mean() for o in disc_fake_outputs) / len(disc_fake_outputs)
+            return -sum((o.mean() for o in disc_fake_outputs), torch.tensor(0.0)) / len(
+                disc_fake_outputs
+            )
         return -disc_fake_outputs.mean()
 
     @staticmethod
@@ -273,15 +278,21 @@ class WGANGPLoss:
             Scalar discriminator loss (positive → discriminator improving).
         """
         if isinstance(disc_real_outputs, (list, tuple)):
-            loss_real = sum(o.mean() for o in disc_real_outputs) / len(disc_real_outputs)
-            loss_fake = sum(o.mean() for o in disc_fake_outputs) / len(disc_fake_outputs)
+            loss_real = sum(
+                (o.mean() for o in disc_real_outputs), torch.tensor(0.0)
+            ) / len(disc_real_outputs)
+            loss_fake = sum(
+                (o.mean() for o in disc_fake_outputs), torch.tensor(0.0)
+            ) / len(disc_fake_outputs)
         else:
             loss_real = disc_real_outputs.mean()
             loss_fake = disc_fake_outputs.mean()
         return loss_fake - loss_real
 
     @staticmethod
-    def gradient_penalty(D: nn.Module, real: torch.Tensor, fake: torch.Tensor) -> torch.Tensor:
+    def gradient_penalty(
+        D: nn.Module, real: torch.Tensor, fake: torch.Tensor
+    ) -> torch.Tensor:
         """
         Compute the gradient penalty for a discriminator.
 
@@ -304,7 +315,7 @@ class WGANGPLoss:
             pred = D(interp)
             if isinstance(pred, (list, tuple)):
                 # Sum across scales so grad flows through all.
-                pred_sum = sum(p.sum() for p in pred)
+                pred_sum = sum((p.sum() for p in pred), torch.tensor(0.0))
                 grad = torch.autograd.grad(
                     outputs=pred_sum,
                     inputs=interp,
@@ -400,9 +411,9 @@ class AdvancedCycleGANLoss:
         # Loss modules
         self.criterion_cycle = nn.L1Loss()
         self.criterion_identity = nn.L1Loss()
-        self.criterion_perceptual = VGGPerceptualLossV2(
-            resize_to=perceptual_resize
-        ).to(self.device)
+        self.criterion_perceptual = VGGPerceptualLossV2(resize_to=perceptual_resize).to(
+            self.device
+        )
         self.criterion_spectral = SpectralLoss()
         self.wgan = WGANGPLoss()
 
@@ -440,7 +451,8 @@ class AdvancedCycleGANLoss:
         if epoch <= self.identity_decay_start * total_epochs:
             return self.lambda_identity
         return self.lambda_identity * (
-            self.identity_decay_rate ** (epoch - self.identity_decay_start * total_epochs)
+            self.identity_decay_rate
+            ** (epoch - self.identity_decay_start * total_epochs)
         )
 
     # ------------------------------------------------------------------
@@ -467,11 +479,17 @@ class AdvancedCycleGANLoss:
         def _lsgan(real_out, fake_out):
             if isinstance(real_out, (list, tuple)):
                 r = sum(
-                    self.criterion_GAN(r, self.lsgan_real_label * torch.ones_like(r))
-                    for r in real_out
+                    (
+                        self.criterion_GAN(
+                            r, self.lsgan_real_label * torch.ones_like(r)
+                        )
+                        for r in real_out
+                    ),
+                    torch.tensor(0.0),
                 ) / len(real_out)
                 f = sum(
-                    self.criterion_GAN(f, torch.zeros_like(f)) for f in fake_out
+                    (self.criterion_GAN(f, torch.zeros_like(f)) for f in fake_out),
+                    torch.tensor(0.0),
                 ) / len(fake_out)
             else:
                 r = self.criterion_GAN(
@@ -498,7 +516,8 @@ class AdvancedCycleGANLoss:
         # LSGAN fallback.
         if isinstance(disc_fake_outputs, (list, tuple)):
             return sum(
-                self.criterion_GAN(o, torch.ones_like(o)) for o in disc_fake_outputs
+                (self.criterion_GAN(o, torch.ones_like(o)) for o in disc_fake_outputs),
+                torch.tensor(0.0),
             ) / len(disc_fake_outputs)
         return self.criterion_GAN(disc_fake_outputs, torch.ones_like(disc_fake_outputs))
 
@@ -604,7 +623,7 @@ class AdvancedCycleGANLoss:
         return loss_G, fake_A, fake_B
 
     def discriminator_loss(
-        self, D, real, fake, replay_buffer: ReplayBuffer = None
+        self, D, real, fake, replay_buffer: Optional[ReplayBuffer] = None
     ) -> torch.Tensor:
         """
         Compute discriminator loss with optional replay buffer.
