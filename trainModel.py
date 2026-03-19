@@ -10,6 +10,8 @@ from datetime import datetime
 
 from history_utils import save_history_to_csv, visualize_history
 from training_loop import train
+from config import get_default_config
+from training_loop_v2 import train_v2
 
 
 def main():
@@ -38,12 +40,15 @@ def main():
     test_size = float(input("Enter Test Size: "))
 
     # Run the main training loop.
-    history, G_AB, G_BA, D_A, D_B = train(
+    # Get Default Config (not used in train_v2 but can be extended for future use)
+    cfg = get_default_config(model_version=2)
+    history, G_AB, G_BA, D_A, D_B = train_v2(
         epoch_size=epoch_size,
         num_epochs=num_epochs,
         model_dir=model_dir,
         val_dir=val_dir,
         test_size=test_size,
+        cfg=cfg,
     )
 
     # Persist training history in both visual and CSV form.

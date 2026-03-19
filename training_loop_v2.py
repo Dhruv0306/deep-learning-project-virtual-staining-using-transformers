@@ -104,12 +104,20 @@ def _global_grad_norm(parameters) -> float:
 # ---------------------------------------------------------------------------
 
 
-def train_v2(cfg: Optional[UVCGANConfig] = None):
+def train_v2(
+    epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None,
+    cfg: Optional[UVCGANConfig] = None
+):
     """
     Train the UVCGAN v2 generators and multi-scale discriminators.
 
     Args:
-        cfg: :class:`~config.UVCGANConfig` with all hyperparameters.  A
+        epoch_size (int | None): Max samples per epoch (defaults to config default).
+        num_epochs (int | None): Number of epochs to train (defaults to config default).
+        model_dir (str | None): Directory for checkpoints and logs (defaults to config default).
+        val_dir (str | None): Directory for validation image outputs (defaults to config default).
+        test_size (int | None): Number of test samples to export in testing (defaults to config default).
+        cfg: :class:`~config.UVCGANConfig` with all hyperparameters. A
             default v2 config is created when ``None`` is passed.
 
     Returns:
@@ -117,6 +125,18 @@ def train_v2(cfg: Optional[UVCGANConfig] = None):
     """
     if cfg is None:
         cfg = get_default_config(model_version=2)
+
+    # Override config values with provided parameters
+    if epoch_size is not None:
+        cfg.training.epoch_size = epoch_size
+    if num_epochs is not None:
+        cfg.training.num_epochs = num_epochs
+    if model_dir is not None:
+        cfg.model_dir = model_dir
+    if val_dir is not None:
+        cfg.val_dir = val_dir
+    if test_size is not None:
+        cfg.training.test_size = test_size
 
     tcfg = cfg.training
     lcfg = cfg.loss
