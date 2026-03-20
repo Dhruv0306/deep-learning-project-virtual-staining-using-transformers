@@ -451,14 +451,15 @@ def train_v2(
 
         # ---- Periodic validation + early stopping ----
         if (epoch + 1) > tcfg.validation_warmup_epochs:
+            save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
             run_validation(
                 epoch=epoch + 1,
                 G_AB=G_AB,
                 G_BA=G_BA,
                 test_loader=test_loader,
                 device=device,
-                save_dir=val_dir,
-                num_samples=3,
+                save_dir=save_dir,
+                num_samples=10,  # keep validation quick by default
                 writer=writer,
             )
 

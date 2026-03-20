@@ -115,7 +115,7 @@ def run_validation(
         for i, batch in enumerate(test_loader):
             if i >= num_samples:
                 break
-            print(f"Validating Image {i}.")
+            print(f"Validating Image {i + 1}.")
 
             real_A = batch["A"].to(device)
             real_B = batch["B"].to(device)
