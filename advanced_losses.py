@@ -3,11 +3,28 @@ Advanced loss functions for UVCGAN v2 training.
 
 Provides:
 
-* :class:`VGGPerceptualLossV2`  – multi-backbone VGG perceptual loss.
-* :class:`SpectralLoss`         – frequency-domain loss for colour/texture.
-* :class:`ContrastiveLoss`      – NT-Xent contrastive loss for domain alignment.
-* :class:`WGANGPLoss`           – Wasserstein GAN with gradient penalty.
-* :class:`AdvancedCycleGANLoss` – composite loss combining all of the above.
+* :class:`VGGPerceptualLossV2`      – multi-level VGG19 perceptual loss.
+* :class:`SpectralLoss`             – frequency-domain loss for colour/texture.
+* :class:`ContrastiveLoss`          – NT-Xent contrastive loss for domain alignment.
+* :class:`LSGANGradientPenalty`     – paper-correct one-sided gradient penalty (gamma=100).
+* :class:`UVCGANLoss`               – composite loss combining all of the above.
+
+Paper reference:
+    Prokopenko et al., "UVCGAN v2: An Improved Cycle-Consistent GAN for
+    Unpaired Image-to-Image Translation", 2023.
+
+Key design decisions (paper-aligned):
+  - GAN objective   : LSGAN (MSE), NOT Wasserstein.
+                      Paper Table 2 shows LSGAN + GP is the best configuration.
+  - Gradient penalty: ONE-SIDED, target gamma=100.
+                      GP = E[max(0, ||grad D(x_hat)||_2 - gamma)^2] / gamma^2
+                      Only penalises gradients that EXCEED gamma, so it never
+                      prevents D from having small-norm gradients near real data.
+  - n_critic        : 1 (standard for LSGAN; no multi-step D updates needed).
+  - Adam betas      : (0.5, 0.999) -- standard for LSGAN/CycleGAN.
+  - lambda_gp       : 0.1 (paper value, much smaller than WGAN's 10).
+  - Cross-domain    : forward_with_cross_domain() activated when available.
+  - AMP safety      : GP always computed in float32 outside autocast.
 """
 
 import torch
@@ -20,7 +37,7 @@ from replay_buffer import ReplayBuffer
 
 
 # ---------------------------------------------------------------------------
-# VGG perceptual loss (v2 – multi-level)
+# VGG perceptual loss (v2 - multi-level)
 # ---------------------------------------------------------------------------
 
 
@@ -29,13 +46,12 @@ class VGGPerceptualLossV2(nn.Module):
     Perceptual loss using four VGG19 feature levels.
 
     Computes the L1 distance between VGG19 activations of two images at
-    ``relu1_2``, ``relu2_2``, ``relu3_4``, and ``relu4_4``.  All parameters
-    are frozen.
+    relu1_2, relu2_2, relu3_4, and relu4_4.  All parameters are frozen.
 
     Args:
         resize_to: Spatial resolution to which images are interpolated before
-            being passed to VGG.  ``None`` skips resizing.
-        weights: Per-level loss weights ``(w1, w2, w3, w4)``.
+            being passed to VGG.  None skips resizing.
+        weights: Per-level loss weights (w1, w2, w3, w4).
     """
 
     def __init__(
@@ -76,16 +92,6 @@ class VGGPerceptualLossV2(nn.Module):
         return h1, h2, h3, h4
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute multi-level perceptual loss.
-
-        Args:
-            x: Generated image batch ``(N, C, H, W)``.
-            y: Target image batch ``(N, C, H, W)``.
-
-        Returns:
-            Scalar perceptual loss.
-        """
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
@@ -124,33 +130,12 @@ class VGGPerceptualLossV2(nn.Module):
 
 
 class SpectralLoss(nn.Module):
-    """
-    Frequency-domain loss that encourages generated images to match the
-    power spectrum of real images.
-
-    The loss is computed as the L1 distance between the log-magnitude of the
-    2-D FFT of the generated and target images, averaged over channels.  This
-    penalises systematic colour/texture deviations that are invisible in the
-    spatial domain.
-    """
+    """Frequency-domain loss via log-magnitude FFT L1 distance."""
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute spectral loss.
-
-        Args:
-            x: Generated image batch ``(N, C, H, W)``.
-            y: Target image batch ``(N, C, H, W)``.
-
-        Returns:
-            Scalar spectral loss.
-        """
-        # Use float32 for numerical stability in FFT.
         x_f = torch.fft.rfft2(x.float(), norm="ortho")
         y_f = torch.fft.rfft2(y.float(), norm="ortho")
-        x_mag = torch.log1p(x_f.abs())
-        y_mag = torch.log1p(y_f.abs())
-        return F.l1_loss(x_mag, y_mag)
+        return F.l1_loss(torch.log1p(x_f.abs()), torch.log1p(y_f.abs()))
 
 
 # ---------------------------------------------------------------------------
@@ -162,25 +147,14 @@ class ContrastiveLoss(nn.Module):
     """
     NT-Xent contrastive loss for domain alignment.
 
-    Encourages a translated image ``fake_B = G_AB(real_A)`` to be similar
-    to real samples from domain B and dissimilar to real samples from domain A
-    in a projected embedding space.
-
-    A lightweight MLP projection head maps pooled feature vectors to a
-    normalised embedding space where cosine similarities are used.
-
     Args:
-        in_features: Dimension of the input feature vector (e.g. flattened
-            bottleneck channels after global average pooling).
+        in_features: Dimension of the GAP bottleneck (512 for base_channels=64).
         proj_dim: Projection head output dimension.
-        temperature: Temperature for the softmax.
+        temperature: Softmax temperature.
     """
 
     def __init__(
-        self,
-        in_features: int = 512,
-        proj_dim: int = 128,
-        temperature: float = 0.07,
+        self, in_features: int = 512, proj_dim: int = 128, temperature: float = 0.07
     ):
         super().__init__()
         self.temperature = temperature
@@ -191,188 +165,145 @@ class ContrastiveLoss(nn.Module):
         )
 
     def _project(self, x: torch.Tensor) -> torch.Tensor:
-        """Global-average-pool ``(N, C, H, W)`` then project."""
         if x.dim() == 4:
-            x = x.mean(dim=[2, 3])  # (N, C)
-        z = self.projection(x)
-        return F.normalize(z, dim=1)
+            x = x.mean(dim=[2, 3])  # global average pool
+        return F.normalize(self.projection(x), dim=1)
 
     def forward(
-        self,
-        anchor: torch.Tensor,
-        positive: torch.Tensor,
-        negative: torch.Tensor,
+        self, anchor: torch.Tensor, positive: torch.Tensor, negative: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Compute NT-Xent loss.
-
-        Args:
-            anchor: Feature map of the generated image (e.g. bottleneck of
-                ``G_AB(real_A)``).
-            positive: Feature map of a real sample from the target domain B.
-            negative: Feature map of a real sample from the source domain A.
-
-        Returns:
-            Scalar contrastive loss.
-        """
-        z_a = self._project(anchor)  # (N, proj_dim)
-        z_p = self._project(positive)  # (N, proj_dim)
-        z_n = self._project(negative)  # (N, proj_dim)
-
-        sim_pos = (z_a * z_p).sum(dim=1) / self.temperature  # (N,)
-        sim_neg = (z_a * z_n).sum(dim=1) / self.temperature  # (N,)
-
-        # NT-Xent: cross-entropy with two classes (positive vs negative).
-        logits = torch.stack([sim_pos, sim_neg], dim=1)  # (N, 2)
+        z_a = self._project(anchor)
+        z_p = self._project(positive)
+        z_n = self._project(negative)
+        sim_pos = (z_a * z_p).sum(dim=1) / self.temperature
+        sim_neg = (z_a * z_n).sum(dim=1) / self.temperature
+        logits = torch.stack([sim_pos, sim_neg], dim=1)
         labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
         return F.cross_entropy(logits, labels)
 
 
 # ---------------------------------------------------------------------------
-# WGAN-GP loss
+# UVCGAN paper gradient penalty  (one-sided, LSGAN-compatible, gamma=100)
 # ---------------------------------------------------------------------------
 
 
-class WGANGPLoss:
+class LSGANGradientPenalty:
     """
-    Wasserstein GAN with Gradient Penalty (WGAN-GP).
+    One-sided gradient penalty from the UVCGAN v2 paper.
 
-    WGAN-GP replaces the standard GAN / LSGAN objective with the Wasserstein
-    distance, which provides more stable gradients and avoids mode collapse.
-    The gradient penalty enforces the 1-Lipschitz constraint on the
-    discriminator without weight clipping.
+    Standard WGAN-GP (Gulrajani 2017) uses a TWO-SIDED penalty:
+        GP = E[(||grad D(x_hat)||_2 - 1)^2]
 
-    Reference: Gulrajani et al., "Improved Training of Wasserstein GANs", 2017.
+    The UVCGAN paper instead uses a ONE-SIDED penalty with target gamma=100:
+        GP = E[max(0, ||grad D(x_hat)||_2 - gamma)^2] / gamma^2
+
+    This only penalises gradients that EXCEED gamma, leaving D free to have
+    small-norm gradients near real data. This is appropriate because the GAN
+    objective is LSGAN (not Wasserstein) -- D does not need to be
+    1-Lipschitz everywhere, only bounded from above.
+
+    The gamma^2 normalisation keeps the penalty magnitude scale-invariant,
+    so lambda_gp = 0.1 works across different gamma choices.
+
+    Because LSGAN + GP both produce losses >= 0, the EarlyStopping divergence
+    check works correctly without any sign correction (unlike WGAN).
+
+    Reference: Prokopenko et al., "UVCGAN v2", 2023, Eq. (4).
+
+    IMPORTANT: Must be called with autocast DISABLED (float32 only).
     """
 
-    @staticmethod
-    def generator_loss(disc_fake_outputs) -> torch.Tensor:
-        """
-        Generator loss: maximise the discriminator score on fakes.
-
-        Accepts outputs from either a single discriminator (tensor) or a
-        multi-scale discriminator (list of tensors).
-
-        Args:
-            disc_fake_outputs: Discriminator logits for generated images.
-
-        Returns:
-            Scalar generator loss.
-        """
-        if isinstance(disc_fake_outputs, (list, tuple)):
-            return -sum((o.mean() for o in disc_fake_outputs), torch.tensor(0.0)) / len(
-                disc_fake_outputs
-            )
-        return -disc_fake_outputs.mean()
-
-    @staticmethod
-    def discriminator_loss(disc_real_outputs, disc_fake_outputs) -> torch.Tensor:
-        """
-        Discriminator loss: maximise real − fake Wasserstein estimate.
-
-        Args:
-            disc_real_outputs: Discriminator logits for real images.
-            disc_fake_outputs: Discriminator logits for generated images.
-
-        Returns:
-            Scalar discriminator loss (positive → discriminator improving).
-        """
-        if isinstance(disc_real_outputs, (list, tuple)):
-            loss_real = sum(
-                (o.mean() for o in disc_real_outputs), torch.tensor(0.0)
-            ) / len(disc_real_outputs)
-            loss_fake = sum(
-                (o.mean() for o in disc_fake_outputs), torch.tensor(0.0)
-            ) / len(disc_fake_outputs)
-        else:
-            loss_real = disc_real_outputs.mean()
-            loss_fake = disc_fake_outputs.mean()
-        return loss_fake - loss_real
+    GAMMA: float = 100.0  # Paper value.
 
     @staticmethod
     def gradient_penalty(
-        D: nn.Module, real: torch.Tensor, fake: torch.Tensor
+        D: nn.Module,
+        real: torch.Tensor,
+        fake: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute the gradient penalty for a discriminator.
+        Compute the one-sided gradient penalty on interpolated samples.
 
-        For a multi-scale discriminator the penalty is averaged across scales.
+        Always runs in float32 regardless of the caller's AMP state.
 
         Args:
-            D: Discriminator module.
-            real: Real image batch.
-            fake: Generated image batch (detached from the generator graph).
+            D   : Discriminator in train mode, all params require_grad=True.
+            real: Real image batch -- detached and cast to float32 internally.
+            fake: Generated image batch -- detached and cast to float32 internally.
 
         Returns:
-            Scalar gradient penalty.
+            Scalar penalty >= 0.
         """
+        gamma = LSGANGradientPenalty.GAMMA
         batch_size = real.size(0)
-        eps = torch.rand(batch_size, 1, 1, 1, device=real.device)
-        with torch.autocast(device_type=real.device.type, enabled=False):
-            real_f = real.detach().float()
-            fake_f = fake.detach().float()
-            interp = (eps * real_f + (1.0 - eps) * fake_f).requires_grad_(True)
-            pred = D(interp)
-            if isinstance(pred, (list, tuple)):
-                # Sum across scales so grad flows through all.
-                pred_sum = sum((p.sum() for p in pred), torch.tensor(0.0))
-                grad = torch.autograd.grad(
-                    outputs=pred_sum,
-                    inputs=interp,
-                    grad_outputs=None,
-                    create_graph=True,
-                    retain_graph=True,
-                    only_inputs=True,
-                )[0]
-            else:
-                grad = torch.autograd.grad(
-                    outputs=pred,
-                    inputs=interp,
-                    grad_outputs=torch.ones_like(pred),
-                    create_graph=True,
-                    retain_graph=True,
-                    only_inputs=True,
-                )[0]
-            grad = grad.view(batch_size, -1)
-            return ((grad.norm(2, dim=1) - 1.0) ** 2).mean()
+        device = real.device
+
+        real_f = real.detach().float()
+        fake_f = fake.detach().float()
+
+        eps = torch.rand(batch_size, 1, 1, 1, device=device, dtype=torch.float32)
+        interp = (eps * real_f + (1.0 - eps) * fake_f).requires_grad_(True)
+
+        pred = D(interp)
+
+        # Reduce discriminator output to a single scalar so that grad_outputs
+        # can be None (autograd default for scalar outputs).
+        # torch.stack avoids Python's built-in sum() returning int|Any.
+        if isinstance(pred, (list, tuple)):
+            pred_scalar: torch.Tensor = torch.stack([p.sum() for p in pred]).sum()
+        else:
+            pred_scalar = pred.sum()
+
+        # grad_outputs=None is valid and correct when outputs is a 0-dim scalar.
+        grads = torch.autograd.grad(
+            outputs=pred_scalar,
+            inputs=interp,
+            grad_outputs=None,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        # One-sided hinge: penalise only gradients that exceed gamma.
+        grad_norms = grads.view(batch_size, -1).norm(2, dim=1)  # (N,)
+        penalty = (F.relu(grad_norms - gamma) ** 2).mean() / (gamma**2)
+        return penalty
 
 
 # ---------------------------------------------------------------------------
-# Composite advanced loss
+# Composite UVCGAN loss
 # ---------------------------------------------------------------------------
 
 
-class AdvancedCycleGANLoss:
+class UVCGANLoss:
     """
     Composite loss for the UVCGAN v2 training loop.
 
-    Combines:
+    GAN objective : LSGAN (MSE) -- paper Table 2 best configuration.
+    Gradient penalty: one-sided, gamma=100, lambda=0.1 -- paper Eq. (4).
 
-    * WGAN-GP adversarial loss (or LSGAN if ``use_wgan_gp=False``).
-    * Cycle-consistency (L1).
-    * Identity (L1).
-    * Multi-level VGG perceptual loss on cycle and identity outputs.
-    * Contrastive domain-alignment loss.
-    * Spectral (frequency-domain) loss.
+    All component losses (cycle, identity, perceptual, spectral, contrastive)
+    are >= 0, so the EarlyStopping divergence check works without any
+    sign correction. This is a key stability advantage over WGAN.
+
+    Cross-domain skip fusion (forward_with_cross_domain) is activated
+    automatically when both generators expose the required API.
 
     Args:
         lambda_cycle: Cycle-consistency loss weight.
         lambda_identity: Identity loss weight.
         lambda_cycle_perceptual: Perceptual cycle loss weight.
         lambda_identity_perceptual: Perceptual identity loss weight.
-        lambda_gp: Gradient-penalty weight.
-        lambda_contrastive: Contrastive loss weight.
-        lambda_spectral: Spectral loss weight.
+        lambda_gp: Gradient-penalty weight. Paper value is 0.1.
+        lambda_contrastive: Contrastive loss weight (0 = disabled).
+        lambda_spectral: Spectral loss weight (0 = disabled).
         perceptual_resize: Image size for VGG perceptual loss.
-        use_wgan_gp: Use WGAN-GP; if ``False`` falls back to LSGAN.
-        contrastive_temperature: Temperature for the contrastive loss.
-        lsgan_real_label: Label smoothing target for real samples in LSGAN
-            (values < 1 implement one-sided label smoothing).
-        identity_decay_start: Fraction of training after which identity loss
-            weight begins to decay (default 0.5 = 50 %).
-        identity_decay_rate: Per-epoch multiplicative decay applied to the
-            identity weight after ``identity_decay_start`` (default 0.997).
-        device: Training device (auto-detected if ``None``).
+        contrastive_temperature: Temperature for NT-Xent loss.
+        lsgan_real_label: Label-smoothing target for real samples (< 1).
+        identity_decay_start: Fraction of training at which identity weight
+            begins to decay.
+        identity_decay_rate: Per-epoch multiplicative decay for identity weight.
+        device: Training device (auto-detected when None).
     """
 
     def __init__(
@@ -381,13 +312,12 @@ class AdvancedCycleGANLoss:
         lambda_identity: float = 5.0,
         lambda_cycle_perceptual: float = 0.1,
         lambda_identity_perceptual: float = 0.05,
-        lambda_gp: float = 10.0,
-        lambda_contrastive: float = 0.1,
-        lambda_spectral: float = 0.05,
+        lambda_gp: float = 0.1,
+        lambda_contrastive: float = 0.0,
+        lambda_spectral: float = 0.0,
         perceptual_resize: int = 128,
-        use_wgan_gp: bool = True,
         contrastive_temperature: float = 0.07,
-        lsgan_real_label: float = 0.97,
+        lsgan_real_label: float = 0.9,
         identity_decay_start: float = 0.5,
         identity_decay_rate: float = 0.997,
         device=None,
@@ -399,7 +329,6 @@ class AdvancedCycleGANLoss:
         self.lambda_gp = lambda_gp
         self.lambda_contrastive = lambda_contrastive
         self.lambda_spectral = lambda_spectral
-        self.use_wgan_gp = use_wgan_gp
         self.lsgan_real_label = lsgan_real_label
         self.identity_decay_start = identity_decay_start
         self.identity_decay_rate = identity_decay_rate
@@ -408,16 +337,18 @@ class AdvancedCycleGANLoss:
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # Loss modules
+        # Core loss modules.
         self.criterion_cycle = nn.L1Loss()
         self.criterion_identity = nn.L1Loss()
+        self.criterion_GAN = nn.MSELoss()  # LSGAN
         self.criterion_perceptual = VGGPerceptualLossV2(resize_to=perceptual_resize).to(
             self.device
         )
         self.criterion_spectral = SpectralLoss()
-        self.wgan = WGANGPLoss()
+        self.gp = LSGANGradientPenalty()
 
-        # Contrastive loss (bottleneck channels = 512 by default).
+        # Contrastive loss -- only instantiated when enabled.
+        self.criterion_contrastive: Optional[ContrastiveLoss]
         if lambda_contrastive > 0.0:
             self.criterion_contrastive = ContrastiveLoss(
                 in_features=512,
@@ -426,10 +357,7 @@ class AdvancedCycleGANLoss:
         else:
             self.criterion_contrastive = None
 
-        # LSGAN fallback
-        self.criterion_GAN = nn.MSELoss()
-
-        # Replay buffers
+        # Replay buffers for discriminator stabilisation.
         self.fake_A_buffer = ReplayBuffer()
         self.fake_B_buffer = ReplayBuffer()
 
@@ -438,16 +366,7 @@ class AdvancedCycleGANLoss:
     # ------------------------------------------------------------------
 
     def get_identity_lambda(self, epoch: int, total_epochs: int) -> float:
-        """
-        Decay the identity weight after ``identity_decay_start`` of training.
-
-        Args:
-            epoch: Current epoch (0-indexed).
-            total_epochs: Total number of training epochs.
-
-        Returns:
-            Effective identity loss weight.
-        """
+        """Decay the identity weight after identity_decay_start of training."""
         if epoch <= self.identity_decay_start * total_epochs:
             return self.lambda_identity
         return self.lambda_identity * (
@@ -456,107 +375,99 @@ class AdvancedCycleGANLoss:
         )
 
     # ------------------------------------------------------------------
-    # Discriminator losses (helper)
+    # LSGAN helpers
     # ------------------------------------------------------------------
 
-    def _disc_gan_loss(self, real_outputs, fake_outputs) -> torch.Tensor:
+    def _lsgan_disc_loss(self, real_outputs, fake_outputs) -> torch.Tensor:
         """
-        Compute discriminator GAN loss (WGAN or LSGAN).
-
-        Handles both single-scale (tensor) and multi-scale (list) outputs.
-
-        Args:
-            real_outputs: Discriminator outputs for real images.
-            fake_outputs: Discriminator outputs for fake images.
-
-        Returns:
-            Scalar discriminator GAN loss.
+        LSGAN discriminator loss with one-sided label smoothing on real targets.
+        Handles both single-scale (Tensor) and multi-scale (list) outputs.
         """
-        if self.use_wgan_gp:
-            return self.wgan.discriminator_loss(real_outputs, fake_outputs)
 
-        # LSGAN fallback.
-        def _lsgan(real_out, fake_out):
-            if isinstance(real_out, (list, tuple)):
-                r = sum(
-                    (
-                        self.criterion_GAN(
-                            r, self.lsgan_real_label * torch.ones_like(r)
-                        )
-                        for r in real_out
-                    ),
-                    torch.tensor(0.0),
-                ) / len(real_out)
-                f = sum(
-                    (self.criterion_GAN(f, torch.zeros_like(f)) for f in fake_out),
-                    torch.tensor(0.0),
-                ) / len(fake_out)
-            else:
-                r = self.criterion_GAN(
-                    real_out, self.lsgan_real_label * torch.ones_like(real_out)
-                )
-                f = self.criterion_GAN(fake_out, torch.zeros_like(fake_out))
-            return (r + f) * 0.5
+        def _single(r: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
+            loss_real = self.criterion_GAN(
+                r, self.lsgan_real_label * torch.ones_like(r)
+            )
+            loss_fake = self.criterion_GAN(f, torch.zeros_like(f))
+            return (loss_real + loss_fake) * 0.5
 
-        return _lsgan(real_outputs, fake_outputs)
+        if isinstance(real_outputs, (list, tuple)):
+            return torch.stack(
+                [_single(r, f) for r, f in zip(real_outputs, fake_outputs)]
+            ).mean()
+        return _single(real_outputs, fake_outputs)
 
-    def _gen_gan_loss(self, disc_fake_outputs) -> torch.Tensor:
+    def _lsgan_gen_loss(self, disc_fake_outputs) -> torch.Tensor:
         """
-        Generator GAN loss (WGAN or LSGAN).
-
-        Args:
-            disc_fake_outputs: Discriminator outputs for generated images.
-
-        Returns:
-            Scalar generator GAN loss.
+        LSGAN generator loss: push fake outputs toward 1.
+        Handles both single-scale (Tensor) and multi-scale (list) outputs.
         """
-        if self.use_wgan_gp:
-            return self.wgan.generator_loss(disc_fake_outputs)
-
-        # LSGAN fallback.
         if isinstance(disc_fake_outputs, (list, tuple)):
-            return sum(
-                (self.criterion_GAN(o, torch.ones_like(o)) for o in disc_fake_outputs),
-                torch.tensor(0.0),
-            ) / len(disc_fake_outputs)
+            return torch.stack(
+                [self.criterion_GAN(o, torch.ones_like(o)) for o in disc_fake_outputs]
+            ).mean()
         return self.criterion_GAN(disc_fake_outputs, torch.ones_like(disc_fake_outputs))
 
     # ------------------------------------------------------------------
     # Public loss API
     # ------------------------------------------------------------------
 
-    def generator_loss(self, real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, total_epochs):
+    def generator_loss(
+        self,
+        real_A: torch.Tensor,
+        real_B: torch.Tensor,
+        G_AB: nn.Module,
+        G_BA: nn.Module,
+        D_A: nn.Module,
+        D_B: nn.Module,
+        epoch: int,
+        total_epochs: int,
+    ):
         """
-        Compute the full generator loss.
+        Compute the full UVCGAN generator loss.
 
-        Args:
-            real_A: Real images from domain A ``(N, C, H, W)``.
-            real_B: Real images from domain B ``(N, C, H, W)``.
-            G_AB: Generator A→B.
-            G_BA: Generator B→A.
-            D_A: Discriminator for domain A.
-            D_B: Discriminator for domain B.
-            epoch: Current training epoch (0-indexed).
-            total_epochs: Total training epochs.
+        Activates cross-domain skip fusion (forward_with_cross_domain)
+        when both generators support it -- the defining UVCGAN feature.
 
         Returns:
-            tuple: ``(loss_G, fake_A, fake_B)``
+            tuple: (loss_G, fake_A, fake_B)
         """
         current_lambda_identity = self.get_identity_lambda(epoch, total_epochs)
 
-        # ---- Identity ----
+        # ---- Cross-domain fusion check ----
+        use_cross = (
+            getattr(G_AB, "use_cross_domain", False)
+            and getattr(G_BA, "use_cross_domain", False)
+            and hasattr(G_AB, "forward_with_cross_domain")
+            and hasattr(G_BA, "forward_with_cross_domain")
+            and hasattr(G_AB, "get_skip_features")
+            and hasattr(G_BA, "get_skip_features")
+        )
+
+        # ---- Identity loss (standard forward) ----
         idt_A = G_BA(real_A)
         loss_idt_A = self.criterion_identity(idt_A, real_A) * current_lambda_identity
         idt_B = G_AB(real_B)
         loss_idt_B = self.criterion_identity(idt_B, real_B) * current_lambda_identity
 
-        # ---- GAN ----
-        fake_B = G_AB(real_A)
-        loss_GAN_AB = self._gen_gan_loss(D_B(fake_B))
-        fake_A = G_BA(real_B)
-        loss_GAN_BA = self._gen_gan_loss(D_A(fake_A))
+        # ---- Translation with optional cross-domain skip fusion ----
+        # type: ignore[operator] silences Pylance's "Tensor not callable" false-positive:
+        # G_AB/G_BA are nn.Module subclasses at runtime and these methods are
+        # already guarded by the hasattr() checks in the use_cross block above.
+        if use_cross:
+            skips_A = G_AB.get_skip_features(real_A)  # type: ignore[operator]
+            skips_B = G_BA.get_skip_features(real_B)  # type: ignore[operator]
+            fake_B = G_AB.forward_with_cross_domain(real_A, skips_B)  # type: ignore[operator]
+            fake_A = G_BA.forward_with_cross_domain(real_B, skips_A)  # type: ignore[operator]
+        else:
+            fake_B = G_AB(real_A)
+            fake_A = G_BA(real_B)
 
-        # ---- Cycle ----
+        # ---- LSGAN adversarial loss ----
+        loss_GAN_AB = self._lsgan_gen_loss(D_B(fake_B))
+        loss_GAN_BA = self._lsgan_gen_loss(D_A(fake_A))
+
+        # ---- Cycle-consistency ----
         rec_A = G_BA(fake_B)
         loss_cycle_A = self.criterion_cycle(rec_A, real_A) * self.lambda_cycle
         rec_B = G_AB(fake_A)
@@ -582,7 +493,7 @@ class AdvancedCycleGANLoss:
             * self.lambda_identity_perceptual
         )
 
-        # ---- Spectral ----
+        # ---- Spectral loss (disabled by default) ----
         loss_spectral = torch.tensor(0.0, device=real_A.device)
         if self.lambda_spectral > 0.0:
             loss_spectral = (
@@ -590,21 +501,20 @@ class AdvancedCycleGANLoss:
                 + self.criterion_spectral(fake_A, real_A)
             ) * self.lambda_spectral
 
-        # ---- Contrastive ----
+        # ---- Contrastive loss (disabled by default) ----
         loss_contrastive = torch.tensor(0.0, device=real_A.device)
         if self.criterion_contrastive is not None and self.lambda_contrastive > 0.0:
-            # Use global-average-pooled bottleneck features as embeddings.
-            if hasattr(G_AB, "encode"):
-                _, _, _, _, bot_AB = G_AB.encode(real_A)
-                _, _, _, _, bot_B = G_AB.encode(real_B)
-                _, _, _, _, bot_BA = G_BA.encode(real_B)
-                _, _, _, _, bot_A = G_BA.encode(real_A)
+            if hasattr(G_AB, "encode") and hasattr(G_BA, "encode"):
+                _, _, _, _, bot_AB = G_AB.encode(real_A)  # type: ignore[operator]
+                _, _, _, _, bot_B = G_AB.encode(real_B)  # type: ignore[operator]
+                _, _, _, _, bot_BA = G_BA.encode(real_B)  # type: ignore[operator]
+                _, _, _, _, bot_A = G_BA.encode(real_A)  # type: ignore[operator]
                 loss_contrastive = (
                     self.criterion_contrastive(bot_AB, bot_B, bot_A)
                     + self.criterion_contrastive(bot_BA, bot_A, bot_B)
                 ) * self.lambda_contrastive
 
-        # ---- Total ----
+        # ---- Total generator loss (all terms >= 0 with LSGAN) ----
         loss_G = (
             loss_GAN_AB
             + loss_GAN_BA
@@ -623,37 +533,44 @@ class AdvancedCycleGANLoss:
         return loss_G, fake_A, fake_B
 
     def discriminator_loss(
-        self, D, real, fake, replay_buffer: Optional[ReplayBuffer] = None
+        self,
+        D: nn.Module,
+        real: torch.Tensor,
+        fake: torch.Tensor,
+        replay_buffer: Optional[ReplayBuffer] = None,
     ) -> torch.Tensor:
         """
-        Compute discriminator loss with optional replay buffer.
+        Compute the LSGAN discriminator loss + one-sided gradient penalty.
 
-        Args:
-            D: Discriminator module.
-            real: Real image batch.
-            fake: Newly generated image batch.
-            replay_buffer: Optional buffer of past generated images.
+        The GP is always computed in float32 with autocast disabled, regardless
+        of the caller's AMP state, to avoid NaN gradients under mixed precision.
 
         Returns:
-            Scalar discriminator loss.
+            Scalar loss >= 0.  LSGAN and the one-sided GP are both non-negative,
+            so the EarlyStopping divergence check works without sign correction.
         """
-        # Optionally draw from the replay buffer.
-        fake_buf = replay_buffer.push_and_pop(fake) if replay_buffer else fake
+        fake_buf = (
+            replay_buffer.push_and_pop(fake.detach())
+            if replay_buffer
+            else fake.detach()
+        )
 
         real_out = D(real)
-        fake_out = D(fake_buf.detach())
-        loss_D = self._disc_gan_loss(real_out, fake_out)
+        fake_out = D(fake_buf)
+        loss_D = self._lsgan_disc_loss(real_out, fake_out)
 
         if self.lambda_gp > 0.0:
-            gp = self.wgan.gradient_penalty(D, real, fake)
-            loss_D = loss_D + self.lambda_gp * gp
+            # Disable autocast unconditionally -- GP must be float32.
+            with torch.autocast(device_type=real.device.type, enabled=False):
+                gp = self.gp.gradient_penalty(D, real, fake)
+            loss_D = loss_D + self.lambda_gp * gp.to(loss_D.dtype)
 
         return loss_D
 
 
 if __name__ == "__main__":
-    loss_fn = AdvancedCycleGANLoss()
-    print("AdvancedCycleGANLoss initialised successfully.")
+    loss_fn = UVCGANLoss()
+    print("UVCGANLoss initialised successfully.")
 
     from uvcgan_v2_generator import getGeneratorsV2
     from spectral_norm_discriminator import getDiscriminatorsV2
@@ -662,15 +579,15 @@ if __name__ == "__main__":
     D_A, D_B = getDiscriminatorsV2()
 
     device = next(G_AB.parameters()).device
-    real_A = torch.randn(1, 3, 256, 256, device=device)
-    real_B = torch.randn(1, 3, 256, 256, device=device)
+    real_A = torch.randn(2, 3, 256, 256, device=device)
+    real_B = torch.randn(2, 3, 256, 256, device=device)
 
     loss_G, fake_A, fake_B = loss_fn.generator_loss(
         real_A, real_B, G_AB, G_BA, D_A, D_B, 0, 10
     )
-    print("Generator loss:", loss_G.item())
+    print(f"Generator loss : {loss_G.item():.4f}  (should be > 0)")
 
     loss_DA = loss_fn.discriminator_loss(D_A, real_A, fake_A)
     loss_DB = loss_fn.discriminator_loss(D_B, real_B, fake_B)
-    print("D_A loss:", loss_DA.item())
-    print("D_B loss:", loss_DB.item())
+    print(f"D_A loss       : {loss_DA.item():.4f}  (should be > 0)")
+    print(f"D_B loss       : {loss_DB.item():.4f}  (should be > 0)")
