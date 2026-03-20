@@ -279,7 +279,7 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 - Gradient accumulation over `accumulate_grads` batches (effective batch = `batch_size × accumulate_grads`)
 - Replay buffer (size 50) for discriminator stabilisation
 - Mixed precision (AMP) for generator step; GP always in float32
-- Validation every `validation_warmup_epochs` epochs from epoch 1
+- Validation after `validation_warmup_epochs` epochs
 - Early stopping activates after `early_stopping_warmup` epochs, monitors SSIM improvement and loss divergence
 
 ---
@@ -310,7 +310,7 @@ from config import get_8gb_config
 cfg = get_8gb_config()
 cfg.training.num_epochs = 500
 cfg.loss.lambda_cycle = 15.0
-cfg.training.validation_warmup_epochs = 5  # validate every 5 epochs
+cfg.training.validation_warmup_epochs = 10  # validate after 10 epochs
 
 history, G_AB, G_BA, D_A, D_B = train_v2(
     epoch_size=500,
