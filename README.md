@@ -166,42 +166,121 @@ data\E_Staining_DermaRepo\H_E-Staining_dataset\
 
 ### v1 — Hybrid UVCGAN + CycleGAN (`training_loop.py`)
 
-- Generator: U-Net + ViT bottleneck with ReZero Transformer blocks
-- Discriminator: single-scale PatchGAN
-- Loss: LSGAN + cycle-consistency + identity + VGG19 perceptual + gradient penalty
-- Standard CycleGAN Adam betas `(0.5, 0.999)`, `lr=2e-4`
+A hybrid model that uses the UVCGAN generator architecture inside a standard CycleGAN training framework.
+
+**Generator (`generator.py` → `ViTUNetGenerator`)**
+
+U-Net backbone with 4 encoder levels (64 → 128 → 256 → 512 channels) and a PixelwiseViT bottleneck:
+
+```
+Encoder:  3 → 64 (ConvBlock) → 128 → 256 → 512 → 512
+Bottleneck: ConvBlock → PixelwiseViT (ReZero Transformer blocks)
+Decoder:  512 → 512 → 256 → 128 → 64 → 3 (skip connections at each level)
+```
+
+The PixelwiseViT flattens spatial positions into tokens `(N, H×W, C)`, adds 2D sine-cosine positional embeddings, passes them through `vit_depth` **ReZero Transformer blocks**, then reshapes back to `(N, C, H, W)`. ReZero scales each residual branch by a learnable scalar initialised to 0, allowing the network to start as identity and learn residuals gradually.
+
+Weight initialisation: Normal `N(0, 0.02)` for convolutions, Xavier uniform for linear layers, `N(1, 0.02)` for InstanceNorm scale parameters.
+
+**Discriminator (`discriminator.py` → `PatchDiscriminator`)**
+
+Standard single-scale PatchGAN with 5 convolutional layers:
+
+```
+Conv(stride=2) → Conv(stride=2, IN) → Conv(stride=2, IN) → Conv(stride=1, IN) → Conv → output map
+```
+
+Each output element covers a 70×70 receptive field of the 256×256 input. One discriminator per domain (D_A for unstained, D_B for stained).
+
+**Loss (`losses.py` → `CycleGANLoss`)**
+
+| Term | Formula | Weight |
+|---|---|---|
+| GAN (LSGAN) | MSE against real=1, fake=0 targets | 1.0 |
+| Cycle-consistency | L1(G_BA(G_AB(A)), A) + L1(G_AB(G_BA(B)), B) | λ=10.0 |
+| Identity | L1(G_BA(A), A) + L1(G_AB(B), B) | λ=5.0 (decays after epoch 50%) |
+| Perceptual cycle | L1 on VGG19 relu1\_2/relu2\_2/relu3\_4 features | λ=0.2 |
+| Perceptual identity | Same VGG19 features on identity outputs | λ=0.1 |
+| Gradient penalty | Two-sided: E[(‖∇D(x̂)‖₂ - 1)²] | λ=10.0 |
+
+Label smoothing: real targets use 0.97 instead of 1.0. Discriminator fakes are drawn from a replay buffer (size 50) to reduce oscillation.
+
+**Training (`training_loop.py`)**
+- Adam `lr=2e-4`, betas `(0.5, 0.999)` for all optimisers
+- Linear LR decay from epoch 100 to 200 (constant before epoch 100)
+- Mixed precision (AMP) when CUDA is available
+- Early stopping: checks every 10 epochs after a warmup of 80 epochs, patience of 40 epochs on SSIM, divergence detection if all losses exceed 5× their best value simultaneously
+- Validation images and SSIM/PSNR/FID metrics every 10 epochs after warmup
+
+---
 
 ### v2 — True UVCGAN (`training_loop_v2.py`)
 
-Paper-aligned implementation of Prokopenko et al., *UVCGAN v2*, 2023:
+Paper-aligned implementation of Prokopenko et al., *UVCGAN v2*, 2023.
 
-**Generator (`uvcgan_v2_generator.py`)**
-- U-Net backbone with 4 encoder levels (64 → 128 → 256 → 512 channels)
-- ViT bottleneck with **LayerScale** Transformer blocks (stabilises early training)
-- **Cross-domain skip fusion** — each generator receives skip features from the other generator at matching spatial levels, enabling structural knowledge sharing
-- Optional **gradient checkpointing** on ViT blocks (saves ~2 GB VRAM)
-- Kaiming normal init for convolutions, Xavier uniform for linear layers
+**Generator (`uvcgan_v2_generator.py` → `ViTUNetGeneratorV2`)**
 
-**Discriminator (`spectral_norm_discriminator.py`)**
-- Multi-scale PatchGAN: independent discriminators at 3 spatial scales
-- **Spectral normalisation** on every conv layer for Lipschitz stability
+Revised U-Net + ViT architecture with several structural improvements over v1:
+
+```
+Encoder:  3 → 64 (7×7 reflect-pad conv) → 128 (DownBlock + 2×ResidualConvBlock)
+            → 256 (DownBlock + 2×ResidualConvBlock) → 512 (DownBlock + 2×ResidualConvBlock) → 512 (DownBlock)
+Bottleneck: ResidualConvBlock → PixelwiseViTV2 (LayerScale Transformer blocks)
+Decoder:  512 → 512 → 256 → 128 → 64 → 3 (1×1 conv skip merges at each level)
+```
+
+Key differences from v1:
+
+| Feature | v1 | v2 |
+|---|---|---|
+| Residual blocks | Simple ConvBlock | ResidualConvBlock (skip connection) |
+| Transformer residual scaling | ReZero (scalar per block, init=0) | LayerScale (vector per channel, init=1e-4) |
+| Skip connection merge | Concatenate → ConvBlock | Concatenate → 1×1 conv + IN + ReLU |
+| Cross-domain fusion | None | CrossDomainFusion on all 4 skip levels |
+| Weight init | Normal N(0, 0.02) for convs | Kaiming normal for convs, Xavier uniform for linear |
+| Gradient checkpointing | Not supported | Supported on ViT blocks |
+
+**Cross-domain skip fusion** is the defining UVCGAN feature. Both generators run simultaneously, and each fuses its own skip features with the paired generator's skip features at matching spatial levels via a lightweight 1×1 convolution. This allows G_AB and G_BA to share structural information without coupling their parameters:
+
+```
+fake_B = G_AB.forward_with_cross_domain(real_A, skips_from_G_BA(real_B))
+fake_A = G_BA.forward_with_cross_domain(real_B, skips_from_G_AB(real_A))
+```
+
+**Discriminator (`spectral_norm_discriminator.py` → `MultiScaleDiscriminator`)**
+
+Wraps N independent `SpectralNormDiscriminator` instances, each operating on a progressively downsampled version of the input (2× average-pool between scales):
+
+- **Scale 0** — original 256×256 input → fine texture discrimination
+- **Scale 1** — 128×128 downsampled input → mid-level structure
+- **Scale 2** — 64×64 downsampled input → global colour/layout
+
+**Spectral normalisation** divides each conv weight matrix by its largest singular value, bounding the discriminator's Lipschitz constant and preventing it from becoming too strong relative to the generator.
 
 **Loss (`advanced_losses.py` → `UVCGANLoss`)**
-- **LSGAN** adversarial loss (paper Table 2 best configuration)
-- **One-sided gradient penalty** (GP): `E[max(0, ‖∇D(x̂)‖₂ - γ)²] / γ²` with γ=100, λ=0.1. Only penalises gradients exceeding γ — softer than standard WGAN-GP and correct for LSGAN
-- Cycle-consistency (L1)
-- Identity (L1, with decay after 50% of training)
-- Multi-level **VGG19 perceptual** loss on cycle and identity outputs
-- Optional **NT-Xent contrastive** domain-alignment loss (disabled by default)
-- Optional **spectral frequency** loss (disabled by default)
+
+| Term | Formula | Weight |
+|---|---|---|
+| GAN (LSGAN) | MSE against real=0.9 (label smoothing), fake=0 | 1.0 |
+| One-sided GP | E[max(0, ‖∇D(x̂)‖₂ - γ)²] / γ²,  γ=100 | λ=0.1 |
+| Cycle-consistency | L1(G_BA(G_AB(A)), A) + L1(G_AB(G_BA(B)), B) | λ=10.0 |
+| Identity | L1(G_BA(A), A) + L1(G_AB(B), B) | λ=5.0 (decays after epoch 50%) |
+| Perceptual cycle | L1 on VGG19 relu1\_2/relu2\_2/relu3\_4/relu4\_4 | λ=0.1 |
+| Perceptual identity | Same 4-level VGG19 features on identity outputs | λ=0.05 |
+| Contrastive (NT-Xent) | Domain alignment on bottleneck features | λ=0.0 (disabled by default) |
+| Spectral frequency | L1 on log-magnitude FFT of fake vs real | λ=0.0 (disabled by default) |
+
+The one-sided GP is softer than WGAN-GP — it only penalises gradients that exceed γ=100, leaving D free to have small-norm gradients near real data. This is appropriate because the GAN objective is LSGAN (not Wasserstein). The GP is always computed in float32 regardless of AMP state to avoid NaN gradients.
 
 **Training (`training_loop_v2.py`)**
-- Warm-up + linear decay LR schedule
-- Gradient clipping
-- Gradient accumulation (effective batch size independent of physical batch size)
-- Replay buffer for discriminator stabilisation
-- Mixed precision (AMP) — GP always computed in float32 regardless
-- Per-interval validation with SSIM/PSNR/FID; early stopping on SSIM + divergence
+- Adam `lr=2e-4`, betas `(0.5, 0.999)`, `n_critic=1`
+- Warm-up LR ramp for `warmup_epochs` epochs, then constant, then linear decay from `decay_start_epoch`
+- Gradient clipping (max norm 1.0)
+- Gradient accumulation over `accumulate_grads` batches (effective batch = `batch_size × accumulate_grads`)
+- Replay buffer (size 50) for discriminator stabilisation
+- Mixed precision (AMP) for generator step; GP always in float32
+- Validation every `validation_warmup_epochs` epochs from epoch 1
+- Early stopping activates after `early_stopping_warmup` epochs, monitors SSIM improvement and loss divergence
 
 ---
 
