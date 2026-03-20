@@ -10,7 +10,7 @@ from datetime import datetime
 
 from history_utils import save_history_to_csv, visualize_history
 from training_loop import train
-from config import get_default_config
+from config import get_8gb_config
 from training_loop_v2 import train_v2
 
 
@@ -42,7 +42,7 @@ def main():
         val_dir = os.path.join(model_dir, "validation_images")
         os.makedirs(val_dir, exist_ok=True)
         print(f"Validation image directory: {val_dir}")
-        cfg = get_default_config(model_version=model_version)
+        cfg = get_8gb_config()
         history, G_AB, G_BA, D_A, D_B = train_v2(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
