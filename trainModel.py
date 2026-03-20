@@ -21,35 +21,55 @@ def main():
     Returns:
         tuple: (history, G_AB, G_BA, D_A, D_B)
     """
-    # Create a timestamped model directory so each run is isolated.
-    model_dir = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\modelsV2_"
-        f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
-    )
-    os.makedirs(model_dir, exist_ok=True)
-    print(f"Model directory: {model_dir}")
-
-    # Validation images are saved per epoch for quick qualitative checks.
-    val_dir = os.path.join(model_dir, "validation_images")
-    os.makedirs(val_dir, exist_ok=True)
-    print(f"Validation image directory: {val_dir}")
-
+    
     # User-controlled training parameters.
     epoch_size = int(input("Enter Epoch Size: "))
     num_epochs = int(input("Enter Number of Epochs: "))
     test_size = float(input("Enter Test Size: "))
+    model_version = int(input("Enter model version you want 1 for Hybrid and 2 for true UVCGAN: "))
 
     # Run the main training loop.
     # Get Default Config (not used in train_v2 but can be extended for future use)
-    cfg = get_default_config(model_version=2)
-    history, G_AB, G_BA, D_A, D_B = train_v2(
-        epoch_size=epoch_size,
-        num_epochs=num_epochs,
-        model_dir=model_dir,
-        val_dir=val_dir,
-        test_size=test_size,
-        cfg=cfg,
-    )
+    if model_version == 2:
+        # Create a timestamped model directory so each run is isolated.
+        model_dir = (
+            "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_v2_"
+            f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
+        )
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"Model directory: {model_dir}")
+        # Validation images are saved per epoch for quick qualitative checks.
+        val_dir = os.path.join(model_dir, "validation_images")
+        os.makedirs(val_dir, exist_ok=True)
+        print(f"Validation image directory: {val_dir}")
+        cfg = get_default_config(model_version=model_version)
+        history, G_AB, G_BA, D_A, D_B = train_v2(
+            epoch_size=epoch_size,
+            num_epochs=num_epochs,
+            model_dir=model_dir,
+            val_dir=val_dir,
+            test_size=test_size,
+            cfg=cfg
+        )
+    else :
+        # Create a timestamped model directory so each run is isolated.
+        model_dir = (
+            "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_"
+            f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
+        )
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"Model directory: {model_dir}")
+        # Validation images are saved per epoch for quick qualitative checks.
+        val_dir = os.path.join(model_dir, "validation_images")
+        os.makedirs(val_dir, exist_ok=True)
+        print(f"Validation image directory: {val_dir}")
+        history, G_AB, G_BA, D_A, D_B = train(
+            epoch_size=epoch_size,
+            num_epochs=num_epochs,
+            model_dir=model_dir,
+            val_dir=val_dir,
+            test_size=test_size,
+        )
 
     # Persist training history in both visual and CSV form.
     visualize_history(history, model_dir=model_dir)
