@@ -117,12 +117,15 @@ class UnpairedImageDataset(Dataset):
 # Data Loader Main Function
 # Comprehensive function to set up the entire data loading pipeline for CycleGAN training
 
-def getDataLoader(epoch_size=None):
+def getDataLoader(epoch_size=None, image_size=256, batch_size=4, num_workers=4):
     """
     Create and return train and test data loaders for CycleGAN training.
 
     Args:
         epoch_size (int, optional): Fixed number of samples per epoch.
+        image_size (int): Size to resize images to.
+        batch_size (int): Number of samples per batch.
+        num_workers (int): Number of worker processes for data loading.
 
     Returns:
         tuple: (train_loader, test_loader)
@@ -145,7 +148,7 @@ def getDataLoader(epoch_size=None):
     transform = transforms.Compose(
         [
             transforms.Resize(
-                (256, 256), interpolation=transforms.InterpolationMode.BILINEAR
+                (image_size, image_size), interpolation=transforms.InterpolationMode.BILINEAR
             ),
             transforms.ToTensor(),
             transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
@@ -162,9 +165,9 @@ def getDataLoader(epoch_size=None):
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=4,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,

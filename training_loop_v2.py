@@ -142,6 +142,7 @@ def train_v2(
     lcfg = cfg.loss
     gcfg = cfg.generator
     dcfg = cfg.discriminator
+    dtcfg = cfg.data
 
     # ---- Backend tuning ----
     torch.backends.cudnn.benchmark = True
@@ -149,7 +150,7 @@ def train_v2(
     torch.backends.cudnn.allow_tf32 = True
 
     # ---- Data ----
-    train_loader, test_loader = getDataLoader(epoch_size=tcfg.epoch_size)
+    train_loader, test_loader = getDataLoader(epoch_size=tcfg.epoch_size, image_size=dtcfg.image_size, batch_size=dtcfg.batch_size, num_workers=dtcfg.num_workers)
 
     # ---- Models ----
     G_AB, G_BA = getGeneratorsV2(

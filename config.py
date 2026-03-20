@@ -150,7 +150,7 @@ class DataConfig:
 
     data_root: str = "data/E_Staining_DermaRepo/H_E-Staining_dataset"
     image_size: int = 256
-    batch_size: int = 1
+    batch_size: int = 2
     num_workers: int = 4
     augment: bool = True
 

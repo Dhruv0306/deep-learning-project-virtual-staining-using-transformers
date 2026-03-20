@@ -23,7 +23,7 @@ def main():
     """
     # Create a timestamped model directory so each run is isolated.
     model_dir = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_"
+        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\modelsV2_"
         f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     )
     os.makedirs(model_dir, exist_ok=True)
