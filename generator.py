@@ -54,6 +54,18 @@ def _get_2d_sincos_pos_embed(embed_dim, height, width, device, dtype):
 class ReZeroTransformerBlock(nn.Module):
     """
     Transformer block with ReZero residual scaling.
+
+    Each residual branch (attention and MLP) is scaled by a learnable
+    scalar parameter (``alpha_attn``, ``alpha_ffn``) initialised to 0.
+    At initialisation this makes the block an identity transformation,
+    allowing stable training from random weights and enabling the network
+    to learn residuals incrementally.
+
+    Args:
+        dim (int): Token embedding dimension.
+        num_heads (int): Number of attention heads.
+        mlp_ratio (float): MLP hidden dimension relative to ``dim``.
+        dropout (float): Dropout probability in attention and MLP.
     """
 
     def __init__(self, dim, num_heads=8, mlp_ratio=4.0, dropout=0.0):
@@ -75,7 +87,15 @@ class ReZeroTransformerBlock(nn.Module):
         self.alpha_ffn = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x):
-        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        """
+        Apply self-attention and MLP with ReZero-scaled residuals.
+
+        Args:
+            x (torch.Tensor): Token sequence ``(N, L, dim)``.
+
+        Returns:
+            torch.Tensor: Same shape as input.
+        """
         x = x + self.alpha_attn * attn_out
         x = x + self.alpha_ffn * self.mlp(self.norm2(x))
         return x
@@ -84,6 +104,18 @@ class ReZeroTransformerBlock(nn.Module):
 class PixelwiseViT(nn.Module):
     """
     Pixelwise Vision Transformer operating on flattened spatial tokens.
+
+    Reshapes a 2-D feature map ``(N, C, H, W)`` into a sequence of
+    ``H × W`` tokens, adds 2-D sine-cosine positional embeddings, passes
+    the sequence through ``depth`` :class:`ReZeroTransformerBlock` blocks,
+    then reshapes back to ``(N, C, H, W)``.
+
+    Args:
+        dim (int): Feature channel count (equals token embedding dim).
+        depth (int): Number of Transformer blocks to stack.
+        num_heads (int): Number of attention heads per block.
+        mlp_ratio (float): MLP hidden-dim expansion factor.
+        dropout (float): Dropout probability.
     """
 
     def __init__(self, dim, depth=4, num_heads=8, mlp_ratio=4.0, dropout=0.0):
