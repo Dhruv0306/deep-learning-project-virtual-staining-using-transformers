@@ -121,7 +121,7 @@ Filtering defaults (configurable inside `preprocess_data.py`):
 | Parameter | Default | Meaning |
 |---|---|---|
 | `tissue_threshold` | 0.1 | Minimum tissue fraction to keep a patch |
-| `background_keep_ratio` | 0.4 | Fraction of background patches to keep |
+| `background_keep_ratio` | 0.2 | Fraction of background patches to keep |
 | `white_thresh` | 220 | RGB threshold for near-white background |
 | `sat_thresh` | 0.05 | Saturation threshold for low-colour background |
 

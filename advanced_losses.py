@@ -80,19 +80,62 @@ class VGGPerceptualLossV2(nn.Module):
             param.requires_grad = False
 
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        mean: torch.Tensor = self.mean.to(x.device).to(x.dtype)  # type: ignore
+        """
+        Apply ImageNet mean/std normalisation.
+
+        The registered buffers ``mean`` and ``std`` are cast to the dtype
+        and device of ``x`` so the method is safe to call under AMP
+        (float16) and on any device.
+
+        Args:
+            x (torch.Tensor): Image batch in ``[0, 1]`` range after
+                de-normalising from ``[-1, 1]``.
+
+        Returns:
+            torch.Tensor: ImageNet-normalised tensor, same shape as ``x``.
+        """
         std: torch.Tensor = self.std.to(x.device).to(x.dtype)  # type: ignore
         return (x - mean) / std
 
     def _extract(self, x: torch.Tensor):
-        h1 = self.slice1(x)
+        """
+        Extract multi-level VGG19 feature activations.
+
+        Passes ``x`` sequentially through the four feature-extraction slices,
+        each slice picking up where the previous left off so that activations
+        at increasing depths are returned.
+
+        Args:
+            x (torch.Tensor): ImageNet-normalised image tensor
+                ``(N, 3, H, W)``.
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]: ``(h1, h2, h3, h4)``
+            feature maps at relu1_2, relu2_2, relu3_4, and relu4_4.
+        """
         h2 = self.slice2(h1)
         h3 = self.slice3(h2)
         h4 = self.slice4(h3)
         return h1, h2, h3, h4
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        if x.shape[1] == 1:
+        """
+        Compute the multi-level VGG19 perceptual loss between two image batches.
+
+        Grayscale inputs (1-channel) are broadcast to 3 channels before
+        processing.  Both images are optionally resized to ``resize_to``
+        before feature extraction.
+
+        Args:
+            x (torch.Tensor): First image batch ``(N, C, H, W)`` in the
+                ``[-1, 1]`` range (model output or cycle-reconstructed image).
+            y (torch.Tensor): Second image batch ``(N, C, H, W)`` in the
+                ``[-1, 1]`` range (target/real image, detach before passing).
+
+        Returns:
+            torch.Tensor: Scalar perceptual loss — weighted sum of L1
+            distances at four VGG feature levels.
+        """
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
 
@@ -130,10 +173,36 @@ class VGGPerceptualLossV2(nn.Module):
 
 
 class SpectralLoss(nn.Module):
-    """Frequency-domain loss via log-magnitude FFT L1 distance."""
+    """
+    Frequency-domain loss via log-magnitude FFT L1 distance.
+
+    Measures the difference between two images in the frequency domain by
+    comparing the log-magnitude of their 2-D real FFT (``rfft2``).  Using
+    the logarithm compresses the wide dynamic range of Fourier coefficients
+    and makes the loss sensitive to both low-frequency colour/brightness
+    differences and high-frequency texture/edge differences.
+
+    This loss encourages generated images to match the spectral envelope of
+    the target distribution, which helps with texture fidelity.  It is
+    disabled by default (``lambda_spectral=0``); enable by setting
+    ``lambda_spectral > 0`` in :class:`UVCGANLoss`.
+    """
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        x_f = torch.fft.rfft2(x.float(), norm="ortho")
+        """
+        Compute the log-magnitude spectral L1 loss between two image batches.
+
+        Both tensors are cast to float32 before the FFT so the loss is safe
+        to call inside an AMP context (float16 inputs are accepted).
+
+        Args:
+            x (torch.Tensor): First image batch ``(N, C, H, W)``.
+            y (torch.Tensor): Second image batch ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Scalar L1 distance between
+            ``log(1 + |FFT(x)|)`` and ``log(1 + |FFT(y)|)``.
+        """
         y_f = torch.fft.rfft2(y.float(), norm="ortho")
         return F.l1_loss(torch.log1p(x_f.abs()), torch.log1p(y_f.abs()))
 
@@ -165,14 +234,44 @@ class ContrastiveLoss(nn.Module):
         )
 
     def _project(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 4:
+        """
+        Project a feature tensor to the contrastive embedding space.
+
+        4-D feature maps ``(N, C, H, W)`` are first reduced to ``(N, C)``
+        via global average pooling before being passed through the
+        projection MLP.  The output is L2-normalised so that cosine
+        similarities are equivalent to dot products.
+
+        Args:
+            x (torch.Tensor): Feature tensor ``(N, C)`` or ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: L2-normalised projection ``(N, proj_dim)``.
+        """
             x = x.mean(dim=[2, 3])  # global average pool
         return F.normalize(self.projection(x), dim=1)
 
     def forward(
         self, anchor: torch.Tensor, positive: torch.Tensor, negative: torch.Tensor
     ) -> torch.Tensor:
-        z_a = self._project(anchor)
+        """
+        Compute the NT-Xent (normalised temperature-scaled cross-entropy) loss.
+
+        Each sample in the batch is treated as an ``(anchor, positive,
+        negative)`` triplet.  The loss encourages the anchor to be close to
+        the positive in embedding space and far from the negative.
+
+        Args:
+            anchor (torch.Tensor): Bottleneck features from the translated
+                image ``(N, C)`` or ``(N, C, H, W)``.
+            positive (torch.Tensor): Bottleneck features from the real target
+                image in the same domain ``(N, C)`` or ``(N, C, H, W)``.
+            negative (torch.Tensor): Bottleneck features from the real source
+                image in the other domain ``(N, C)`` or ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Scalar cross-entropy loss.
+        """
         z_p = self._project(positive)
         z_n = self._project(negative)
         sim_pos = (z_a * z_p).sum(dim=1) / self.temperature

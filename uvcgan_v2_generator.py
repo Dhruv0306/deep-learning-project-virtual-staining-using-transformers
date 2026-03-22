@@ -173,7 +173,23 @@ class PixelwiseViTV2(nn.Module):
 
 
 class ResidualConvBlock(nn.Module):
-    """Residual 3x3 conv block with InstanceNorm and reflection padding."""
+    """
+    Residual convolution block used in the encoder, decoder, and bottleneck.
+
+    Each block applies two consecutive 3×3 convolutions with reflection
+    padding (to avoid border artefacts), InstanceNorm, and ReLU activation,
+    then adds the input via a skip connection.  An optional dropout layer
+    is inserted between the two convolutions when ``dropout > 0``.
+
+    The residual connection allows gradients to flow directly from the
+    output to the input, preventing vanishing gradients in deep networks.
+
+    Args:
+        channels (int): Number of input and output feature channels
+            (spatial dimensions are preserved).
+        dropout (float): Dropout probability applied after the first
+            activation.  Set to ``0.0`` to disable (default).
+    """
 
     def __init__(self, channels: int, dropout: float = 0.0):
         super().__init__()
@@ -193,11 +209,36 @@ class ResidualConvBlock(nn.Module):
         self.block = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the residual block.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, channels, H, W)``.
+
+        Returns:
+            torch.Tensor: ``x + block(x)`` — same shape as input.
+        """
         return x + self.block(x)
 
 
 class DownBlock(nn.Module):
-    """Strided 4x4 convolution encoder block (stride-2 downsampling)."""
+    """
+    Strided encoder block that halves spatial resolution.
+
+    Applies a single 4×4 convolution with ``stride=2`` followed by
+    InstanceNorm and ReLU.  Spatial dimensions change as
+    ``(H, W) → (H/2, W/2)`` while the channel count grows from
+    ``in_channels`` to ``out_channels``.
+
+    Preferred over ``MaxPool + Conv`` because the strided convolution is
+    learnable and does not throw away spatial information before
+    normalisation.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels (typically
+            double the input count at each encoder level).
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -215,11 +256,32 @@ class DownBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the strided convolution block.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Downsampled map ``(N, out_channels, H/2, W/2)``.
+        """
         return self.block(x)
 
 
 class UpBlock(nn.Module):
-    """Nearest-neighbour upsampling followed by a 3x3 conv (no checkerboard)."""
+    """
+    Decoder block that doubles spatial resolution without checkerboard artefacts.
+
+    Uses nearest-neighbour upsampling (×2) followed by a 3×3 reflection-padded
+    convolution, InstanceNorm, and ReLU.  This avoids the checkerboard pattern
+    that can appear with transposed convolutions (deconvolutions), especially
+    at early training stages.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels (typically
+            half the input count at each decoder level).
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -232,11 +294,35 @@ class UpBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the nearest-neighbour upsampling followed by convolution.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Upsampled map ``(N, out_channels, H*2, W*2)``.
+        """
         return self.block(x)
 
 
 class CrossDomainFusion(nn.Module):
-    """Lightweight 1x1 conv that fuses skip-connection features from both generators."""
+    """
+    Lightweight module that fuses skip-connection features from both generators.
+
+    Concatenates the self skip features with the paired generator's skip
+    features along the channel axis, then reduces back to ``channels``
+    with a 1×1 convolution followed by InstanceNorm and ReLU.
+
+    The paired generator's features are detached before the concatenation
+    so that their gradients do not propagate back through the other generator
+    during the current generator's backward pass.  This preserves the
+    independent parameter updates of each generator.
+
+    Args:
+        channels (int): Number of channels in each of the two skip tensors.
+            The concatenated input will have ``2 × channels`` channels.
+    """
 
     def __init__(self, channels: int):
         super().__init__()
@@ -249,6 +335,18 @@ class CrossDomainFusion(nn.Module):
     def forward(
         self, feat_self: torch.Tensor, feat_other: torch.Tensor
     ) -> torch.Tensor:
+        """
+        Fuse self and paired-generator skip features.
+
+        Args:
+            feat_self (torch.Tensor): Skip features from the current generator
+                ``(N, channels, H, W)``.
+            feat_other (torch.Tensor): Skip features from the paired generator
+                ``(N, channels, H, W)``.  Detached internally before use.
+
+        Returns:
+            torch.Tensor: Fused feature map ``(N, channels, H, W)``.
+        """
         return self.fuse(torch.cat([feat_self, feat_other.detach()], dim=1))
 
 
@@ -401,7 +499,22 @@ class ViTUNetGeneratorV2(nn.Module):
     # ------------------------------------------------------------------
 
     def _encode_segment(self, x: torch.Tensor):
-        """Single-segment encode -- used as the checkpointable unit."""
+        """
+        Run the encoder down-path and return all intermediate skip features.
+
+        This method is the checkpointable unit: when gradient checkpointing
+        is enabled it is wrapped with ``torch.utils.checkpoint.checkpoint``
+        inside :meth:`encode` so that its activations are recomputed during
+        the backward pass instead of being stored in memory.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]:
+                ``(e0, e1, e2, e3)`` — encoder feature maps at resolutions
+                ``H/1``, ``H/2``, ``H/4``, ``H/8`` respectively.
+        """
         e0 = self.enc_in(x)
         e1 = self.res_enc1(self.down1(e0))
         e2 = self.res_enc2(self.down2(e1))
@@ -410,10 +523,17 @@ class ViTUNetGeneratorV2(nn.Module):
 
     def encode(self, x: torch.Tensor):
         """
-        Run the encoder and return intermediate feature maps.
+        Run the full encoder (down-path + bottleneck) and return all feature maps.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
 
         Returns:
-            tuple: (e0, e1, e2, e3, bottleneck)
+            tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+                ``(e0, e1, e2, e3, bottleneck)`` where each ``eN`` is the
+                encoder feature map saved for the skip connection at the
+                corresponding decoder level, and ``bottleneck`` is the
+                ViT-processed deepest feature map.
         """
         e0, e1, e2, e3 = self._encode_segment(x)
 
@@ -421,7 +541,24 @@ class ViTUNetGeneratorV2(nn.Module):
         return e0, e1, e2, e3, b
 
     def decode(self, b, e0, e1, e2, e3) -> torch.Tensor:
-        """Run the decoder given bottleneck and skip features."""
+        """
+        Run the decoder (up-path) given bottleneck and skip features.
+
+        At each decoder level the upsampled feature map is concatenated
+        with the corresponding encoder skip feature, then merged with a
+        1×1 convolution followed by InstanceNorm and ReLU.
+
+        Args:
+            b (torch.Tensor): Bottleneck tensor ``(N, c4, H/16, W/16)``.
+            e0 (torch.Tensor): Skip from ``enc_in``  — ``(N, c1, H, W)``.
+            e1 (torch.Tensor): Skip from ``res_enc1`` — ``(N, c2, H/2, W/2)``.
+            e2 (torch.Tensor): Skip from ``res_enc2`` — ``(N, c3, H/4, W/4)``.
+            e3 (torch.Tensor): Skip from ``res_enc3`` — ``(N, c4, H/8, W/8)``.
+
+        Returns:
+            torch.Tensor: Output image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]`` (Tanh activation applied).
+        """
         u1 = self.dec1_merge(torch.cat([self.up1(b), e3], dim=1))
         u2 = self.dec2_merge(torch.cat([self.up2(u1), e2], dim=1))
         u3 = self.dec3_merge(torch.cat([self.up3(u2), e1], dim=1))
@@ -433,7 +570,17 @@ class ViTUNetGeneratorV2(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Standard forward pass (no cross-domain fusion)."""
+        """
+        Standard forward pass without cross-domain skip fusion.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``
+                with values in ``[-1, 1]``.
+
+        Returns:
+            torch.Tensor: Translated image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]``.
+        """
         e0, e1, e2, e3, b = self.encode(x)
         return self.decode(b, e0, e1, e2, e3)
 
@@ -441,10 +588,27 @@ class ViTUNetGeneratorV2(nn.Module):
         """
         Forward pass with cross-domain skip-connection fusion.
 
+        The paired generator's encoder skip features are passed through a
+        :class:`CrossDomainFusion` layer at each decoder level so that both
+        generators can share structural information without coupling their
+        parameters.  This is the defining UVCGAN feature.
+
         Args:
-            x: Input image tensor (N, input_nc, H, W).
-            other_skips: Tuple (eo0, eo1, eo2, eo3) of skip features from
-                the paired generator (detached inside CrossDomainFusion).
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``
+                with values in ``[-1, 1]``.
+            other_skips (tuple[Tensor, Tensor, Tensor, Tensor]): Encoder skip
+                features ``(oe0, oe1, oe2, oe3)`` from the paired generator,
+                obtained via :meth:`get_skip_features`.  They are detached
+                inside :class:`CrossDomainFusion` to prevent cross-generator
+                gradient flow.
+
+        Returns:
+            torch.Tensor: Translated image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]``.
+
+        Raises:
+            RuntimeError: If this generator was constructed with
+                ``use_cross_domain=False``.
         """
         if not self.use_cross_domain:
             raise RuntimeError(
@@ -459,7 +623,20 @@ class ViTUNetGeneratorV2(nn.Module):
         return self.decode(b, e0, e1, e2, e3)
 
     def get_skip_features(self, x: torch.Tensor):
-        """Return only the encoder skip features (no decoding)."""
+        """
+        Run the encoder only and return the skip-connection feature maps.
+
+        Used by the training loop to obtain skip features from one generator
+        before passing them to the paired generator's
+        :meth:`forward_with_cross_domain`.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]: ``(e0, e1, e2, e3)``
+            encoder feature maps at four spatial scales.
+        """
         e0, e1, e2, e3, _ = self.encode(x)
         return e0, e1, e2, e3
 

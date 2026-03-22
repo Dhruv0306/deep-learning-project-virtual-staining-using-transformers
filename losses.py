@@ -148,7 +148,29 @@ class CycleGANLoss:
 
     def gradient_penalty(self, D, real, fake):
         """
-        Gradient penalty for improved training stability.
+        Compute the two-sided gradient penalty for training stability.
+
+        Implements the WGAN-GP penalty (Gulrajani et al., 2017):
+
+        .. math::
+
+            \\text{GP} = \\mathbb{E}\\left[(\\|\\nabla_\\hat{x}D(\\hat{x})\\|_2 - 1)^2\\right]
+
+        where :math:`\\hat{x}` is a random linear interpolation between
+        ``real`` and ``fake``.  The penalty forces the discriminator's
+        gradient norm to be close to 1 along the interpolated samples,
+        which enforces approximate 1-Lipschitz continuity.
+
+        The computation is performed in float32 inside an
+        ``autocast(enabled=False)`` block to avoid NaN gradients under AMP.
+
+        Args:
+            D (nn.Module): Discriminator in train mode.
+            real (torch.Tensor): Real image batch ``(N, C, H, W)``.
+            fake (torch.Tensor): Generated image batch ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Scalar gradient penalty ≥ 0.
         """
         batch_size = real.size(0)
         epsilon = torch.rand(batch_size, 1, 1, 1, device=real.device)
@@ -172,10 +194,21 @@ class CycleGANLoss:
 
     def get_identity_lambda(self, epoch, total_epochs):
         """
-        Decay the identity loss after 50% of training.
+        Return the current identity loss weight with exponential decay.
 
-        This helps stabilize early training but reduces the identity constraint
-        later so generators can better focus on translation.
+        The identity weight is held constant at ``lambda_identity`` for the
+        first 50% of training, then decays multiplicatively by a factor of
+        0.997 per epoch.  This helps stabilise early training (the identity
+        constraint prevents the generators from mapping everything to a
+        trivial output) while gradually relaxing it later so the generators
+        can focus entirely on high-quality translation.
+
+        Args:
+            epoch (int): Current training epoch (1-indexed).
+            total_epochs (int): Total number of training epochs.
+
+        Returns:
+            float: Effective identity loss weight for the current epoch.
         """
         if epoch <= 0.50 * total_epochs:
             return self.lambda_identity

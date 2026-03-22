@@ -54,10 +54,27 @@ from validation import calculate_metrics, run_validation
 
 def _make_lr_lambda(warmup: int, decay_start: int, total: int):
     """
-    LambdaLR schedule:
-      [0,        warmup)      : linear ramp  0 -> 1
-      [warmup,   decay_start) : constant 1
-      [decay_start, total)    : linear decay 1 -> 0
+    Build a ``LambdaLR`` callable that implements a three-phase LR schedule.
+
+    Phase 1 — linear warm-up (epochs ``[0, warmup)``):
+        LR scales from nearly 0 up to 1.  A floor of ``1e-8`` is used so
+        that the LR is never exactly 0, preventing zero gradients on the
+        very first step.
+
+    Phase 2 — constant plateau (epochs ``[warmup, decay_start)``):
+        LR is held at 1 × base LR.
+
+    Phase 3 — linear decay (epochs ``[decay_start, total)``):
+        LR decays from 1 down to 0 linearly.
+
+    Args:
+        warmup (int): Number of warm-up epochs.
+        decay_start (int): First epoch of the linear decay phase.
+        total (int): Total number of training epochs.
+
+    Returns:
+        Callable[[int], float]: A function ``lr_lambda(epoch) -> float``
+        that returns the multiplicative factor for ``LambdaLR``.
     """
 
     def lr_lambda(epoch: int) -> float:
@@ -79,7 +96,21 @@ def _make_lr_lambda(warmup: int, decay_start: int, total: int):
 
 
 def _global_grad_norm(parameters) -> float:
-    grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
+    """
+    Compute the global L2 gradient norm across a collection of parameters.
+
+    Equivalent to ``torch.nn.utils.clip_grad_norm_`` with no clipping, but
+    returns the pre-clip norm as a plain Python float for logging.
+
+    Args:
+        parameters (Iterable[nn.Parameter]): Model parameters whose
+            ``.grad`` attributes should be included.  Parameters with
+            ``None`` gradient are silently skipped.
+
+    Returns:
+        float: Global L2 norm of all gradient tensors, or ``0.0`` if no
+        parameter has a gradient.
+    """
     if not grads:
         return 0.0
     return float(torch.norm(torch.stack([g.norm() for g in grads])))

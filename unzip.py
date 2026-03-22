@@ -1,3 +1,17 @@
+"""
+Dataset extraction utility.
+
+Extracts the E-Staining DermaRepo ZIP archive into a flat directory structure
+suitable for the preprocessing pipeline.  Uses streaming extraction with a
+10 MB copy buffer so that very large whole-slide images are handled without
+loading them fully into memory.
+
+Usage::
+
+    # Edit zip_path and out_dir at the top of the file, then run:
+    python unzip.py
+"""
+
 import os
 import zipfile
 import shutil
