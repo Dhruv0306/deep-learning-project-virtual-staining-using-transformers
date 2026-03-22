@@ -27,3 +27,13 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | File | Documentation | Description |
 |---|---|---|
 | `config.py` | [config.md](config.md) | All hyperparameters across all dataclasses. Every field explained. `get_8gb_config()` VRAM savings table |
+| `data_loader.py` | [data_loader.md](data_loader.md) | Unpaired dataset class, transform pipeline, `getDataLoader` factory, and `denormalize` helper |
+| `replay_buffer.py` | [replay_buffer.md](replay_buffer.md) | Fixed-size pool of past fake images for discriminator stabilisation |
+| `metrics.py` | [metrics.md](metrics.md) | SSIM, PSNR, and FID metrics via `MetricsCalculator`. InceptionV3 feature extraction |
+| `validation.py` | [validation.md](validation.md) | Per-epoch validation image saving and quantitative metric computation |
+| `testing.py` | [testing.md](testing.md) | Final test-set inference and image export |
+| `EarlyStopping.py` | [early_stopping.md](early_stopping.md) | SSIM-plateau and loss-divergence early stopping |
+| `history_utils.py` | [history_utils.md](history_utils.md) | Training history visualisation, CSV save/append/load |
+| `preprocess_data.py` | [preprocess_data.md](preprocess_data.md) | Whole-slide patch extraction, tissue filtering, train/test split |
+| `trainModel.py` | [train_model.md](train_model.md) | Interactive training entry point. Prompts for parameters and dispatches to v1 or v2 loop |
+| `app.py` | [app.md](app.md) | Patch-based whole-slide inference with cosine blending. Supports both model versions |
