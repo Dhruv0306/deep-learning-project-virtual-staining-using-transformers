@@ -150,6 +150,10 @@ def train_v2(
     )
 
     # ---- Models ----
+    gcfg.use_gradient_checkpointing = False
+    gcfg.vit_depth = 4
+    dcfg.num_scales = 3
+    lcfg.perceptual_resize = 196
     G_AB, G_BA = getGeneratorsV2(
         base_channels=gcfg.base_channels,
         vit_depth=gcfg.vit_depth,

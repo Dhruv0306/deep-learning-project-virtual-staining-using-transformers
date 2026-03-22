@@ -4,20 +4,60 @@ from torchvision.utils import save_image
 from PIL import Image
 from PIL import ImageFile
 import math
-from generator import ViTUNetGenerator
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def load_model(checkpoint_path=None, device="cpu"):
+def _infer_v2_kwargs(state_dict: dict) -> dict:
+    """
+    Read architecture hyperparameters directly from a v2 checkpoint state dict
+    so the model we build always matches what was saved, regardless of which
+    config was used during training.
+
+    Detects:
+        vit_depth        — number of ViT blocks (count unique block indices)
+        use_cross_domain — True if fuse* layers are present in the weights
+    """
+    block_indices = set()
+    for key in state_dict:
+        # keys look like "vit.blocks.0.gamma_attn", "vit.blocks.1.norm1.weight" ...
+        if key.startswith("vit.blocks."):
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                block_indices.add(int(parts[2]))
+
+    vit_depth = len(block_indices) if block_indices else 4
+    use_cross_domain = any(k.startswith("fuse") for k in state_dict)
+
+    print(
+        f"[load_model] auto-detected vit_depth={vit_depth}, use_cross_domain={use_cross_domain}"
+    )
+    return {"vit_depth": vit_depth, "use_cross_domain": use_cross_domain}
+
+
+def load_model(checkpoint_path=None, device="cpu", model_version=2):
     if checkpoint_path is None:
         raise ValueError("Checkpoint_path is required")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    G_AB = ViTUNetGenerator().to(device)
-    G_BA = ViTUNetGenerator().to(device)
+    if model_version == 1:
+        from generator import ViTUNetGenerator
+
+        G_AB = ViTUNetGenerator().to(device)
+        G_BA = ViTUNetGenerator().to(device)
+
+    elif model_version == 2:
+        from uvcgan_v2_generator import ViTUNetGeneratorV2
+
+        # Infer the exact architecture that was used when this checkpoint was saved.
+        kwargs = _infer_v2_kwargs(checkpoint["G_AB"])
+        G_AB = ViTUNetGeneratorV2(**kwargs).to(device)
+        G_BA = ViTUNetGeneratorV2(**kwargs).to(device)
+
+    else:
+        raise ValueError(f"model_version must be 1 or 2, got {model_version!r}")
 
     G_AB.load_state_dict(checkpoint["G_AB"])
     G_BA.load_state_dict(checkpoint["G_BA"])
@@ -80,7 +120,10 @@ def _blend_window(patch_size, device, dtype, eps=0.05):
     if patch_size <= 1:
         return torch.ones(1, 1, device=device, dtype=dtype)
 
-    window_1d = torch.sin(torch.linspace(0, math.pi, patch_size, device=device, dtype=dtype)) ** 2
+    window_1d = (
+        torch.sin(torch.linspace(0, math.pi, patch_size, device=device, dtype=dtype))
+        ** 2
+    )
     window_1d = window_1d * (1.0 - eps) + eps
     window_2d = window_1d[:, None] * window_1d[None, :]
     return window_2d
@@ -136,6 +179,9 @@ def translate_image_from_patches(
             translated_patch = model(patch_tensor).cpu().squeeze(0)
             translated_patches.append(translated_patch)
 
+            if translated_patches.__len__() % 10 == 0:
+                print(f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches")
+
     reconstructed_padded = reconstruct_tensor_from_patches(
         translated_patches,
         positions,
@@ -159,11 +205,15 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     model_path = input("Enter model path: ")
+    model_version = int(
+        input(
+            "Enter 1 for Hybrid UVCGAN based or 2 for True-UVCGAN based generator model: "
+        )
+    )
 
     # Load the model
     G_AB, G_BA = load_model(
-        checkpoint_path=model_path,
-        device=device,
+        checkpoint_path=model_path, device=device, model_version=model_version
     )
 
     # Create transform
@@ -183,7 +233,7 @@ if __name__ == "__main__":
     unstained_image_path = (
         "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\Un_Stained\\HC21-01338(A3-1).10X unstained.jpg"
         if unstained_image_path is None or unstained_image_path == ""
-        else unstained_image_path.replace("\\", "\\\\" )
+        else unstained_image_path.replace("\\", "\\\\")
     )
     stained_image_path = (
         "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\C_Stained\\HC21-01338(A3-2).10X unstained.jpg"
