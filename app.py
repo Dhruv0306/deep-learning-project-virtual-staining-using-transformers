@@ -1,3 +1,35 @@
+"""
+Inference script for whole-slide stain / unstain translation.
+
+Loads a trained CycleGAN checkpoint and translates arbitrarily large
+histology images by splitting them into 256×256 patches, running each
+patch through the appropriate generator, and then blending overlapping
+patches back into a seamless full-resolution output image.
+
+Both model versions are supported:
+  - v1 (``ViTUNetGenerator``)   — loaded when ``model_version=1``
+  - v2 (``ViTUNetGeneratorV2``) — loaded when ``model_version=2``
+
+For v2 the architecture hyperparameters (``vit_depth``, ``use_cross_domain``)
+are auto-detected from the checkpoint state dict, so the loaded model always
+matches whatever was saved — regardless of which config was used at training
+time.
+
+CLI usage::
+
+    python app.py
+
+You will be prompted for:
+  - Path to the trained checkpoint (``.pth`` file)
+  - Model version (1 or 2)
+  - Path to an unstained image  (A → B translation via G_AB)
+  - Path to a stained image     (B → A translation via G_BA)
+
+Outputs are written to:
+  - ``data/reconstructed_stained_output.png``
+  - ``data/reconstructed_unstained_output.png``
+"""
+
 import torch
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
@@ -37,6 +69,29 @@ def _infer_v2_kwargs(state_dict: dict) -> dict:
 
 
 def load_model(checkpoint_path=None, device="cpu", model_version=2):
+    """
+    Load a trained CycleGAN checkpoint and return the two generator models.
+
+    For model version 2, the architecture hyperparameters are auto-detected
+    from the checkpoint state dict via :func:`_infer_v2_kwargs`, so the model
+    that is instantiated always matches the one that was saved.
+
+    Args:
+        checkpoint_path (str): Path to a ``.pth`` checkpoint file produced by
+            ``training_loop.train()`` or ``training_loop_v2.train_v2()``.
+        device (str): Device to load the model onto, e.g. ``"cpu"`` or
+            ``"cuda"``.
+        model_version (int): ``1`` loads :class:`~generator.ViTUNetGenerator`;
+            ``2`` loads :class:`~uvcgan_v2_generator.ViTUNetGeneratorV2`.
+
+    Returns:
+        tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` — both in ``eval()``
+        mode on the specified device.
+
+    Raises:
+        ValueError: If ``checkpoint_path`` is ``None`` or ``model_version``
+            is not 1 or 2.
+    """
     if checkpoint_path is None:
         raise ValueError("Checkpoint_path is required")
 
@@ -69,6 +124,22 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
 
 
 def stain_image(image, model, device="cpu"):
+    """
+    Apply a generator model to a pre-processed image tensor (A → B direction).
+
+    A thin wrapper around ``model.forward`` that moves the tensor to the
+    specified device, runs inference under ``torch.no_grad``, and returns
+    the output on CPU.
+
+    Args:
+        image (torch.Tensor): Input tensor of shape ``(1, C, H, W)`` in the
+            ``[-1, 1]`` normalised range.
+        model (nn.Module): Generator (e.g. ``G_AB``) in ``eval()`` mode.
+        device (str): Device to use for inference.
+
+    Returns:
+        torch.Tensor: Generated tensor on CPU with shape ``(1, C, H, W)``.
+    """
     with torch.no_grad():
         image = image.to(device)
         generated_image = model(image)
@@ -76,6 +147,21 @@ def stain_image(image, model, device="cpu"):
 
 
 def unstain_image(image, model, device="cpu"):
+    """
+    Apply a generator model to a pre-processed image tensor (B → A direction).
+
+    Functionally identical to :func:`stain_image`; provided as a named
+    counterpart for readability when calling with ``G_BA``.
+
+    Args:
+        image (torch.Tensor): Input tensor of shape ``(1, C, H, W)`` in the
+            ``[-1, 1]`` normalised range.
+        model (nn.Module): Generator (e.g. ``G_BA``) in ``eval()`` mode.
+        device (str): Device to use for inference.
+
+    Returns:
+        torch.Tensor: Generated tensor on CPU with shape ``(1, C, H, W)``.
+    """
     with torch.no_grad():
         image = image.to(device)
         generated_image = model(image)
@@ -83,6 +169,26 @@ def unstain_image(image, model, device="cpu"):
 
 
 def pad_to_patch_multiple(image, patch_size=256):
+    """
+    Pad a PIL image with white pixels so that both dimensions are exact
+    multiples of ``patch_size``.
+
+    Padding is added to the right and bottom edges only, so the top-left
+    corner of the original image is preserved without any shift.  The
+    padded region is filled with ``(255, 255, 255)`` to approximate the
+    white slide background common in histology images.
+
+    Args:
+        image (PIL.Image.Image): Source RGB image of arbitrary size.
+        patch_size (int): Required spatial multiple (default 256).
+
+    Returns:
+        tuple[PIL.Image.Image, tuple[int, int]]:
+            ``(padded_image, original_size)`` where ``original_size`` is
+            ``(width, height)`` of the unpadded input.  If the input is
+            already an exact multiple, it is returned unchanged along with
+            its own size.
+    """
     width, height = image.size
     padded_width = math.ceil(width / patch_size) * patch_size
     padded_height = math.ceil(height / patch_size) * patch_size
@@ -96,6 +202,28 @@ def pad_to_patch_multiple(image, patch_size=256):
 
 
 def extract_patches_with_coords(pil_image, patch_size=256, stride=256):
+    """
+    Extract all ``patch_size × patch_size`` tiles from a PIL image and
+    return them together with their pixel coordinates.
+
+    Tiles are generated in row-major order (top-to-bottom, left-to-right).
+    When the image dimensions are not exact multiples of ``stride``, an
+    extra row/column of patches is appended so that the far right and
+    bottom edges are always fully covered.
+
+    Args:
+        pil_image (PIL.Image.Image): Source image.  Should already be padded
+            to a multiple of ``patch_size`` via :func:`pad_to_patch_multiple`.
+        patch_size (int): Tile side length in pixels (default 256).
+        stride (int): Step between tile origins.  ``stride == patch_size``
+            gives non-overlapping tiles; ``stride < patch_size`` gives
+            overlapping tiles that can be blended during reconstruction.
+
+    Returns:
+        tuple[list[PIL.Image.Image], list[tuple[int, int]]]:
+            ``(patches, positions)`` where ``positions[i] = (top, left)``
+            is the pixel offset of ``patches[i]`` within ``pil_image``.
+    """
     width, height = pil_image.size
     top_positions = list(range(0, height - patch_size + 1, stride))
     left_positions = list(range(0, width - patch_size + 1, stride))
@@ -117,6 +245,29 @@ def extract_patches_with_coords(pil_image, patch_size=256, stride=256):
 
 
 def _blend_window(patch_size, device, dtype, eps=0.05):
+    """
+    Create a 2-D Hann (raised-cosine) blending window for seamless patch
+    reconstruction.
+
+    The 1-D window is ``sin²(π × k / patch_size)`` for ``k ∈ [0, patch_size)``,
+    which is 0 at the edges and 1 at the centre.  A small floor ``eps`` is
+    added so that edge pixels always receive a non-zero weight and no
+    division-by-zero can occur in the weight map.
+
+    The 2-D window is the outer product of two 1-D windows, giving a smooth
+    tent-like surface that sums to a near-constant value when tiles overlap
+    by exactly 50%.
+
+    Args:
+        patch_size (int): Tile side length (must be > 1).
+        device (torch.device): Device on which to allocate the tensor.
+        dtype (torch.dtype): Floating-point dtype to use.
+        eps (float): Minimum window value at the edges (default 0.05).
+
+    Returns:
+        torch.Tensor: Shape ``(patch_size, patch_size)`` blending weights,
+        all values in ``[eps, 1]``.
+    """
     if patch_size <= 1:
         return torch.ones(1, 1, device=device, dtype=dtype)
 
@@ -132,6 +283,34 @@ def _blend_window(patch_size, device, dtype, eps=0.05):
 def reconstruct_tensor_from_patches(
     patches, positions, image_size, patch_size=256, stride=256
 ):
+    """
+    Reassemble translated patches into a full-resolution image tensor.
+
+    Each patch is placed at its recorded ``(top, left)`` position and
+    multiplied by a per-pixel weight.  When ``stride < patch_size``
+    (overlapping tiles), a 2-D Hann window (:func:`_blend_window`) is used
+    so that contributions from adjacent patches blend smoothly and no
+    hard seam is visible.  When ``stride == patch_size`` (non-overlapping),
+    each pixel receives a uniform weight of 1.
+
+    The final reconstructed tensor is divided by the accumulated weight map
+    (clamped to ``1e-6``) to normalise the weighted sum.
+
+    Args:
+        patches (list[torch.Tensor]): Translated patch tensors, each with
+            shape ``(3, patch_size, patch_size)`` and values in ``[-1, 1]``.
+        positions (list[tuple[int, int]]): ``(top, left)`` pixel offsets
+            matching ``patches``, as returned by
+            :func:`extract_patches_with_coords`.
+        image_size (tuple[int, int]): ``(width, height)`` of the padded
+            source image (not the original, unpadded size).
+        patch_size (int): Tile side length in pixels (default 256).
+        stride (int): Step between tile origins (default 256).
+
+    Returns:
+        torch.Tensor: Reconstructed image tensor of shape
+        ``(3, height, width)`` with values in ``[-1, 1]``.
+    """
     width, height = image_size
     dtype = patches[0].dtype
     device = patches[0].device
@@ -164,6 +343,38 @@ def translate_image_from_patches(
     stride=256,
     device="cpu",
 ):
+    """
+    Translate a whole-slide image by applying a generator patch-by-patch.
+
+    The full pipeline is:
+
+    1. Load the image from ``input_image_path`` as RGB.
+    2. Pad to the nearest multiple of ``patch_size`` with white pixels.
+    3. Extract ``patch_size × patch_size`` tiles with the specified stride.
+    4. Apply ``transform`` to each tile and run ``model`` inference.
+    5. Reconstruct the full image with weighted blending (Hann window when
+       ``stride < patch_size``, uniform window otherwise).
+    6. Crop back to the original image dimensions.
+    7. Save to ``output_path`` with ``torchvision.utils.save_image``.
+
+    A progress message is printed every 10 patches.
+
+    Args:
+        input_image_path (str): Path to the source whole-slide image.
+        model (nn.Module): Generator in ``eval()`` mode.
+        transform (callable): Preprocessing transform applied to each PIL
+            patch before inference (should produce a ``[-1, 1]`` tensor).
+        output_path (str): Path where the translated image is saved (PNG).
+        patch_size (int): Tile side length in pixels (default 256).
+        stride (int): Step between tile origins.  Use ``patch_size // 2``
+            for 50% overlap and smoother seams (default 256 = no overlap).
+        device (str): Inference device (default ``"cpu"``).
+
+    Returns:
+        tuple[tuple[int,int], tuple[int,int], int, str]:
+            ``(original_size, padded_size, num_patches, output_path)``
+            where sizes are ``(width, height)`` tuples.
+    """
     input_image = Image.open(input_image_path).convert("RGB")
     original_size = input_image.size
     padded_image, _ = pad_to_patch_multiple(input_image, patch_size=patch_size)

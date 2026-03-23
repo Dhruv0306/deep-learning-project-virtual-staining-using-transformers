@@ -35,6 +35,16 @@ from typing import Tuple, cast as tcast
 
 
 def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
+    """
+    Build 1-D sine-cosine positional embeddings.
+
+    Args:
+        embed_dim: Embedding dimension (must be even).
+        pos: 1-D position tensor of shape ``(N,)``.
+
+    Returns:
+        torch.Tensor: Positional embeddings of shape ``(N, embed_dim)``.
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for sin/cos positional embedding.")
     omega = torch.arange(embed_dim // 2, device=pos.device, dtype=pos.dtype)
@@ -46,6 +56,24 @@ def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
 def _get_2d_sincos_pos_embed(
     embed_dim: int, height: int, width: int, device, dtype
 ) -> torch.Tensor:
+    """
+    Build 2-D sine-cosine positional embeddings for an ``(H, W)`` grid.
+
+    Combines independent 1-D embeddings for rows and columns by
+    concatenating them along the embedding axis.
+
+    Args:
+        embed_dim: Total embedding dimension (must be even; split equally
+            between height and width halves).
+        height: Grid height in tokens.
+        width: Grid width in tokens.
+        device: Target device for the output tensor.
+        dtype: Target dtype for the output tensor.
+
+    Returns:
+        torch.Tensor: Positional embeddings of shape
+        ``(height * width, embed_dim)``.
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for 2D sin/cos positional embedding.")
     grid_h = torch.arange(height, device=device, dtype=dtype)
@@ -77,6 +105,17 @@ class LayerScaleTransformerBlock(nn.Module):
         dropout: float = 0.0,
         init_values: float = 1e-4,
     ):
+        """
+        Initialize LayerScaleTransformerBlock.
+
+        Args:
+            dim: Token embedding dimension.
+            num_heads: Number of self-attention heads.
+            mlp_ratio: MLP hidden-dim expansion factor.
+            dropout: Dropout probability in attention and MLP layers.
+            init_values: Initial value for the per-channel LayerScale
+                scalars ``gamma_attn`` and ``gamma_ffn``.
+        """
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
@@ -95,6 +134,15 @@ class LayerScaleTransformerBlock(nn.Module):
         self.gamma_ffn = nn.Parameter(init_values * torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply self-attention and MLP with LayerScale-scaled residuals.
+
+        Args:
+            x (torch.Tensor): Token sequence ``(N, L, dim)``.
+
+        Returns:
+            torch.Tensor: Same shape as input.
+        """
         attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
         x = x + self.gamma_attn * attn_out
         x = x + self.gamma_ffn * self.mlp(self.norm2(x))
@@ -130,6 +178,20 @@ class PixelwiseViTV2(nn.Module):
         init_values: float = 1e-4,
         use_gradient_checkpointing: bool = False,
     ):
+        """
+        Initialize PixelwiseViTV2.
+
+        Args:
+            dim: Feature channel count (equals token embedding dimension).
+            depth: Number of LayerScaleTransformerBlock layers to stack.
+            num_heads: Attention heads per block.
+            mlp_ratio: MLP hidden-dim expansion factor.
+            dropout: Dropout probability.
+            init_values: Initial LayerScale scalar value for all blocks.
+            use_gradient_checkpointing: Wrap each block with
+                ``torch.utils.checkpoint`` to reduce activation memory at
+                the cost of ~20% slower backward pass.
+        """
         super().__init__()
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.blocks = nn.ModuleList(
@@ -146,6 +208,15 @@ class PixelwiseViTV2(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the ViT blocks to a spatial feature map.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Transformed feature map, same shape as input.
+        """
         n, c, h, w = x.shape
         tokens = x.flatten(2).transpose(1, 2)  # (N, H*W, C)
         pos = _get_2d_sincos_pos_embed(
@@ -173,9 +244,33 @@ class PixelwiseViTV2(nn.Module):
 
 
 class ResidualConvBlock(nn.Module):
-    """Residual 3x3 conv block with InstanceNorm and reflection padding."""
+    """
+    Residual convolution block used in the encoder, decoder, and bottleneck.
+
+    Each block applies two consecutive 3×3 convolutions with reflection
+    padding (to avoid border artefacts), InstanceNorm, and ReLU activation,
+    then adds the input via a skip connection.  An optional dropout layer
+    is inserted between the two convolutions when ``dropout > 0``.
+
+    The residual connection allows gradients to flow directly from the
+    output to the input, preventing vanishing gradients in deep networks.
+
+    Args:
+        channels (int): Number of input and output feature channels
+            (spatial dimensions are preserved).
+        dropout (float): Dropout probability applied after the first
+            activation.  Set to ``0.0`` to disable (default).
+    """
 
     def __init__(self, channels: int, dropout: float = 0.0):
+        """
+        Initialize ResidualConvBlock.
+
+        Args:
+            channels (int): Number of input and output feature channels.
+            dropout (float): Dropout probability after the first activation.
+                ``0.0`` disables dropout.
+        """
         super().__init__()
         layers = [
             nn.ReflectionPad2d(1),
@@ -193,13 +288,45 @@ class ResidualConvBlock(nn.Module):
         self.block = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the residual block.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, channels, H, W)``.
+
+        Returns:
+            torch.Tensor: ``x + block(x)`` — same shape as input.
+        """
         return x + self.block(x)
 
 
 class DownBlock(nn.Module):
-    """Strided 4x4 convolution encoder block (stride-2 downsampling)."""
+    """
+    Strided encoder block that halves spatial resolution.
+
+    Applies a single 4×4 convolution with ``stride=2`` followed by
+    InstanceNorm and ReLU.  Spatial dimensions change as
+    ``(H, W) → (H/2, W/2)`` while the channel count grows from
+    ``in_channels`` to ``out_channels``.
+
+    Preferred over ``MaxPool + Conv`` because the strided convolution is
+    learnable and does not throw away spatial information before
+    normalisation.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels (typically
+            double the input count at each encoder level).
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """
+        Initialize DownBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(
@@ -215,13 +342,41 @@ class DownBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the strided convolution block.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Downsampled map ``(N, out_channels, H/2, W/2)``.
+        """
         return self.block(x)
 
 
 class UpBlock(nn.Module):
-    """Nearest-neighbour upsampling followed by a 3x3 conv (no checkerboard)."""
+    """
+    Decoder block that doubles spatial resolution without checkerboard artefacts.
+
+    Uses nearest-neighbour upsampling (×2) followed by a 3×3 reflection-padded
+    convolution, InstanceNorm, and ReLU.  This avoids the checkerboard pattern
+    that can appear with transposed convolutions (deconvolutions), especially
+    at early training stages.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels (typically
+            half the input count at each decoder level).
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """
+        Initialize UpBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
@@ -232,13 +387,45 @@ class UpBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the nearest-neighbour upsampling followed by convolution.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Upsampled map ``(N, out_channels, H*2, W*2)``.
+        """
         return self.block(x)
 
 
 class CrossDomainFusion(nn.Module):
-    """Lightweight 1x1 conv that fuses skip-connection features from both generators."""
+    """
+    Lightweight module that fuses skip-connection features from both generators.
+
+    Concatenates the self skip features with the paired generator's skip
+    features along the channel axis, then reduces back to ``channels``
+    with a 1×1 convolution followed by InstanceNorm and ReLU.
+
+    The paired generator's features are detached before the concatenation
+    so that their gradients do not propagate back through the other generator
+    during the current generator's backward pass.  This preserves the
+    independent parameter updates of each generator.
+
+    Args:
+        channels (int): Number of channels in each of the two skip tensors.
+            The concatenated input will have ``2 × channels`` channels.
+    """
 
     def __init__(self, channels: int):
+        """
+        Initialize CrossDomainFusion.
+
+        Args:
+            channels (int): Number of channels in each of the two skip
+                tensors.  The fusion layer accepts ``2 * channels`` channels
+                and projects back to ``channels``.
+        """
         super().__init__()
         self.fuse = nn.Sequential(
             nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False),
@@ -249,6 +436,18 @@ class CrossDomainFusion(nn.Module):
     def forward(
         self, feat_self: torch.Tensor, feat_other: torch.Tensor
     ) -> torch.Tensor:
+        """
+        Fuse self and paired-generator skip features.
+
+        Args:
+            feat_self (torch.Tensor): Skip features from the current generator
+                ``(N, channels, H, W)``.
+            feat_other (torch.Tensor): Skip features from the paired generator
+                ``(N, channels, H, W)``.  Detached internally before use.
+
+        Returns:
+            torch.Tensor: Fused feature map ``(N, channels, H, W)``.
+        """
         return self.fuse(torch.cat([feat_self, feat_other.detach()], dim=1))
 
 
@@ -319,6 +518,23 @@ class ViTUNetGeneratorV2(nn.Module):
         use_cross_domain: bool = True,
         use_gradient_checkpointing: bool = False,
     ):
+        """
+        Initialize ViTUNetGeneratorV2.
+
+        Args:
+            input_nc: Number of input image channels.
+            output_nc: Number of output image channels.
+            base_channels: Feature channels at the shallowest encoder level.
+            vit_depth: Number of Transformer blocks in the bottleneck ViT.
+            vit_heads: Attention heads per Transformer block.
+            vit_mlp_ratio: MLP hidden-dim expansion factor in ViT blocks.
+            vit_dropout: Dropout probability in ViT blocks.
+            layerscale_init: Initial value for LayerScale scalars.
+            use_cross_domain: Allocate cross-domain fusion layers on skip
+                connections.
+            use_gradient_checkpointing: Recompute ViT block activations
+                during backward to reduce VRAM usage.
+        """
         super().__init__()
         c1, c2, c3, c4 = (
             base_channels,
@@ -401,7 +617,22 @@ class ViTUNetGeneratorV2(nn.Module):
     # ------------------------------------------------------------------
 
     def _encode_segment(self, x: torch.Tensor):
-        """Single-segment encode -- used as the checkpointable unit."""
+        """
+        Run the encoder down-path and return all intermediate skip features.
+
+        This method is the checkpointable unit: when gradient checkpointing
+        is enabled it is wrapped with ``torch.utils.checkpoint.checkpoint``
+        inside :meth:`encode` so that its activations are recomputed during
+        the backward pass instead of being stored in memory.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]:
+                ``(e0, e1, e2, e3)`` — encoder feature maps at resolutions
+                ``H/1``, ``H/2``, ``H/4``, ``H/8`` respectively.
+        """
         e0 = self.enc_in(x)
         e1 = self.res_enc1(self.down1(e0))
         e2 = self.res_enc2(self.down2(e1))
@@ -410,10 +641,17 @@ class ViTUNetGeneratorV2(nn.Module):
 
     def encode(self, x: torch.Tensor):
         """
-        Run the encoder and return intermediate feature maps.
+        Run the full encoder (down-path + bottleneck) and return all feature maps.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
 
         Returns:
-            tuple: (e0, e1, e2, e3, bottleneck)
+            tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+                ``(e0, e1, e2, e3, bottleneck)`` where each ``eN`` is the
+                encoder feature map saved for the skip connection at the
+                corresponding decoder level, and ``bottleneck`` is the
+                ViT-processed deepest feature map.
         """
         e0, e1, e2, e3 = self._encode_segment(x)
 
@@ -421,7 +659,24 @@ class ViTUNetGeneratorV2(nn.Module):
         return e0, e1, e2, e3, b
 
     def decode(self, b, e0, e1, e2, e3) -> torch.Tensor:
-        """Run the decoder given bottleneck and skip features."""
+        """
+        Run the decoder (up-path) given bottleneck and skip features.
+
+        At each decoder level the upsampled feature map is concatenated
+        with the corresponding encoder skip feature, then merged with a
+        1×1 convolution followed by InstanceNorm and ReLU.
+
+        Args:
+            b (torch.Tensor): Bottleneck tensor ``(N, c4, H/16, W/16)``.
+            e0 (torch.Tensor): Skip from ``enc_in``  — ``(N, c1, H, W)``.
+            e1 (torch.Tensor): Skip from ``res_enc1`` — ``(N, c2, H/2, W/2)``.
+            e2 (torch.Tensor): Skip from ``res_enc2`` — ``(N, c3, H/4, W/4)``.
+            e3 (torch.Tensor): Skip from ``res_enc3`` — ``(N, c4, H/8, W/8)``.
+
+        Returns:
+            torch.Tensor: Output image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]`` (Tanh activation applied).
+        """
         u1 = self.dec1_merge(torch.cat([self.up1(b), e3], dim=1))
         u2 = self.dec2_merge(torch.cat([self.up2(u1), e2], dim=1))
         u3 = self.dec3_merge(torch.cat([self.up3(u2), e1], dim=1))
@@ -433,7 +688,17 @@ class ViTUNetGeneratorV2(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Standard forward pass (no cross-domain fusion)."""
+        """
+        Standard forward pass without cross-domain skip fusion.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``
+                with values in ``[-1, 1]``.
+
+        Returns:
+            torch.Tensor: Translated image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]``.
+        """
         e0, e1, e2, e3, b = self.encode(x)
         return self.decode(b, e0, e1, e2, e3)
 
@@ -441,10 +706,27 @@ class ViTUNetGeneratorV2(nn.Module):
         """
         Forward pass with cross-domain skip-connection fusion.
 
+        The paired generator's encoder skip features are passed through a
+        :class:`CrossDomainFusion` layer at each decoder level so that both
+        generators can share structural information without coupling their
+        parameters.  This is the defining UVCGAN feature.
+
         Args:
-            x: Input image tensor (N, input_nc, H, W).
-            other_skips: Tuple (eo0, eo1, eo2, eo3) of skip features from
-                the paired generator (detached inside CrossDomainFusion).
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``
+                with values in ``[-1, 1]``.
+            other_skips (tuple[Tensor, Tensor, Tensor, Tensor]): Encoder skip
+                features ``(oe0, oe1, oe2, oe3)`` from the paired generator,
+                obtained via :meth:`get_skip_features`.  They are detached
+                inside :class:`CrossDomainFusion` to prevent cross-generator
+                gradient flow.
+
+        Returns:
+            torch.Tensor: Translated image tensor ``(N, output_nc, H, W)``
+            with values in ``[-1, 1]``.
+
+        Raises:
+            RuntimeError: If this generator was constructed with
+                ``use_cross_domain=False``.
         """
         if not self.use_cross_domain:
             raise RuntimeError(
@@ -459,7 +741,20 @@ class ViTUNetGeneratorV2(nn.Module):
         return self.decode(b, e0, e1, e2, e3)
 
     def get_skip_features(self, x: torch.Tensor):
-        """Return only the encoder skip features (no decoding)."""
+        """
+        Run the encoder only and return the skip-connection feature maps.
+
+        Used by the training loop to obtain skip features from one generator
+        before passing them to the paired generator's
+        :meth:`forward_with_cross_domain`.
+
+        Args:
+            x (torch.Tensor): Input image tensor ``(N, input_nc, H, W)``.
+
+        Returns:
+            tuple[Tensor, Tensor, Tensor, Tensor]: ``(e0, e1, e2, e3)``
+            encoder feature maps at four spatial scales.
+        """
         e0, e1, e2, e3, _ = self.encode(x)
         return e0, e1, e2, e3
 

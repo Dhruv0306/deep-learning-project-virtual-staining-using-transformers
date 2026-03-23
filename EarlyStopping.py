@@ -23,6 +23,17 @@ class EarlyStopping:
         divergence_threshold=5.0,
         divergence_patience=2,
     ):
+        """
+        Initialize EarlyStopping.
+
+        Args:
+            patience (int): Epochs without SSIM improvement before stopping.
+            min_delta (float): Minimum SSIM gain that resets the patience counter.
+            divergence_threshold (float): A loss is considered diverged when it
+                exceeds ``best * divergence_threshold``.
+            divergence_patience (int): Consecutive divergence checks required to
+                trigger a hard stop.
+        """
         self.patience = patience
         self.min_delta = min_delta
         self.divergence_threshold = divergence_threshold

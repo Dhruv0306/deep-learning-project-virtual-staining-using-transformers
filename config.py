@@ -135,7 +135,21 @@ class TrainingConfig:
 
 @dataclass
 class DataConfig:
-    """Data loading configuration."""
+    """
+    Data loading configuration.
+
+    Fields:
+        data_root (str): Root directory of the preprocessed CycleGAN dataset
+            (must contain ``trainA/``, ``trainB/``, ``testA/``, ``testB/``).
+        image_size (int): Spatial size to which every patch is resized
+            during loading.  Must match the patch size used in
+            ``preprocess_data.py`` (default 256).
+        batch_size (int): Number of sample pairs per training mini-batch.
+        num_workers (int): DataLoader worker processes.  Set to 0 to
+            disable multiprocessing (useful for debugging on Windows).
+        augment (bool): Reserved for future augmentation support.
+            Currently unused.
+    """
 
     data_root: str = "data/E_Staining_DermaRepo/H_E-Staining_dataset"
     image_size: int = 256
@@ -146,7 +160,28 @@ class DataConfig:
 
 @dataclass
 class UVCGANConfig:
-    """Top-level configuration container."""
+    """
+    Top-level configuration container for a UVCGAN training run.
+
+    All sub-configurations are grouped into typed dataclass fields so that
+    every hyperparameter is discoverable and type-checked at construction
+    time.  Pass an instance of this class to ``train_v2()`` to control the
+    full training pipeline.
+
+    Fields:
+        model_version (int): ``1`` for the hybrid UVCGAN + CycleGAN model;
+            ``2`` for the true UVCGAN v2 model.
+        generator (GeneratorConfig): Generator architecture settings.
+        discriminator (DiscriminatorConfig): Discriminator settings.
+        loss (LossConfig): Loss function weights and options.
+        training (TrainingConfig): Optimiser, scheduler, and loop settings.
+        data (DataConfig): Dataset path, batch size, and worker settings.
+        model_dir (str | None): Root directory for checkpoints, TensorBoard
+            logs, and CSV history.  Auto-generated from a timestamp when
+            ``None``.
+        val_dir (str | None): Directory for per-epoch validation images.
+            Defaults to ``model_dir/validation_images`` when ``None``.
+    """
 
     model_version: int = 2
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
@@ -158,6 +193,15 @@ class UVCGANConfig:
     val_dir: Optional[str] = None
 
     def __post_init__(self):
+        """
+        Validate inter-field constraints after dataclass initialisation.
+
+        Raises:
+            ValueError: If ``model_version`` is not 1 or 2, or if
+                ``decay_start_epoch`` is too close to ``num_epochs`` to
+                allow a meaningful linear decay phase (fewer than 2 epochs
+                of decay would remain).
+        """
         if self.model_version not in (1, 2):
             raise ValueError(
                 f"model_version must be 1 or 2, got {self.model_version!r}."

@@ -93,6 +93,17 @@ class SpectralNormDiscriminator(nn.Module):
         n_layers: int = 3,
         use_spectral_norm: bool = True,
     ):
+        """
+        Initialize SpectralNormDiscriminator.
+
+        Args:
+            input_nc: Number of input channels (default 3 for RGB).
+            base_channels: Feature channels after the first convolution.
+            n_layers: Number of strided downsampling layers (excluding the
+                final stride-1 layer and the output layer).
+            use_spectral_norm: Apply spectral normalisation to every conv
+                layer.
+        """
         super().__init__()
         layers: list[nn.Module] = [
             # First layer – no normalisation on the input.
@@ -182,6 +193,16 @@ class MultiScaleDiscriminator(nn.Module):
         num_scales: int = 3,
         use_spectral_norm: bool = True,
     ):
+        """
+        Initialize MultiScaleDiscriminator.
+
+        Args:
+            input_nc: Number of input channels.
+            base_channels: Feature channels at the finest scale.
+            n_layers: Strided layers per individual discriminator.
+            num_scales: Number of spatial scales to discriminate at.
+            use_spectral_norm: Apply spectral normalisation.
+        """
         super().__init__()
         self.num_scales = num_scales
         self.discriminators = nn.ModuleList(
