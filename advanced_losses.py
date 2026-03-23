@@ -167,6 +167,12 @@ class VGGPerceptualLossV2(nn.Module):
                     align_corners=False,
                 )
 
+        x = (x + 1.0) / 2.0  # De-normalise from [-1, 1] to [0, 1].
+        y = (y + 1.0) / 2.0  # De-normalise from [-1, 1] to [0, 1].
+
+        x = x.clamp(0.0, 1.0) # Clamp to [0, 1] after de-normalisation
+        y = y.clamp(0.0, 1.0) # Clamp to [0, 1] after de-normalisation
+
         x = self._normalize(x)
         y = self._normalize(y)
         xf = self._extract(x)
