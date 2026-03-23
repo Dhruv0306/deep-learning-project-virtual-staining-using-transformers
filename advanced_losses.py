@@ -215,6 +215,7 @@ class SpectralLoss(nn.Module):
             torch.Tensor: Scalar L1 distance between
             ``log(1 + |FFT(x)|)`` and ``log(1 + |FFT(y)|)``.
         """
+        x_f = torch.fft.rfft2(x.float(), norm="ortho")
         y_f = torch.fft.rfft2(y.float(), norm="ortho")
         return F.l1_loss(torch.log1p(x_f.abs()), torch.log1p(y_f.abs()))
 
@@ -294,6 +295,7 @@ class ContrastiveLoss(nn.Module):
         Returns:
             torch.Tensor: Scalar cross-entropy loss.
         """
+        z_a = self._project(anchor)
         z_p = self._project(positive)
         z_n = self._project(negative)
         sim_pos = (z_a * z_p).sum(dim=1) / self.temperature

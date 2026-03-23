@@ -105,6 +105,7 @@ class ReZeroTransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Same shape as input.
         """
+        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
         x = x + self.alpha_attn * attn_out
         x = x + self.alpha_ffn * self.mlp(self.norm2(x))
         return x

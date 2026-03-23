@@ -120,6 +120,7 @@ def _global_grad_norm(parameters) -> float:
         float: Global L2 norm of all gradient tensors, or ``0.0`` if no
         parameter has a gradient.
     """
+    grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
         return 0.0
     return float(torch.norm(torch.stack([g.norm() for g in grads])))
