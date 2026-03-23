@@ -92,6 +92,7 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
         ValueError: If ``checkpoint_path`` is ``None`` or ``model_version``
             is not 1 or 2.
     """
+    if checkpoint_path is None:
         raise ValueError("Checkpoint_path is required")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)

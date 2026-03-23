@@ -35,6 +35,16 @@ from typing import Tuple, cast as tcast
 
 
 def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
+    """
+    Build 1-D sine-cosine positional embeddings.
+
+    Args:
+        embed_dim: Embedding dimension (must be even).
+        pos: 1-D position tensor of shape ``(N,)``.
+
+    Returns:
+        torch.Tensor: Positional embeddings of shape ``(N, embed_dim)``.
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for sin/cos positional embedding.")
     omega = torch.arange(embed_dim // 2, device=pos.device, dtype=pos.dtype)
@@ -46,6 +56,24 @@ def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
 def _get_2d_sincos_pos_embed(
     embed_dim: int, height: int, width: int, device, dtype
 ) -> torch.Tensor:
+    """
+    Build 2-D sine-cosine positional embeddings for an ``(H, W)`` grid.
+
+    Combines independent 1-D embeddings for rows and columns by
+    concatenating them along the embedding axis.
+
+    Args:
+        embed_dim: Total embedding dimension (must be even; split equally
+            between height and width halves).
+        height: Grid height in tokens.
+        width: Grid width in tokens.
+        device: Target device for the output tensor.
+        dtype: Target dtype for the output tensor.
+
+    Returns:
+        torch.Tensor: Positional embeddings of shape
+        ``(height * width, embed_dim)``.
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for 2D sin/cos positional embedding.")
     grid_h = torch.arange(height, device=device, dtype=dtype)
@@ -77,6 +105,17 @@ class LayerScaleTransformerBlock(nn.Module):
         dropout: float = 0.0,
         init_values: float = 1e-4,
     ):
+        """
+        Initialize LayerScaleTransformerBlock.
+
+        Args:
+            dim: Token embedding dimension.
+            num_heads: Number of self-attention heads.
+            mlp_ratio: MLP hidden-dim expansion factor.
+            dropout: Dropout probability in attention and MLP layers.
+            init_values: Initial value for the per-channel LayerScale
+                scalars ``gamma_attn`` and ``gamma_ffn``.
+        """
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
@@ -95,6 +134,15 @@ class LayerScaleTransformerBlock(nn.Module):
         self.gamma_ffn = nn.Parameter(init_values * torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply self-attention and MLP with LayerScale-scaled residuals.
+
+        Args:
+            x (torch.Tensor): Token sequence ``(N, L, dim)``.
+
+        Returns:
+            torch.Tensor: Same shape as input.
+        """
         attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
         x = x + self.gamma_attn * attn_out
         x = x + self.gamma_ffn * self.mlp(self.norm2(x))
@@ -130,6 +178,20 @@ class PixelwiseViTV2(nn.Module):
         init_values: float = 1e-4,
         use_gradient_checkpointing: bool = False,
     ):
+        """
+        Initialize PixelwiseViTV2.
+
+        Args:
+            dim: Feature channel count (equals token embedding dimension).
+            depth: Number of LayerScaleTransformerBlock layers to stack.
+            num_heads: Attention heads per block.
+            mlp_ratio: MLP hidden-dim expansion factor.
+            dropout: Dropout probability.
+            init_values: Initial LayerScale scalar value for all blocks.
+            use_gradient_checkpointing: Wrap each block with
+                ``torch.utils.checkpoint`` to reduce activation memory at
+                the cost of ~20% slower backward pass.
+        """
         super().__init__()
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.blocks = nn.ModuleList(
@@ -146,6 +208,15 @@ class PixelwiseViTV2(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the ViT blocks to a spatial feature map.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Transformed feature map, same shape as input.
+        """
         n, c, h, w = x.shape
         tokens = x.flatten(2).transpose(1, 2)  # (N, H*W, C)
         pos = _get_2d_sincos_pos_embed(
@@ -192,6 +263,14 @@ class ResidualConvBlock(nn.Module):
     """
 
     def __init__(self, channels: int, dropout: float = 0.0):
+        """
+        Initialize ResidualConvBlock.
+
+        Args:
+            channels (int): Number of input and output feature channels.
+            dropout (float): Dropout probability after the first activation.
+                ``0.0`` disables dropout.
+        """
         super().__init__()
         layers = [
             nn.ReflectionPad2d(1),
@@ -241,6 +320,13 @@ class DownBlock(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """
+        Initialize DownBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(
@@ -284,6 +370,13 @@ class UpBlock(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """
+        Initialize UpBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
@@ -325,6 +418,14 @@ class CrossDomainFusion(nn.Module):
     """
 
     def __init__(self, channels: int):
+        """
+        Initialize CrossDomainFusion.
+
+        Args:
+            channels (int): Number of channels in each of the two skip
+                tensors.  The fusion layer accepts ``2 * channels`` channels
+                and projects back to ``channels``.
+        """
         super().__init__()
         self.fuse = nn.Sequential(
             nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False),
@@ -417,6 +518,23 @@ class ViTUNetGeneratorV2(nn.Module):
         use_cross_domain: bool = True,
         use_gradient_checkpointing: bool = False,
     ):
+        """
+        Initialize ViTUNetGeneratorV2.
+
+        Args:
+            input_nc: Number of input image channels.
+            output_nc: Number of output image channels.
+            base_channels: Feature channels at the shallowest encoder level.
+            vit_depth: Number of Transformer blocks in the bottleneck ViT.
+            vit_heads: Attention heads per Transformer block.
+            vit_mlp_ratio: MLP hidden-dim expansion factor in ViT blocks.
+            vit_dropout: Dropout probability in ViT blocks.
+            layerscale_init: Initial value for LayerScale scalars.
+            use_cross_domain: Allocate cross-domain fusion layers on skip
+                connections.
+            use_gradient_checkpointing: Recompute ViT block activations
+                during backward to reduce VRAM usage.
+        """
         super().__init__()
         c1, c2, c3, c4 = (
             base_channels,

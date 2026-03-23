@@ -39,6 +39,12 @@ class PatchDiscriminator(nn.Module):
     """
 
     def __init__(self, input_nc=3):
+        """
+        Initialize PatchDiscriminator.
+
+        Args:
+            input_nc (int): Number of input image channels (default: 3 for RGB).
+        """
         super(PatchDiscriminator, self).__init__()
 
         model = []

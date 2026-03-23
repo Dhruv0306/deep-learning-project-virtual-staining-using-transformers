@@ -28,6 +28,13 @@ class VGGPerceptualLoss(nn.Module):
     """
 
     def __init__(self, resize_to=128):
+        """
+        Initialize VGGPerceptualLoss.
+
+        Args:
+            resize_to (int | None): Spatial size to which images are resized
+                before feature extraction.  ``None`` skips resizing.
+        """
         super(VGGPerceptualLoss, self).__init__()
         self.eval()
         self.resize_to = resize_to
@@ -121,6 +128,22 @@ class CycleGANLoss:
         perceptual_resize=128,
         device=None,
     ):
+        """
+        Initialize CycleGANLoss.
+
+        Args:
+            lambda_cycle (float): Weight for the cycle-consistency L1 loss.
+            lambda_identity (float): Weight for the identity L1 loss.
+            lambda_cycle_perceptual (float): Weight for the VGG perceptual
+                cycle-consistency loss.
+            lambda_identity_perceptual (float): Weight for the VGG perceptual
+                identity loss.
+            lambda_gp (float): Gradient-penalty weight (WGAN-GP style).
+            perceptual_resize (int): Spatial size passed to
+                :class:`VGGPerceptualLoss`.
+            device (torch.device | None): Target device.  Auto-detected when
+                ``None``.
+        """
         self.lambda_cycle = lambda_cycle
         self.lambda_identity = lambda_identity
         self.lambda_cycle_perceptual = lambda_cycle_perceptual

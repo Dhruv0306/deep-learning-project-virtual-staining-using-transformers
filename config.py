@@ -202,6 +202,7 @@ class UVCGANConfig:
                 allow a meaningful linear decay phase (fewer than 2 epochs
                 of decay would remain).
         """
+        if self.model_version not in (1, 2):
             raise ValueError(
                 f"model_version must be 1 or 2, got {self.model_version!r}."
             )

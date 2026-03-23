@@ -59,6 +59,15 @@ class VGGPerceptualLossV2(nn.Module):
         resize_to: int = 128,
         weights: tuple = (1.0, 1.0, 1.0, 1.0),
     ):
+        """
+        Initialize VGGPerceptualLossV2.
+
+        Args:
+            resize_to: Spatial resolution for VGG input.  ``None`` skips
+                resizing.
+            weights: Per-level loss weights ``(w1, w2, w3, w4)`` applied to
+                relu1_2, relu2_2, relu3_4, and relu4_4 respectively.
+        """
         super().__init__()
         self.resize_to = resize_to
         self.weights = weights
@@ -94,6 +103,7 @@ class VGGPerceptualLossV2(nn.Module):
         Returns:
             torch.Tensor: ImageNet-normalised tensor, same shape as ``x``.
         """
+        mean: torch.Tensor = self.mean.to(x.device).to(x.dtype)  # type: ignore
         std: torch.Tensor = self.std.to(x.device).to(x.dtype)  # type: ignore
         return (x - mean) / std
 
@@ -113,6 +123,7 @@ class VGGPerceptualLossV2(nn.Module):
             tuple[Tensor, Tensor, Tensor, Tensor]: ``(h1, h2, h3, h4)``
             feature maps at relu1_2, relu2_2, relu3_4, and relu4_4.
         """
+        h1 = self.slice1(x)
         h2 = self.slice2(h1)
         h3 = self.slice3(h2)
         h4 = self.slice4(h3)
@@ -136,6 +147,7 @@ class VGGPerceptualLossV2(nn.Module):
             torch.Tensor: Scalar perceptual loss — weighted sum of L1
             distances at four VGG feature levels.
         """
+        if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
 
@@ -225,6 +237,15 @@ class ContrastiveLoss(nn.Module):
     def __init__(
         self, in_features: int = 512, proj_dim: int = 128, temperature: float = 0.07
     ):
+        """
+        Initialize ContrastiveLoss.
+
+        Args:
+            in_features: Dimension of the GAP bottleneck feature vector
+                (512 for ``base_channels=64``).
+            proj_dim: Output dimension of the projection head.
+            temperature: Softmax temperature for the NT-Xent loss.
+        """
         super().__init__()
         self.temperature = temperature
         self.projection = nn.Sequential(
@@ -248,6 +269,7 @@ class ContrastiveLoss(nn.Module):
         Returns:
             torch.Tensor: L2-normalised projection ``(N, proj_dim)``.
         """
+        if x.dim() == 4:
             x = x.mean(dim=[2, 3])  # global average pool
         return F.normalize(self.projection(x), dim=1)
 
@@ -421,6 +443,31 @@ class UVCGANLoss:
         identity_decay_rate: float = 0.997,
         device=None,
     ):
+        """
+        Initialize UVCGANLoss.
+
+        Args:
+            lambda_cycle: Weight for the cycle-consistency L1 loss.
+            lambda_identity: Initial weight for the identity L1 loss.
+            lambda_cycle_perceptual: Weight for the VGG perceptual cycle loss.
+            lambda_identity_perceptual: Weight for the VGG perceptual identity
+                loss.
+            lambda_gp: Gradient-penalty weight (paper value: 0.1).
+            lambda_contrastive: NT-Xent contrastive loss weight.  ``0``
+                disables the contrastive term entirely.
+            lambda_spectral: Spectral (frequency-domain) loss weight.  ``0``
+                disables the spectral term.
+            perceptual_resize: Spatial size used by
+                :class:`VGGPerceptualLossV2`.
+            contrastive_temperature: Temperature for the NT-Xent loss.
+            lsgan_real_label: Label-smoothing target for real discriminator
+                outputs (< 1).
+            identity_decay_start: Fraction of total training epochs at which
+                the identity weight starts decaying.
+            identity_decay_rate: Per-epoch multiplicative decay applied to the
+                identity weight after ``identity_decay_start``.
+            device: Target device.  Auto-detected when ``None``.
+        """
         self.lambda_cycle = lambda_cycle
         self.lambda_identity = lambda_identity
         self.lambda_cycle_perceptual = lambda_cycle_perceptual
@@ -484,6 +531,16 @@ class UVCGANLoss:
         """
 
         def _single(r: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
+            """
+            Compute LSGAN loss for one discriminator scale.
+
+            Args:
+                r: Real discriminator output at this scale.
+                f: Fake discriminator output at this scale.
+
+            Returns:
+                torch.Tensor: Scalar discriminator loss for this scale.
+            """
             loss_real = self.criterion_GAN(
                 r, self.lsgan_real_label * torch.ones_like(r)
             )

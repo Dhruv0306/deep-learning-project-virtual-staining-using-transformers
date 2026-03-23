@@ -69,6 +69,15 @@ class ReZeroTransformerBlock(nn.Module):
     """
 
     def __init__(self, dim, num_heads=8, mlp_ratio=4.0, dropout=0.0):
+        """
+        Initialize ReZeroTransformerBlock.
+
+        Args:
+            dim (int): Token embedding dimension.
+            num_heads (int): Number of self-attention heads.
+            mlp_ratio (float): Expansion factor for the MLP hidden dimension.
+            dropout (float): Dropout probability applied in attention and MLP.
+        """
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
@@ -119,6 +128,16 @@ class PixelwiseViT(nn.Module):
     """
 
     def __init__(self, dim, depth=4, num_heads=8, mlp_ratio=4.0, dropout=0.0):
+        """
+        Initialize PixelwiseViT.
+
+        Args:
+            dim (int): Feature channel count (token embedding dimension).
+            depth (int): Number of stacked ReZeroTransformerBlock layers.
+            num_heads (int): Number of attention heads per block.
+            mlp_ratio (float): MLP hidden-dim expansion factor.
+            dropout (float): Dropout probability.
+        """
         super().__init__()
         self.blocks = nn.ModuleList(
             [
@@ -130,6 +149,15 @@ class PixelwiseViT(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Apply the ViT blocks to a spatial feature map.
+
+        Args:
+            x (torch.Tensor): Feature map ``(N, C, H, W)``.
+
+        Returns:
+            torch.Tensor: Transformed feature map, same shape as input.
+        """
         # x: (N, C, H, W) -> tokens: (N, H*W, C)
         n, c, h, w = x.shape
         tokens = x.flatten(2).transpose(1, 2)
@@ -143,7 +171,26 @@ class PixelwiseViT(nn.Module):
 
 
 class ConvBlock(nn.Module):
+    """
+    Single convolution block: Conv2d → InstanceNorm2d → ReLU.
+
+    Applies a 3×3 convolution with reflection-preserving padding followed by
+    instance normalisation and a ReLU activation.  Spatial dimensions are
+    preserved (padding=1).
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels.
+    """
+
     def __init__(self, in_channels, out_channels):
+        """
+        Initialize ConvBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
@@ -152,11 +199,38 @@ class ConvBlock(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Apply the convolution block.
+
+        Args:
+            x (torch.Tensor): Input feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Output feature map ``(N, out_channels, H, W)``.
+        """
         return self.block(x)
 
 
 class DownsampleBlock(nn.Module):
+    """
+    Strided convolution block that halves spatial resolution.
+
+    Applies a 4×4 convolution with ``stride=2`` followed by InstanceNorm2d
+    and ReLU, reducing ``(H, W)`` to ``(H/2, W/2)``.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels.
+    """
+
     def __init__(self, in_channels, out_channels):
+        """
+        Initialize DownsampleBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(
@@ -172,11 +246,38 @@ class DownsampleBlock(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Apply the strided downsampling block.
+
+        Args:
+            x (torch.Tensor): Input feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Downsampled map ``(N, out_channels, H/2, W/2)``.
+        """
         return self.block(x)
 
 
 class UpsampleBlock(nn.Module):
+    """
+    Nearest-neighbour upsampling block that doubles spatial resolution.
+
+    Applies ×2 nearest-neighbour upsampling followed by a 3×3 convolution,
+    InstanceNorm2d, and ReLU.
+
+    Args:
+        in_channels (int): Number of input feature channels.
+        out_channels (int): Number of output feature channels.
+    """
+
     def __init__(self, in_channels, out_channels):
+        """
+        Initialize UpsampleBlock.
+
+        Args:
+            in_channels (int): Number of input feature channels.
+            out_channels (int): Number of output feature channels.
+        """
         super().__init__()
         self.block = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="nearest"),
@@ -186,6 +287,15 @@ class UpsampleBlock(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Apply the upsampling block.
+
+        Args:
+            x (torch.Tensor): Input feature map ``(N, in_channels, H, W)``.
+
+        Returns:
+            torch.Tensor: Upsampled map ``(N, out_channels, H*2, W*2)``.
+        """
         return self.block(x)
 
 
@@ -204,6 +314,18 @@ class ViTUNetGenerator(nn.Module):
         vit_mlp_ratio=4.0,
         vit_dropout=0.0,
     ):
+        """
+        Initialize ViTUNetGenerator.
+
+        Args:
+            input_nc (int): Number of input image channels.
+            output_nc (int): Number of output image channels.
+            base_channels (int): Feature channels at the shallowest encoder level.
+            vit_depth (int): Number of Transformer blocks in the bottleneck ViT.
+            vit_heads (int): Attention heads per Transformer block.
+            vit_mlp_ratio (float): MLP hidden-dim expansion factor in ViT blocks.
+            vit_dropout (float): Dropout probability in ViT blocks.
+        """
         super().__init__()
         c1, c2, c3, c4 = (
             base_channels,
@@ -246,6 +368,15 @@ class ViTUNetGenerator(nn.Module):
         )
 
     def forward(self, x):
+        """
+        Run the full U-Net + ViT forward pass.
+
+        Args:
+            x (torch.Tensor): Input image ``(N, input_nc, H, W)``.
+
+        Returns:
+            torch.Tensor: Translated image ``(N, output_nc, H, W)`` in ``[-1, 1]``.
+        """
         e1 = self.enc1(x)
         d1 = self.down1(e1)
         e2 = self.enc2(d1)

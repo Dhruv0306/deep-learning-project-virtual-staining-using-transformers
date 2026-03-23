@@ -78,6 +78,15 @@ def _make_lr_lambda(warmup: int, decay_start: int, total: int):
     """
 
     def lr_lambda(epoch: int) -> float:
+        """
+        Compute the LR multiplicative factor for the current epoch.
+
+        Args:
+            epoch (int): Current epoch index (0-based).
+
+        Returns:
+            float: Multiplicative scaling factor applied to the base LR.
+        """
         if epoch < warmup:
             return max(1e-8, epoch / max(1, warmup))
         if epoch < decay_start:
