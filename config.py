@@ -243,68 +243,36 @@ def get_default_config(model_version: int = 2) -> UVCGANConfig:
 
 def get_8gb_config() -> UVCGANConfig:
     """
-    Return a VRAM-optimised UVCGANConfig for 8 GB GPUs.
+    Return a user-tuned UVCGANConfig for 8 GB GPUs.
 
-    Changes from the default config and their estimated VRAM savings:
-
-    ┌─────────────────────────────────────┬──────────┬───────────────────────────┐
-    │ Change                              │ Saving   │ Quality impact            │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ use_gradient_checkpointing = True   │ ~2.5 GB  │ None (same gradients,     │
-    │                                     │          │ ~20% slower backward)     │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ batch_size 4 → 2                    │ ~1.5 GB  │ Compensated by            │
-    │ accumulate_grads 1 → 2              │          │ accumulate_grads=2        │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ num_scales 3 → 2                    │ ~0.4 GB  │ Minor: loses coarsest     │
-    │                                     │          │ discriminator scale       │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ vit_depth 4 → 2                     │ ~0.3 GB  │ Small: fewer ViT blocks   │
-    │                                     │          │ in bottleneck             │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ perceptual_resize 128 → 64          │ ~0.2 GB  │ Very minor: only affects  │
-    │                                     │          │ perceptual loss terms     │
-    ├─────────────────────────────────────┼──────────┼───────────────────────────┤
-    │ use_amp = True  (already default)   │ ~2.0 GB  │ None                      │
-    └─────────────────────────────────────┴──────────┴───────────────────────────┘
-
-    Total estimated saving: ~5–7 GB, bringing peak VRAM from ~11 GB to ~5–6 GB.
-    use_amp is already True so that saving is already baked into the 11 GB figure.
-
-    NOTE: If you still OOM after applying this config, set vit_depth=1 as a last
-    resort. The ViT bottleneck is still present and active; it just has 1 block
-    instead of 2.
+    NOTE: These values reflect current memory testing and are not the
+    original VRAM-minimizing profile. Comments below describe the
+    active settings.
     """
     cfg = UVCGANConfig(model_version=2)
 
-    # --- Biggest win: gradient checkpointing ---
-    # Recomputes activations during backward instead of storing them.
-    # Saves ~2-3 GB with ~20% slower training. Zero quality impact.
-    cfg.generator.use_gradient_checkpointing = True
+    # --- Gradient checkpointing ---
+    # Disabled based on measured memory headroom to keep training faster.
+    cfg.generator.use_gradient_checkpointing = False
 
-    # --- ViT depth: 4 → 2 ---
-    # Each ViT block stores its full activation tensor (N, H*W/256, 512) for backprop.
-    # Halving the depth halves that storage. Quality impact is small for histology
-    # images since the bottleneck is still present and spatially informed.
-    cfg.generator.vit_depth = 2
+    # --- ViT depth ---
+    # Kept at 4 to preserve capacity; not reduced in this profile.
+    cfg.generator.vit_depth = 4
 
-    # --- Discriminator scales: 3 → 2 ---
-    # The third (coarsest) scale operates on 64×64 images and adds the least
-    # discriminative signal for 256×256 patches. Dropping it saves one full
-    # D forward/backward pass per step.
-    cfg.discriminator.num_scales = 2
+    # --- Discriminator scales ---
+    # Kept at 3 (full multi-scale) for stability/quality.
+    cfg.discriminator.num_scales = 3
 
-    # --- Batch size: 4 → 2, with gradient accumulation to compensate ---
+    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
     # batch_size=2 halves activation memory. accumulate_grads=2 means the
     # optimiser steps every 2 batches, so the effective gradient batch is
     # still 4. Loss scaling is handled in training_loop_v2.
     cfg.data.batch_size = 2
     cfg.training.accumulate_grads = 2
 
-    # --- Perceptual loss resize: 128 → 64 ---
-    # VGG19 processes images at this resolution. Halving it saves ~200 MB and
-    # the quality difference on the perceptual terms is negligible.
-    cfg.loss.perceptual_resize = 64
+    # --- Perceptual loss resize ---
+    # Set to 180 based on current memory/quality trade-offs.
+    cfg.loss.perceptual_resize = 180
 
     # --- Everything else stays paper-aligned ---
     cfg.generator.use_cross_domain = True

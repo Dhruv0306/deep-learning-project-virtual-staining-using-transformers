@@ -191,10 +191,6 @@ def train_v2(
     )
 
     # ---- Models ----
-    gcfg.use_gradient_checkpointing = False
-    gcfg.vit_depth = 4
-    dcfg.num_scales = 3
-    lcfg.perceptual_resize = 196
     G_AB, G_BA = getGeneratorsV2(
         base_channels=gcfg.base_channels,
         vit_depth=gcfg.vit_depth,
@@ -291,6 +287,7 @@ def train_v2(
     history = {}
     stopped_epoch = num_epochs
     accumulate = max(1, tcfg.accumulate_grads)
+    accum_count = 0
 
     if accumulate > 1:
         print(
@@ -314,12 +311,26 @@ def train_v2(
         epoch_loss_D_A = 0.0
         epoch_loss_D_B = 0.0
         epoch_grad_norm_G = 0.0
+        accum_count = 0
 
         writer.add_scalar("Epoch", epoch + 1, epoch + 1)
 
         for i, batch in enumerate(train_loader, start=1):
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
+
+            # ADD THIS RIGHT AFTER:
+            if not (real_A.isfinite().all() and real_B.isfinite().all()):
+                print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
+                continue
+
+            real_A_std = real_A.std(dim=[1, 2, 3])
+            real_B_std = real_B.std(dim=[1, 2, 3])
+            if (real_A_std < 1e-4).any() or (real_B_std < 1e-4).any():
+                print(
+                    f"[warn] near-uniform patch at epoch {epoch+1} batch {i}, skipping"
+                )
+                continue
 
             # ==================================================
             # Discriminator step(s)  (n_critic times per G step)
@@ -334,6 +345,7 @@ def train_v2(
             for p in D_B.parameters():
                 p.requires_grad_(True)
 
+            skip_batch = False
             loss_D_A_accum = 0.0
             loss_D_B_accum = 0.0
 
@@ -346,9 +358,22 @@ def train_v2(
                 # UVCGANLoss.discriminator_loss internally disables autocast
                 # for the GP computation -- safe regardless of use_amp.
                 optimizer_D_A.zero_grad(set_to_none=True)
+                optimizer_D_B.zero_grad(set_to_none=True)
                 loss_D_A = loss_fn.discriminator_loss(
                     D_A, real_A, fake_A_d, loss_fn.fake_A_buffer
                 )
+                loss_D_B = loss_fn.discriminator_loss(
+                    D_B, real_B, fake_B_d, loss_fn.fake_B_buffer
+                )
+                if not (torch.isfinite(loss_D_A) and torch.isfinite(loss_D_B)):
+                    print(
+                        f"[warn] non-finite discriminator loss at epoch {epoch+1} batch {i}, skipping batch"
+                    )
+                    optimizer_D_A.zero_grad(set_to_none=True)
+                    optimizer_D_B.zero_grad(set_to_none=True)
+                    skip_batch = True
+                    break
+
                 loss_D_A.backward()
                 if tcfg.grad_clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(
@@ -356,10 +381,6 @@ def train_v2(
                     )
                 optimizer_D_A.step()
 
-                optimizer_D_B.zero_grad(set_to_none=True)
-                loss_D_B = loss_fn.discriminator_loss(
-                    D_B, real_B, fake_B_d, loss_fn.fake_B_buffer
-                )
                 loss_D_B.backward()
                 if tcfg.grad_clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(
@@ -367,8 +388,15 @@ def train_v2(
                     )
                 optimizer_D_B.step()
 
-                loss_D_A_accum += loss_D_A.item()
-                loss_D_B_accum += loss_D_B.item()
+                loss_D_A_item = loss_D_A.item()
+                loss_D_B_item = loss_D_B.item()
+                loss_D_A_accum += loss_D_A_item
+                loss_D_B_accum += loss_D_B_item
+
+            if skip_batch:
+                optimizer_G.zero_grad(set_to_none=True)
+                accum_count = 0
+                continue
 
             loss_D_A_val = loss_D_A_accum / n_critic
             loss_D_B_val = loss_D_B_accum / n_critic
@@ -389,20 +417,38 @@ def train_v2(
                 p.requires_grad_(False)
 
             # Zero gradients only at the start of an accumulation window.
-            if (i - 1) % accumulate == 0:
+            if accum_count == 0:
                 optimizer_G.zero_grad(set_to_none=True)
 
-            with autocast("cuda", enabled=use_amp):
+            with autocast("cuda", enabled=False):
                 loss_G, fake_A, fake_B = loss_fn.generator_loss(
                     real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, num_epochs
                 )
                 # Scale loss so gradients are equivalent to a single large batch.
                 loss_G_scaled = loss_G / accumulate
 
+            loss_G_val = loss_G.item()
+            if not torch.isfinite(loss_G):
+                print(
+                    f"[warn] non-finite Loss_G at epoch {epoch+1} batch {i}, skipping G step"
+                )
+                optimizer_G.zero_grad(set_to_none=True)
+                accum_count = 0
+                continue
+            if not (torch.isfinite(fake_A).all() and torch.isfinite(fake_B).all()):
+                print(
+                    f"[warn] non-finite generator output at epoch {epoch+1} batch {i}, skipping G step"
+                )
+                optimizer_G.zero_grad(set_to_none=True)
+                accum_count = 0
+                continue
             scaler.scale(loss_G_scaled).backward()
+            accum_count += 1
 
             # Step optimiser only when the accumulation window is complete.
-            if i % accumulate == 0 or i == len(train_loader):
+            if accum_count == accumulate or (
+                i == len(train_loader) and accum_count > 0
+            ):
                 if tcfg.grad_clip_norm > 0.0:
                     scaler.unscale_(optimizer_G)
                     torch.nn.utils.clip_grad_norm_(
@@ -414,17 +460,27 @@ def train_v2(
                 )
                 scaler.step(optimizer_G)
                 scaler.update()
+                current_scale = scaler.get_scale()
+                if current_scale < 1.0:
+                    print(
+                        f"[warn] AMP scaler scale dropped below 1.0 ({current_scale}) at epoch {epoch+1} batch {i} — persistent overflow, check VGG/OOM"
+                    )
+
+                accum_count = 0
             else:
                 grad_norm_G = 0.0  # not stepping this batch
 
             # ---- Book-keeping ----
+            loss_D_A_val = loss_D_A_val if math.isfinite(loss_D_A_val) else 0.0
+            loss_D_B_val = loss_D_B_val if math.isfinite(loss_D_B_val) else 0.0
+
             epoch_step[i] = {
                 "Batch": i,
-                "Loss_G": loss_G.item(),
+                "Loss_G": loss_G_val,
                 "Loss_D_A": loss_D_A_val,
                 "Loss_D_B": loss_D_B_val,
             }
-            epoch_loss_G += loss_G.item()
+            epoch_loss_G += loss_G_val
             epoch_loss_D_A += loss_D_A_val
             epoch_loss_D_B += loss_D_B_val
             epoch_grad_norm_G += grad_norm_G

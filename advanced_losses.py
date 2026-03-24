@@ -147,6 +147,9 @@ class VGGPerceptualLossV2(nn.Module):
             torch.Tensor: Scalar perceptual loss — weighted sum of L1
             distances at four VGG feature levels.
         """
+        x = x.float()
+        y = y.float()
+
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
             y = y.repeat(1, 3, 1, 1)
@@ -170,13 +173,14 @@ class VGGPerceptualLossV2(nn.Module):
         x = (x + 1.0) / 2.0  # De-normalise from [-1, 1] to [0, 1].
         y = (y + 1.0) / 2.0  # De-normalise from [-1, 1] to [0, 1].
 
-        x = x.clamp(0.0, 1.0) # Clamp to [0, 1] after de-normalisation
-        y = y.clamp(0.0, 1.0) # Clamp to [0, 1] after de-normalisation
+        x = x.clamp(0.0, 1.0)  # Clamp to [0, 1] after de-normalisation
+        y = y.clamp(0.0, 1.0)  # Clamp to [0, 1] after de-normalisation
 
         x = self._normalize(x)
         y = self._normalize(y)
-        xf = self._extract(x)
-        yf = self._extract(y)
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            xf = self._extract(x.float())
+            yf = self._extract(y.float())
 
         loss = sum(
             (w * F.l1_loss(xfi, yfi) for w, xfi, yfi in zip(self.weights, xf, yf)),
