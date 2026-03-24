@@ -116,13 +116,14 @@ def train(
 
     # Set up output directories and TensorBoard logging.
     model_dir = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models"
+        os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models")
         if model_dir is None
         else model_dir
     )
     os.makedirs(model_dir, exist_ok=True)
-    os.makedirs(f"{model_dir}\\tensorboard_logs", exist_ok=True)
-    writer = SummaryWriter(log_dir=f"{model_dir}\\tensorboard_logs")
+    tb_dir = os.path.join(model_dir, "tensorboard_logs")
+    os.makedirs(tb_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir=tb_dir)
     history_csv_path = os.path.join(model_dir, "training_history.csv")
     if os.path.exists(history_csv_path):
         os.remove(history_csv_path)
@@ -243,7 +244,7 @@ def train(
                     "optimizer_D_A": optimizer_D_A.state_dict(),
                     "optimizer_D_B": optimizer_D_B.state_dict(),
                 },
-                f"{model_dir}\\checkpoint_epoch_{epoch+1}.pth",
+                os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth"),
             )
             writer.add_scalar("Checkpoint saved", epoch + 1, epoch + 1)
 
@@ -275,7 +276,7 @@ def train(
 
         # Run qualitative validation image generation each epoch.
         if val_dir is None:
-            val_dir = f"{model_dir}\\validation_images"
+            val_dir = os.path.join(model_dir, "validation_images")
         save_dir = os.path.join(val_dir, f"epoch_{epoch+1}")
         writer.add_scalar("Validation Started", epoch + 1, epoch + 1)
         run_validation(
@@ -406,7 +407,7 @@ def train(
             "optimizer_D_A": optimizer_D_A.state_dict(),
             "optimizer_D_B": optimizer_D_B.state_dict(),
         },
-        f"{model_dir}\\final_checkpoint_epoch_{stopped_epoch}.pth",
+        os.path.join(model_dir, f"final_checkpoint_epoch_{stopped_epoch}.pth"),
     )
 
     # Persist any remaining history and reload for a consistent return value.

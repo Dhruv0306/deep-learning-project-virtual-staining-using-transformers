@@ -30,12 +30,14 @@ Outputs are written to:
   - ``data/reconstructed_unstained_output.png``
 """
 
+import os
+import math
+
 import torch
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
 from PIL import Image
 from PIL import ImageFile
-import math
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -441,15 +443,24 @@ if __name__ == "__main__":
     # Image paths
     unstained_image_path = input("Provide Path to Unstained Image: ")
     stained_image_path = input("Provide Path to Stained Image: ")
+    dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
     unstained_image_path = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\Un_Stained\\HC21-01338(A3-1).10X unstained.jpg"
-        if unstained_image_path is None or unstained_image_path == ""
-        else unstained_image_path.replace("\\", "\\\\")
+        os.path.join(
+            dataset_root,
+            "Un_Stained",
+            "HC21-01338(A3-1).10X unstained.jpg",
+        )
+        if not unstained_image_path
+        else os.path.normpath(unstained_image_path)
     )
     stained_image_path = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\C_Stained\\HC21-01338(A3-2).10X unstained.jpg"
-        if stained_image_path is None or stained_image_path == ""
-        else stained_image_path.replace("\\", "\\\\")
+        os.path.join(
+            dataset_root,
+            "C_Stained",
+            "HC21-01338(A3-2).10X unstained.jpg",
+        )
+        if not stained_image_path
+        else os.path.normpath(stained_image_path)
     )
 
     print(f"Unstained Image Path: {unstained_image_path}")
@@ -461,7 +472,7 @@ if __name__ == "__main__":
             input_image_path=unstained_image_path,
             model=G_AB,
             transform=transform,
-            output_path="data\\reconstructed_stained_output.png",
+            output_path=os.path.join("data", "reconstructed_stained_output.png"),
             patch_size=patch_size,
             stride=stride,
             device=device,
@@ -480,7 +491,7 @@ if __name__ == "__main__":
             input_image_path=stained_image_path,
             model=G_BA,
             transform=transform,
-            output_path="data\\reconstructed_unstained_output.png",
+            output_path=os.path.join("data", "reconstructed_unstained_output.png"),
             patch_size=patch_size,
             stride=stride,
             device=device,

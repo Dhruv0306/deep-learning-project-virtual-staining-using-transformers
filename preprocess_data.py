@@ -139,14 +139,14 @@ def main():
     Entry point for preprocessing and dataset split generation.
     """
     # Dataset root directory.
-    DATASET_DIR = "data\\E_Staining_DermaRepo\\H_E-Staining_dataset"
+    DATASET_DIR = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
     print(f'Dataset Dir "{DATASET_DIR}"')
 
     # Source folders for unstained and stained images.
-    UNSTAINED_DIR = DATASET_DIR + "\\Un_Stained"
+    UNSTAINED_DIR = os.path.join(DATASET_DIR, "Un_Stained")
     print(f'Unstained Images Dir "{UNSTAINED_DIR}"')
 
-    STAINED_DIR = DATASET_DIR + "\\C_Stained"
+    STAINED_DIR = os.path.join(DATASET_DIR, "C_Stained")
     print(f'Stained Images Dir "{STAINED_DIR}"')
 
     # Inspect one sample unstained image for sanity check.
@@ -167,10 +167,10 @@ def main():
     np.random.seed(42)
 
     # CycleGAN-style output folders.
-    os.makedirs(f"{DATASET_DIR}\\trainA", exist_ok=True)
-    os.makedirs(f"{DATASET_DIR}\\trainB", exist_ok=True)
-    os.makedirs(f"{DATASET_DIR}\\testA", exist_ok=True)
-    os.makedirs(f"{DATASET_DIR}\\testB", exist_ok=True)
+    os.makedirs(os.path.join(DATASET_DIR, "trainA"), exist_ok=True)
+    os.makedirs(os.path.join(DATASET_DIR, "trainB"), exist_ok=True)
+    os.makedirs(os.path.join(DATASET_DIR, "testA"), exist_ok=True)
+    os.makedirs(os.path.join(DATASET_DIR, "testB"), exist_ok=True)
 
     print(f"Saving Unstained Images Patch")
     print(f"Splitting images in train test list")
@@ -186,7 +186,7 @@ def main():
         # Unstained images become domain A.
         save_patches(
             os.path.join(UNSTAINED_DIR, img_name),
-            f"{DATASET_DIR}\\trainA",
+            os.path.join(DATASET_DIR, "trainA"),
             tissue_threshold=tissue_threshold,
             background_keep_ratio=background_keep_ratio,
             white_thresh=white_thresh,
@@ -199,7 +199,7 @@ def main():
         # Unstained images become domain A.
         save_patches(
             os.path.join(UNSTAINED_DIR, img_name),
-            f"{DATASET_DIR}\\testA",
+            os.path.join(DATASET_DIR, "testA"),
             tissue_threshold=tissue_threshold,
             background_keep_ratio=background_keep_ratio,
             white_thresh=white_thresh,
@@ -221,7 +221,7 @@ def main():
         # Stained images become domain B.
         save_patches(
             os.path.join(STAINED_DIR, img_name),
-            f"{DATASET_DIR}\\trainB",
+            os.path.join(DATASET_DIR, "trainB"),
             tissue_threshold=tissue_threshold,
             background_keep_ratio=background_keep_ratio,
             white_thresh=white_thresh,
@@ -234,7 +234,7 @@ def main():
         # Stained images become domain B.
         save_patches(
             os.path.join(STAINED_DIR, img_name),
-            f"{DATASET_DIR}\\testB",
+            os.path.join(DATASET_DIR, "testB"),
             tissue_threshold=tissue_threshold,
             background_keep_ratio=background_keep_ratio,
             white_thresh=white_thresh,

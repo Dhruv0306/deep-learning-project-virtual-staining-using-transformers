@@ -103,11 +103,11 @@ def visualize_history(history, model_dir=None):
     plt.tight_layout()
 
     model_dir = (
-        "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models"
+        os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models")
         if model_dir is None
         else model_dir
     )
-    output_path = f"{model_dir}\\training_history.png"
+    output_path = os.path.join(model_dir, "training_history.png")
     os.makedirs(model_dir, exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Training history plot saved to {output_path}")

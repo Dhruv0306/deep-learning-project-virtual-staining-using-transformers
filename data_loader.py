@@ -138,11 +138,12 @@ def getDataLoader(epoch_size=None, image_size=256, batch_size=4, num_workers=4):
         print(f"GPU count: {torch.cuda.device_count()}")
         print(f"GPU name: {torch.cuda.get_device_name(0)}")
 
-    # Dataset path configuration (Windows-style paths).
-    trainA = f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\trainA"  # Domain A
-    trainB = f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\trainB"  # Domain B
-    testA = f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\testA"  # Domain A
-    testB = f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\testB"  # Domain B
+    # Dataset path configuration.
+    data_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
+    trainA = os.path.join(data_root, "trainA")  # Domain A
+    trainB = os.path.join(data_root, "trainB")  # Domain B
+    testA = os.path.join(data_root, "testA")  # Domain A
+    testB = os.path.join(data_root, "testB")  # Domain B
 
     # Image transformation pipeline (CycleGAN standard).
     transform = transforms.Compose(

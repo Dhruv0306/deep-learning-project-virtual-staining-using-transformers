@@ -15,6 +15,7 @@ v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
 For 8 GB VRAM use get_8gb_config() instead of get_default_config().
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -151,7 +152,7 @@ class DataConfig:
             Currently unused.
     """
 
-    data_root: str = "data/E_Staining_DermaRepo/H_E-Staining_dataset"
+    data_root: str = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
     image_size: int = 256
     batch_size: int = 4
     num_workers: int = 4

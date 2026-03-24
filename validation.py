@@ -223,25 +223,16 @@ def save_images(
         save_dir (str | None): Output directory.
         is_test (bool): Whether this is a test run.
     """
-    filename_A = (
-        (
-            f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models\\validation_images\\epoch_{epoch}_A.png"
-            if not is_test
-            else f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models\\test_images\\epoch_{epoch}_A.png"
+    dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
+    if save_dir is None:
+        base_dir = os.path.join(
+            dataset_root, "models", "test_images" if is_test else "validation_images"
         )
-        if save_dir is None
-        else f"{save_dir}\\image_{img_id}_A.png"
-    )
-
-    filename_B = (
-        (
-            f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models\\validation_images\\epoch_{epoch}_B.png"
-            if not is_test
-            else f"data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models\\test_images\\epoch_{epoch}_B.png"
-        )
-        if save_dir is None
-        else f"{save_dir}\\image_{img_id}_B.png"
-    )
+        filename_A = os.path.join(base_dir, f"epoch_{epoch}_A.png")
+        filename_B = os.path.join(base_dir, f"epoch_{epoch}_B.png")
+    else:
+        filename_A = os.path.join(save_dir, f"image_{img_id}_A.png")
+        filename_B = os.path.join(save_dir, f"image_{img_id}_B.png")
 
     row_A = (
         torch.cat([real_A[:1], fake_B[:1], rec_A[:1], real_B[:1]], dim=0).detach().cpu()

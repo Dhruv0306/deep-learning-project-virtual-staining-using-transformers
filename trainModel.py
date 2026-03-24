@@ -30,11 +30,12 @@ def main():
 
     # Run the main training loop.
     # Get Default Config (not used in train_v2 but can be extended for future use)
+    dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
     if model_version == 2:
         # Create a timestamped model directory so each run is isolated.
-        model_dir = (
-            "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_v2_"
-            f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
+        model_dir = os.path.join(
+            dataset_root,
+            f"models_v2_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}",
         )
         os.makedirs(model_dir, exist_ok=True)
         print(f"Model directory: {model_dir}")
@@ -53,9 +54,9 @@ def main():
         )
     else :
         # Create a timestamped model directory so each run is isolated.
-        model_dir = (
-            "data\\E_Staining_DermaRepo\\H_E-Staining_dataset\\models_"
-            f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
+        model_dir = os.path.join(
+            dataset_root,
+            f"models_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}",
         )
         os.makedirs(model_dir, exist_ok=True)
         print(f"Model directory: {model_dir}")
@@ -73,7 +74,7 @@ def main():
 
     # Persist training history in both visual and CSV form.
     visualize_history(history, model_dir=model_dir)
-    save_history_to_csv(history, f"{model_dir}\\training_history.csv")
+    save_history_to_csv(history, os.path.join(model_dir, "training_history.csv"))
 
     return history, G_AB, G_BA, D_A, D_B
 

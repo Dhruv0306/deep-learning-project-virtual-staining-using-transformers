@@ -17,9 +17,9 @@ import zipfile
 import shutil
 
 # Path to the source ZIP file containing the dataset
-zip_path = r"data\data\E-Staining DermaRepo.zip" # Replace with the data zip's file
+zip_path = os.path.join("data", "data", "E-Staining DermaRepo.zip")  # Replace with the data zip's file
 # Directory where the extracted files will be stored
-out_dir = r"data\E-Staining" # Replace With the directory path you want to data to extract
+out_dir = os.path.join("data", "E-Staining")  # Replace With the directory path you want to data to extract
 
 # Create the output directory if it doesn't exist
 os.makedirs(out_dir, exist_ok=True) 
