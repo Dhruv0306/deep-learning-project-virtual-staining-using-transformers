@@ -330,7 +330,6 @@ def train_v2(
                 print(
                     f"[warn] near-uniform patch at epoch {epoch+1} batch {i}, skipping"
                 )
-                continue
 
             # ==================================================
             # Discriminator step(s)  (n_critic times per G step)
