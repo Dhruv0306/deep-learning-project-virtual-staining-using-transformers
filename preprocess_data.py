@@ -28,8 +28,11 @@ def extract_patches_pil(img, patch_size=256, stride=256):
 
     Returns:
         list[PIL.Image.Image]: List of patch images.
+
+    Notes:
+        PIL image size is ordered as (width, height). Cropping windows are
+        generated as (left, top, right, bottom).
     """
-    # PIL uses (width, height) ordering.
     img_w, img_h = img.size
     patches = []
 

@@ -296,11 +296,15 @@ Full paper-aligned settings: `batch_size=4`, `vit_depth=4`, `num_scales=3`, no g
 
 | Change from default | VRAM saving | Quality impact |
 |---|---|---|
-| `use_gradient_checkpointing=True` (ViT blocks only) | ~2.5 GB | None (~20% slower backward) |
+| `use_gradient_checkpointing=False` | 0 GB (faster training) | None |
 | `batch_size=2`, `accumulate_grads=2` | ~1.5 GB | None (effective batch stays 4) |
-| `num_scales=2` | ~0.4 GB | Minor (loses coarsest D scale) |
-| `vit_depth=2` | ~0.3 GB | Small (fewer ViT blocks) |
-| `perceptual_resize=64` | ~0.2 GB | Very minor (perceptual terms only) |
+| `num_scales=3` | 0 GB (full multi-scale) | Best stability/quality |
+| `vit_depth=4` | 0 GB (full depth) | Best generator capacity |
+| `perceptual_resize=180` | Slight increase vs 128 | Better perceptual supervision |
+
+This repository's 8 GB profile prioritizes a balanced speed/quality setup and only
+applies the most impactful memory reduction (batch size + accumulation). If needed,
+you can still enable gradient checkpointing manually in `config.py`.
 
 To customise further, edit the config before passing it to `train_v2`:
 

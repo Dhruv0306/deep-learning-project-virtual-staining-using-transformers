@@ -105,6 +105,12 @@ class VGGPerceptualLoss(nn.Module):
     def normalize(self, x):
         """
         Normalize inputs with ImageNet mean and std.
+
+        Args:
+            x (torch.Tensor): Input tensor in [0, 1] range.
+
+        Returns:
+            torch.Tensor: ImageNet-normalized tensor.
         """
         return (x - self.mean) / self.std
 
@@ -330,7 +336,7 @@ class CycleGANLoss:
         Returns:
             torch.Tensor: Scalar discriminator loss.
         """
-        # Real loss (LSGAN uses targets close to 1).
+        # Real loss with one-sided label smoothing to avoid overconfident D.
         pred_real = D(real)
         loss_real = self.criterion_GAN(pred_real, 0.97 * torch.ones_like(pred_real))
 

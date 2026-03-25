@@ -32,6 +32,10 @@ class ReplayBuffer:
 
         Returns:
             torch.Tensor: Batch with some images replaced by buffer samples.
+
+        Notes:
+            Once the buffer is full, each element has a 50% chance to be
+            replaced by a randomly selected past sample.
         """
         output = []
         for tensor in tensors.detach():

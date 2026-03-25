@@ -2,6 +2,9 @@
 Training history utilities.
 
 Provides visualization and CSV persistence helpers for CycleGAN training logs.
+
+CSV schema used by this module:
+    Epoch, Batch, Loss_G, Loss_D_A, Loss_D_B
 """
 
 import os
@@ -132,6 +135,10 @@ def save_history_to_csv(history, filename):
     Args:
         history (dict): Nested dict of epoch -> batch -> loss values.
         filename (str): Output CSV path.
+
+    Notes:
+        The output CSV always uses the column order:
+        Epoch, Batch, Loss_G, Loss_D_A, Loss_D_B.
     """
     flattened_data = []
     for epoch, batches in history.items():
@@ -152,6 +159,10 @@ def append_history_to_csv(history, filename):
     Args:
         history (dict): Nested dict of epoch -> batch -> loss values.
         filename (str): Output CSV path.
+
+    Notes:
+        Appends rows using the same schema as save_history_to_csv().
+        A header is written only when the file does not exist or is empty.
     """
     if not history:
         return
@@ -181,6 +192,9 @@ def load_history_from_csv(filename):
 
     Returns:
         dict: Nested dict of epoch -> batch -> loss values.
+
+    Notes:
+        Expects columns: Epoch, Batch, Loss_G, Loss_D_A, Loss_D_B.
     """
     if not os.path.exists(filename):
         return {}

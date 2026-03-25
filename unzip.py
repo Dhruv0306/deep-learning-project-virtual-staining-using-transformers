@@ -8,7 +8,7 @@ loading them fully into memory.
 
 Usage::
 
-    # Edit zip_path and out_dir at the top of the file, then run:
+    # Edit ZIP_PATH and OUTPUT_DIR below, then run:
     python unzip.py
 """
 
@@ -16,30 +16,45 @@ import os
 import zipfile
 import shutil
 
-# Path to the source ZIP file containing the dataset
-zip_path = os.path.join("data", "data", "E-Staining DermaRepo.zip")  # Replace with the data zip's file
-# Directory where the extracted files will be stored
-out_dir = os.path.join("data", "E-Staining")  # Replace With the directory path you want to data to extract
+# Path to the source ZIP file containing the dataset archive.
+ZIP_PATH = os.path.join("data", "data", "E-Staining DermaRepo.zip")
+# Directory where extracted files will be written.
+OUTPUT_DIR = os.path.join("data", "E-Staining")
 
-# Create the output directory if it doesn't exist
-os.makedirs(out_dir, exist_ok=True) 
 
-# Open the ZIP file for reading and extract its contents
-with zipfile.ZipFile(zip_path, "r") as zf:
-    # Iterate through each file/directory in the ZIP archive
-    for info in zf.infolist():
-        # Create the full target path for the current item
-        target_path = os.path.join(out_dir, info.filename)
-        
-        # Handle directory entries - create the directory structure
-        if info.is_dir():
-            os.makedirs(target_path, exist_ok=True)
-            continue
+def extract_zip_streaming(zip_path, out_dir, buffer_bytes=1024 * 1024 * 10):
+    """
+    Extract a ZIP archive with bounded memory usage.
 
-        # For files, ensure all parent directories exist before extraction
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    Args:
+        zip_path (str): Path to the source ZIP file.
+        out_dir (str): Destination directory.
+        buffer_bytes (int): Streaming buffer size used by copyfileobj().
 
-        # Extract file using streaming to handle large files efficiently
-        # Uses a 10MB buffer to minimize memory usage during extraction
-        with zf.open(info, "r") as src, open(target_path, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=1024 * 1024 * 10)  # 10 MB buffer
+    Returns:
+        None: Files are extracted into out_dir.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            target_path = os.path.join(out_dir, info.filename)
+
+            if info.is_dir():
+                os.makedirs(target_path, exist_ok=True)
+                continue
+
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+            # Stream each member to avoid loading large pathology files in memory.
+            with zf.open(info, "r") as src, open(target_path, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=buffer_bytes)
+
+
+def main():
+    """Run extraction using configured ZIP_PATH and OUTPUT_DIR values."""
+    extract_zip_streaming(ZIP_PATH, OUTPUT_DIR)
+
+
+if __name__ == "__main__":
+    main()

@@ -29,6 +29,10 @@ def calculate_metrics(calculator, G_AB, G_BA, test_loader, device, writer, epoch
 
     Returns:
         dict: Average metrics (ssim, psnr, optional fid).
+
+    Notes:
+        Only the first 50 validation batches are evaluated to keep metric
+        computation affordable during training.
     """
     G_AB.eval()
     G_BA.eval()
@@ -95,6 +99,9 @@ def run_validation(
         save_dir (str): Output directory for images.
         num_samples (int): Number of samples to visualize.
         writer (SummaryWriter | None): TensorBoard writer.
+
+    Returns:
+        None: Writes image grids and optional TensorBoard scalars.
     """
     G_AB.eval()
     G_BA.eval()

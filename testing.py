@@ -27,6 +27,9 @@ def run_testing(
         writer (SummaryWriter | None): TensorBoard writer.
         epoch (int | None): Epoch index for logging/filenames.
         num_samples (int | None): Max number of test samples to process.
+
+    Returns:
+        None: Writes test comparison images and optional TensorBoard scalars.
     """
     G_AB.eval()
     G_BA.eval()

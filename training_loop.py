@@ -72,6 +72,8 @@ def train(
     use_amp = device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
     metrics_calculator = MetricsCalculator(device=device)
+    # Early-stopping checks are periodic; patience is expressed in epochs and
+    # converted to check intervals below.
     early_stopping_check_interval = 10
     early_stopping_patience_epochs = 40
     early_stopping_warmup_epochs = 80

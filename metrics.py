@@ -87,7 +87,8 @@ class MetricsCalculator:
         Calculate PSNR (Peak Signal-to-Noise Ratio) between two images.
 
         Args:
-            img1, img2 (torch.Tensor): Images to compare.
+            img1, img2 (torch.Tensor): Images to compare, expected in
+                normalized [-1, 1] range.
 
         Returns:
             float: PSNR value in dB (higher is better).

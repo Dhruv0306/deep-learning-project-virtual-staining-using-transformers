@@ -128,7 +128,10 @@ def getDataLoader(epoch_size=None, image_size=256, batch_size=4, num_workers=4):
         num_workers (int): Number of worker processes for data loading.
 
     Returns:
-        tuple: (train_loader, test_loader)
+        tuple[DataLoader, DataLoader]:
+            (train_loader, test_loader) where train_loader uses
+            shuffle=True/drop_last=True and test_loader uses
+            shuffle=False/batch_size=1.
     """
     # System diagnostics for GPU availability.
     print(f"torch version: {torch.__version__}")

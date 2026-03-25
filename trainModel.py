@@ -20,6 +20,10 @@ def main():
 
     Returns:
         tuple: (history, G_AB, G_BA, D_A, D_B)
+
+    Notes:
+        model_version=1 launches the hybrid v1 training loop.
+        model_version=2 launches the true UVCGAN v2 loop with get_8gb_config().
     """
     
     # User-controlled training parameters.
@@ -28,8 +32,7 @@ def main():
     test_size = float(input("Enter Test Size: "))
     model_version = int(input("Enter model version you want 1 for Hybrid and 2 for true UVCGAN: "))
 
-    # Run the main training loop.
-    # Get Default Config (not used in train_v2 but can be extended for future use)
+    # Run the selected training loop.
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
     if model_version == 2:
         # Create a timestamped model directory so each run is isolated.

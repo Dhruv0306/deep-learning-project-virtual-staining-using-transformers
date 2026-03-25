@@ -49,7 +49,7 @@ class GeneratorConfig:
     use_cross_domain: bool = True
     # Memory optimisation: recompute activations during backward instead of
     # storing them.  Reduces generator activation VRAM by ~30-40%.
-    # Set True for 8 GB GPUs.
+    # Optional for 8 GB GPUs when additional memory headroom is needed.
     use_gradient_checkpointing: bool = False
 
 

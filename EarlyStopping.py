@@ -53,6 +53,10 @@ class EarlyStopping:
 
         Returns:
             bool: True if training should stop.
+
+        Notes:
+            If no losses are tracked, divergence monitoring is effectively
+            disabled for that step.
         """
         # Check for SSIM improvement.
         if ssim > self.best_ssim + self.min_delta:
