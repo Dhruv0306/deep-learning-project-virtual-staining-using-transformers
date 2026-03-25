@@ -1,5 +1,7 @@
 # `generator.py` — v1 Generator
 
+Source of truth: `../generator.py`
+
 **Model:** Hybrid UVCGAN + CycleGAN (v1)  
 **Role:** Defines the generator used in both translation directions — `G_AB` (unstained→stained) and `G_BA` (stained→unstained).
 

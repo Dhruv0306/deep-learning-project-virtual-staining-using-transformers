@@ -1,5 +1,7 @@
 # `replay_buffer.py` — Replay Buffer
 
+Source of truth: `../replay_buffer.py`
+
 **Shared by:** Both v1 and v2  
 **Role:** Stores a pool of previously generated fake images and returns a mix of old and new fakes to the discriminator during training. This technique reduces model oscillation and improves discriminator stability.
 

@@ -1,5 +1,7 @@
 # `uvcgan_v2_generator.py` — v2 Generator
 
+Source of truth: `../uvcgan_v2_generator.py`
+
 **Model:** True UVCGAN v2  
 **Role:** Defines `ViTUNetGeneratorV2`, used for both translation directions — `G_AB` (unstained→stained) and `G_BA` (stained→unstained). A ground-up redesign of the v1 generator with residual encoder blocks, LayerScale Transformer blocks, 1×1 skip merges, cross-domain skip fusion, and optional gradient checkpointing.
 

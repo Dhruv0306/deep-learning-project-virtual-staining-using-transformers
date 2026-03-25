@@ -1,5 +1,7 @@
 # `trainModel.py` — Training Entry Point
 
+Source of truth: `../trainModel.py`
+
 **Role:** Interactive command-line entry point for launching a training run. Prompts the user for key parameters, creates timestamped output directories, dispatches to the appropriate training loop (v1 or v2), and saves training history on completion.
 
 ---
@@ -61,7 +63,7 @@ models_v2_{timestamp}/
     ├── validation_images/
     │       └── image_*_A.png, image_*_B.png    ← per-epoch visual checks
     ├── checkpoint_epoch_*.pth                   ← periodic checkpoints
-    ├── final_model.pth                          ← final trained weights
+    ├── final_checkpoint_epoch_*.pth             ← final trained weights
     ├── training_history.csv                     ← per-batch loss log
     └── training_history.png                     ← loss curve plot
 ```

@@ -1,5 +1,7 @@
 # `training_loop_v2.py` — V2 Training Loop
 
+Source of truth: `../training_loop_v2.py`
+
 **Model:** True UVCGAN v2  
 **Entry point:** `train_v2()`  
 **Role:** Orchestrates the complete v2 training process — data loading, model construction, loss computation, optimiser stepping, LR scheduling, validation, checkpointing, and early stopping. Everything is driven by a `UVCGANConfig` object.
@@ -204,6 +206,10 @@ if i % accumulate == 0 or i == len(train_loader):
 ```
 
 **Why divide by `accumulate`?** Without scaling, accumulating `K` batches would produce gradients `K×` larger than a single batch. Dividing each loss by `K` before backward makes the accumulated gradient equal to the average gradient over the `K` batches — equivalent to training on a batch of size `batch_size × K`.
+
+**Effective batch size:** `effective_batch = batch_size × accumulate_grads`.
+With the current 8GB profile (`batch_size=2`, `accumulate_grads=2`), the
+effective batch size is 4.
 
 **Why `set_to_none=True`?** Setting gradients to `None` instead of zero is slightly faster (avoids a memset) and uses less memory since `None` tensors don't occupy memory.
 

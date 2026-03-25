@@ -1,5 +1,7 @@
 # `advanced_losses.py` — V2 Loss Functions
 
+Source of truth: `../advanced_losses.py`
+
 **Model:** True UVCGAN v2  
 **Role:** Defines all loss terms used during v2 training. The composite `UVCGANLoss` class computes every loss component for each training step — generator and discriminator — using LSGAN as the adversarial objective and a paper-aligned one-sided gradient penalty.
 

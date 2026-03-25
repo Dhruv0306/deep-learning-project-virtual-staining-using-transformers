@@ -1,5 +1,7 @@
 # `preprocess_data.py` — Data Preprocessing
 
+Source of truth: `../preprocess_data.py`
+
 **Role:** Converts whole-slide histology images into 256×256 patches, filters out uninformative background tiles, and splits them into CycleGAN-style `trainA / trainB / testA / testB` directories.
 
 Run this script **once** before training to prepare the dataset.
@@ -125,8 +127,8 @@ Orchestrates the full preprocessing pipeline.
 | Setting | Value |
 |---|---|
 | `tissue_threshold` | 0.1 |
-| `background_keep_ratio` | 0.2 |
-| `white_thresh` | 220 |
+| `background_keep_ratio` | 0.17 |
+| `white_thresh` | 225 |
 | `sat_thresh` | 0.05 |
 | Train/test split | 80% / 20% |
 | RNG seed | 42 |

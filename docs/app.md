@@ -1,5 +1,7 @@
 # `app.py` — Inference / Whole-Slide Translation
 
+Source of truth: `../app.py`
+
 **Role:** Loads a trained checkpoint and performs patch-based stain/unstain translation on whole-slide images. Uses overlapping patches with cosine blending to produce seamless full-image outputs.
 
 ---
@@ -13,7 +15,7 @@ Input image (arbitrary size)
      │
      ▼ pad_to_patch_multiple (white padding to exact multiple of patch_size)
      │
-     ▼ extract_patches_with_coords (stride = patch_size / 2 by default)
+     ▼ extract_patches_with_coords (function default stride = patch_size)
      │
      ▼ [G_AB or G_BA forward pass on each 256×256 patch]
      │
@@ -68,7 +70,7 @@ Full pipeline for translating one whole-slide image.
 | `transform` | — | Preprocessing transform (resize + normalize) |
 | `output_path` | — | Path to save the translated output image |
 | `patch_size` | 256 | Patch side length in pixels |
-| `stride` | 256 | Stride between patch centres. `stride < patch_size` creates overlap |
+| `stride` | 256 | Stride between patch centres. Default (`256`) means no overlap; set `128` for 50% overlap |
 | `device` | `"cpu"` | Computation device |
 
 **Returns:** `(original_size, padded_size, num_patches, output_path)` — useful for logging and validation.
@@ -138,4 +140,4 @@ Outputs:
 - `data/reconstructed_stained_output.png` — unstained→stained translation
 - `data/reconstructed_unstained_output.png` — stained→unstained translation
 
-The default stride is `patch_size // 2 = 128`, so adjacent patches overlap by 50% and are blended together for a seamless result.
+In `main()`, the script explicitly sets `stride = patch_size // 2` (128), so adjacent patches overlap by 50% and are blended together for a seamless result. The function default remains `stride=256`.

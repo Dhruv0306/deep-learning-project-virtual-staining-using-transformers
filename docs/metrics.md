@@ -1,5 +1,7 @@
 # `metrics.py` — Evaluation Metrics
 
+Source of truth: `../metrics.py`
+
 **Shared by:** Both v1 and v2  
 **Role:** Computes image quality and distribution alignment metrics used during validation and testing. Exposes SSIM, PSNR, and FID through a single `MetricsCalculator` class.
 
@@ -93,6 +95,9 @@ where `(μ₁, Σ₁)` and `(μ₂, Σ₂)` are the mean and covariance of the I
 If `scipy.linalg.sqrtm` returns a complex matrix (numerical instability), a small diagonal regularisation `ε = 1e-6` is added before retrying.
 
 **Returns:** `float` — lower is better. FID of 0 means the two distributions are identical. Values under 50 are generally considered good for GAN outputs.
+
+FID is computed in Inception feature space (2048-D embeddings), not directly in
+pixel space.
 
 ---
 

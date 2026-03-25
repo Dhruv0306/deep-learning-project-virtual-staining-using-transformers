@@ -1,5 +1,7 @@
 # `validation.py` — Validation Helpers
 
+Source of truth: `../validation.py`
+
 **Shared by:** Both v1 and v2  
 **Role:** Provides functions for qualitative and quantitative validation during training. Saves side-by-side comparison images and computes per-epoch metric summaries logged to TensorBoard.
 
@@ -51,6 +53,8 @@ Generates and saves visual comparison images for a small number of test samples.
 | `writer` | `None` | Optional TensorBoard writer for cycle/identity losses |
 
 For each sample, computes `fake_B`, `rec_A`, `fake_A`, `rec_B`, `idt_A`, `idt_B` and saves comparison image grids via `save_images`. Also computes and logs average cycle and identity losses for the validation batch.
+
+**Returns:** `None`.
 
 ---
 

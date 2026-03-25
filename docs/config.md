@@ -1,5 +1,7 @@
 # `config.py` — Configuration Manager
 
+Source of truth: `../config.py`
+
 **Shared by:** Both v1 and v2  
 **Role:** Centralised hyperparameter management. V2 training reads hyperparameters from `UVCGANConfig`; v1 still keeps several values hardcoded inside `training_loop.py` for legacy compatibility.
 
@@ -26,14 +28,14 @@ Controls the architecture of `ViTUNetGeneratorV2` (v2 only — v1 does not use t
 | `input_nc` | int | 3 | Input image channels |
 | `output_nc` | int | 3 | Output image channels |
 | `base_channels` | int | 64 | Channels at the first encoder level. Subsequent levels are ×2, ×4, ×8. Directly determines model size — doubling this roughly quadruples peak activation memory |
-| `vit_depth` | int | 4 | Number of LayerScale Transformer blocks in the ViT bottleneck. Each block adds `(N, H×W, C)` activation storage during training. 8GB config reduces to 2 |
+| `vit_depth` | int | 4 | Number of LayerScale Transformer blocks in the ViT bottleneck. Each block adds `(N, H×W, C)` activation storage during training. Current 8GB profile keeps this at 4 |
 | `vit_heads` | int | 8 | Attention heads per Transformer block. Must evenly divide the bottleneck channel count (`base_channels × 8 = 512`) |
 | `vit_mlp_ratio` | float | 4.0 | MLP hidden dimension = `bottleneck_channels × vit_mlp_ratio` |
 | `vit_dropout` | float | 0.0 | Dropout inside each Transformer block. 0 is standard for GAN training |
 | `use_layerscale` | bool | True | Enable LayerScale residual scaling in ViT blocks |
 | `layerscale_init` | float | 1e-4 | Initial value for LayerScale per-channel vectors. Near-zero init means the block starts as identity |
 | `use_cross_domain` | bool | True | Allocate CrossDomainFusion layers on skip connections. This is the defining UVCGAN feature |
-| `use_gradient_checkpointing` | bool | False | Recompute ViT block activations during backward instead of storing them. Saves ~2.5 GB VRAM at the cost of ~20% slower backward |
+| `use_gradient_checkpointing` | bool | False | Recompute ViT block activations during backward instead of storing them. Optional for tighter VRAM budgets; disabled in the current 8GB profile for faster training |
 
 ---
 
@@ -46,7 +48,7 @@ Controls the architecture of `MultiScaleDiscriminator` (v2) or `PatchDiscriminat
 | `input_nc` | int | 3 | Input image channels |
 | `base_channels` | int | 64 | Channels after the first conv layer |
 | `n_layers` | int | 3 | Number of strided downsampling layers (excluding the stride-1 layer and the output layer) |
-| `num_scales` | int | 3 | Number of spatial scales in the multi-scale discriminator. 8GB config reduces to 2 (drops the coarsest 64×64 scale) |
+| `num_scales` | int | 3 | Number of spatial scales in the multi-scale discriminator. Current 8GB profile keeps all 3 scales |
 | `use_spectral_norm` | bool | True | Apply spectral normalisation to all conv layers |
 
 ---
@@ -64,7 +66,7 @@ Controls all loss weights and the gradient penalty configuration.
 | `lambda_gp` | float | 0.1 | One-sided gradient penalty weight. Paper value. Much smaller than WGAN-GP's typical 10.0 because the γ²-normalised GP has a different scale |
 | `lambda_contrastive` | float | 0.0 | NT-Xent contrastive loss weight. Disabled by default — enable only after GAN training has stabilised |
 | `lambda_spectral` | float | 0.0 | Spectral frequency loss weight. Disabled by default for the same reason |
-| `perceptual_resize` | int | 128 | Bilinear resize applied to images before VGG19. 8GB config uses 64 |
+| `perceptual_resize` | int | 128 | Bilinear resize applied to images before VGG19. Current 8GB profile uses 180 |
 | `use_wgan_gp` | bool | False | Legacy field kept for v1 compatibility. Always False for v2 — LSGAN is the paper's best configuration |
 | `contrastive_temperature` | float | 0.07 | NT-Xent softmax temperature |
 
@@ -108,7 +110,7 @@ Controls data loading.
 | `image_size` | int | 256 | Images are resized to this resolution. Changing this requires updating `preprocess_data.py` and `app.py` together |
 | `batch_size` | int | 4 | Mini-batch size. 8GB config uses 2 |
 | `num_workers` | int | 4 | DataLoader worker processes for parallel data loading |
-| `augment` | bool | True | Apply random horizontal flips and colour jitter during training |
+| `augment` | bool | True | Reserved flag for future augmentation support (currently unused by `data_loader.py`) |
 
 ---
 
@@ -168,8 +170,12 @@ Returns a VRAM-optimised config for 8 GB GPUs. Changes from default:
 
 | Change | VRAM saving | Quality impact |
 |---|---|---|
-| `use_gradient_checkpointing=True` | ~2.5 GB | None (~20% slower backward) |
+| `use_gradient_checkpointing=False` | 0 GB (faster training) | None |
 | `batch_size=2`, `accumulate_grads=2` | ~1.5 GB | None (effective batch stays 4) |
-| `num_scales=2` | ~0.4 GB | Minor (loses coarsest D scale) |
-| `vit_depth=2` | ~0.3 GB | Small (fewer ViT blocks) |
-| `perceptual_resize=64` | ~0.2 GB | Very minor |
+| `num_scales=3` | 0 GB (full multi-scale) | Best stability/quality |
+| `vit_depth=4` | 0 GB (full depth) | Best generator capacity |
+| `perceptual_resize=180` | Slight increase vs 128 | Better perceptual supervision |
+
+Current profile note: this repository's 8GB config applies the highest-impact
+memory reduction (batch size + accumulation) and keeps the other defaults at
+quality-oriented values.
