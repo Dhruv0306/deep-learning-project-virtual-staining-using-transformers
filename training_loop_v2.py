@@ -312,6 +312,7 @@ def train_v2(
         epoch_loss_D_B = 0.0
         epoch_grad_norm_G = 0.0
         accum_count = 0
+        warn_near_uniform = 0
 
         writer.add_scalar("Epoch", epoch + 1, epoch + 1)
 
@@ -327,9 +328,12 @@ def train_v2(
             real_A_std = real_A.std(dim=[1, 2, 3])
             real_B_std = real_B.std(dim=[1, 2, 3])
             if (real_A_std < 1e-4).any() or (real_B_std < 1e-4).any():
-                print(
-                    f"[warn] near-uniform patch at epoch {epoch+1} batch {i}, (std_A: {real_A_std.min().item():.2e}, std_B: {real_B_std.min().item():.2e})"
-                )
+                warn_near_uniform += 1
+                if warn_near_uniform % 100 == 0:
+                    print(
+                        f"[warn] near-uniform input detected at epoch {epoch+1} batch {i} "
+                        f"(A std: {real_A_std}, B std: {real_B_std}), skipping"
+                    )
 
             # ==================================================
             # Discriminator step(s)  (n_critic times per G step)
