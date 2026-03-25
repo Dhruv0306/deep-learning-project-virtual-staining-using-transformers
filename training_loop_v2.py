@@ -328,7 +328,7 @@ def train_v2(
             real_B_std = real_B.std(dim=[1, 2, 3])
             if (real_A_std < 1e-4).any() or (real_B_std < 1e-4).any():
                 print(
-                    f"[warn] near-uniform patch at epoch {epoch+1} batch {i}, skipping"
+                    f"[warn] near-uniform patch at epoch {epoch+1} batch {i}, (std_A: {real_A_std.min().item():.2e}, std_B: {real_B_std.min().item():.2e})"
                 )
 
             # ==================================================
@@ -419,7 +419,7 @@ def train_v2(
             if accum_count == 0:
                 optimizer_G.zero_grad(set_to_none=True)
 
-            with autocast("cuda", enabled=False):
+            with autocast("cuda", enabled=use_amp):
                 loss_G, fake_A, fake_B = loss_fn.generator_loss(
                     real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, num_epochs
                 )

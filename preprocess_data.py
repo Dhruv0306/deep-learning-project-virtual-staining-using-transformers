@@ -161,8 +161,8 @@ def main():
 
     # Patch filtering controls.
     tissue_threshold = 0.1
-    background_keep_ratio = 0.2
-    white_thresh = 220
+    background_keep_ratio = 0.17
+    white_thresh = 225
     sat_thresh = 0.05
     np.random.seed(42)
 
