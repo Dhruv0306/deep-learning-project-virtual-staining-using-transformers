@@ -152,11 +152,32 @@ class DataConfig:
             Currently unused.
     """
 
-    data_root: str = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
+    data_root: str = os.path.join(
+        "data", "E_Staining_DermaRepo", "H_E-Staining_dataset"
+    )
     image_size: int = 256
     batch_size: int = 4
     num_workers: int = 4
     augment: bool = True
+
+
+@dataclass
+class DiffusionConfig:
+    """
+    Hyperparameters for the v3 diffusion model.
+    """
+
+    num_timesteps: int = 1000
+    beta_schedule: str = "cosine"
+    dit_hidden_dim: int = 512
+    dit_depth: int = 8
+    dit_heads: int = 8
+    dit_patch_size: int = 2
+    dit_mlp_ratio: float = 4.0
+    lambda_perceptual_v3: float = 0.0
+    num_inference_steps: int = 50
+    use_gradient_checkpointing: bool = False
+    vae_model_id: str = "stabilityai/sd-vae-ft-mse"
 
 
 @dataclass
@@ -171,7 +192,7 @@ class UVCGANConfig:
 
     Fields:
         model_version (int): ``1`` for the hybrid UVCGAN + CycleGAN model;
-            ``2`` for the true UVCGAN v2 model.
+            ``2`` for the true UVCGAN v2 model; ``3`` for DiT diffusion.
         generator (GeneratorConfig): Generator architecture settings.
         discriminator (DiscriminatorConfig): Discriminator settings.
         loss (LossConfig): Loss function weights and options.
@@ -190,6 +211,7 @@ class UVCGANConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     model_dir: Optional[str] = None
     val_dir: Optional[str] = None
 
@@ -198,14 +220,14 @@ class UVCGANConfig:
         Validate inter-field constraints after dataclass initialisation.
 
         Raises:
-            ValueError: If ``model_version`` is not 1 or 2, or if
+            ValueError: If ``model_version`` is not 1, 2, or 3, or if
                 ``decay_start_epoch`` is too close to ``num_epochs`` to
                 allow a meaningful linear decay phase (fewer than 2 epochs
                 of decay would remain).
         """
-        if self.model_version not in (1, 2):
+        if self.model_version not in (1, 2, 3):
             raise ValueError(
-                f"model_version must be 1 or 2, got {self.model_version!r}."
+                f"model_version must be 1, 2, or 3, got {self.model_version!r}."
             )
         if self.training.decay_start_epoch >= self.training.num_epochs - 1:
             raise ValueError(
@@ -283,4 +305,37 @@ def get_8gb_config() -> UVCGANConfig:
     cfg.training.use_amp = True  # critical - do not disable
     cfg.training.n_critic = 1
 
+    return cfg
+
+
+def get_dit_config() -> UVCGANConfig:
+    """
+    Return a full-precision config for v3 diffusion training.
+    """
+    cfg = UVCGANConfig(model_version=3)
+    cfg.diffusion.dit_hidden_dim = 512
+    cfg.diffusion.dit_depth = 8
+    cfg.diffusion.dit_heads = 8
+    cfg.diffusion.dit_patch_size = 2
+    cfg.diffusion.dit_mlp_ratio = 4.0
+    cfg.diffusion.use_gradient_checkpointing = False
+    cfg.data.batch_size = 4
+    cfg.training.accumulate_grads = 1
+    return cfg
+
+
+def get_dit_8gb_config() -> UVCGANConfig:
+    """
+    Return a VRAM-optimised config for v3 diffusion training.
+    """
+    cfg = UVCGANConfig(model_version=3)
+    cfg.diffusion.dit_hidden_dim = 512
+    cfg.diffusion.dit_depth = 8
+    cfg.diffusion.dit_heads = 8
+    cfg.diffusion.dit_patch_size = 2
+    cfg.diffusion.dit_mlp_ratio = 4.0
+    cfg.diffusion.use_gradient_checkpointing = False
+    cfg.data.batch_size = 4
+    cfg.training.accumulate_grads = 1
+    cfg.loss.perceptual_resize = 256
     return cfg

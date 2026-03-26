@@ -9,6 +9,7 @@ patches back into a seamless full-resolution output image.
 Both model versions are supported:
   - v1 (``ViTUNetGenerator``)   — loaded when ``model_version=1``
   - v2 (``ViTUNetGeneratorV2``) — loaded when ``model_version=2``
+  - v3 (``DiTGenerator``)       — loaded when ``model_version=3``
 
 For v2 the architecture hyperparameters (``vit_depth``, ``use_cross_domain``)
 are auto-detected from the checkpoint state dict, so the loaded model always
@@ -41,6 +42,44 @@ from PIL import ImageFile
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def is_v3_checkpoint(ckpt: dict) -> bool:
+    """
+    Return True if the checkpoint matches the v3 schema.
+    """
+    return "dit_state_dict" in ckpt
+
+
+def load_v3_components(checkpoint_path: str, device: str):
+    """
+    Load v3 DiT + ConditionEncoder + VAE + sampler components.
+    """
+    from config import get_dit_config
+    from dit_generator import ConditionEncoder, getGeneratorV3
+    from noise_scheduler import DDPMScheduler, DDIMSampler
+    from vae_wrapper import VAEWrapper
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    diff_cfg = checkpoint.get("config")
+    if diff_cfg is None:
+        diff_cfg = get_dit_config().diffusion
+
+    dit_model = getGeneratorV3(diff_cfg, device=torch.device(device))
+    dit_model.load_state_dict(checkpoint["ema_state_dict"])
+    dit_model.eval()
+
+    cond_encoder = ConditionEncoder(diff_cfg.dit_hidden_dim).to(device)
+    cond_encoder.load_state_dict(checkpoint["cond_encoder_state_dict"])
+    cond_encoder.eval()
+
+    vae = VAEWrapper(diff_cfg.vae_model_id).to(device)
+    vae.eval()
+
+    scheduler = DDPMScheduler(diff_cfg.num_timesteps, diff_cfg.beta_schedule).to(device)
+    sampler = DDIMSampler(scheduler)
+
+    return dit_model, cond_encoder, vae, sampler, diff_cfg
 
 
 def _infer_v2_kwargs(state_dict: dict) -> dict:
@@ -393,7 +432,83 @@ def translate_image_from_patches(
             translated_patches.append(translated_patch)
 
             if translated_patches.__len__() % 10 == 0:
-                print(f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches")
+                print(
+                    f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches"
+                )
+
+    reconstructed_padded = reconstruct_tensor_from_patches(
+        translated_patches,
+        positions,
+        padded_image.size,
+        patch_size=patch_size,
+        stride=stride,
+    )
+    reconstructed = reconstructed_padded[:, : original_size[1], : original_size[0]]
+
+    save_image(
+        reconstructed.unsqueeze(0),
+        output_path,
+        normalize=True,
+        value_range=(-1, 1),
+    )
+
+    return original_size, padded_image.size, len(input_patches), output_path
+
+
+def translate_image_from_patches_v3(
+    input_image_path,
+    dit_model,
+    cond_encoder,
+    vae,
+    sampler,
+    transform,
+    output_path,
+    patch_size=256,
+    stride=256,
+    device="cpu",
+    batch_size=1,
+    num_steps=50,
+):
+    """
+    Translate a whole-slide image using v3 diffusion (A -> B only).
+    """
+    from torch.amp.autocast_mode import autocast
+
+    input_image = Image.open(input_image_path).convert("RGB")
+    original_size = input_image.size
+    padded_image, _ = pad_to_patch_multiple(input_image, patch_size=patch_size)
+
+    input_patches, positions = extract_patches_with_coords(
+        padded_image, patch_size=patch_size, stride=stride
+    )
+
+    translated_patches = []
+    use_amp = device == "cuda"
+
+    with torch.inference_mode():
+        for start in range(0, len(input_patches), batch_size):
+            batch = input_patches[start : start + batch_size]
+            batch_tensor = torch.stack([transform(p) for p in batch]).to(device)
+
+            with autocast("cuda", enabled=use_amp):
+                c = cond_encoder(batch_tensor)
+                z0 = sampler.sample(
+                    dit_model,
+                    c,
+                    shape=(batch_tensor.size(0), 4, 32, 32),
+                    device=torch.device(device),
+                    num_steps=num_steps,
+                    eta=0.0,
+                )
+                fake_B = vae.decode(z0)
+
+            for j in range(fake_B.size(0)):
+                translated_patches.append(fake_B[j].cpu())
+
+            if len(translated_patches) % 10 == 0:
+                print(
+                    f"Processed {len(translated_patches)} / {len(input_patches)} patches"
+                )
 
     reconstructed_padded = reconstruct_tensor_from_patches(
         translated_patches,
@@ -420,16 +535,10 @@ if __name__ == "__main__":
     model_path = input("Enter model path: ")
     model_version = int(
         input(
-            "Enter 1 for Hybrid UVCGAN based or 2 for True-UVCGAN based generator model: "
+            "Enter 1 for Hybrid UVCGAN based, 2 for True-UVCGAN based, 3 for DiT diffusion: "
         )
     )
 
-    # Load the model
-    G_AB, G_BA = load_model(
-        checkpoint_path=model_path, device=device, model_version=model_version
-    )
-
-    # Create transform
     patch_size = 256
     stride = patch_size // 2
     transform = transforms.Compose(
@@ -440,67 +549,118 @@ if __name__ == "__main__":
         ]
     )
 
-    # Image paths
-    unstained_image_path = input("Provide Path to Unstained Image: ")
-    stained_image_path = input("Provide Path to Stained Image: ")
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
-    unstained_image_path = (
-        os.path.join(
-            dataset_root,
-            "Un_Stained",
-            "HC21-01338(A3-1).10X unstained.jpg",
-        )
-        if not unstained_image_path
-        else os.path.normpath(unstained_image_path)
-    )
-    stained_image_path = (
-        os.path.join(
-            dataset_root,
-            "C_Stained",
-            "HC21-01338(A3-2).10X unstained.jpg",
-        )
-        if not stained_image_path
-        else os.path.normpath(stained_image_path)
-    )
 
-    print(f"Unstained Image Path: {unstained_image_path}")
-    print(f"Stained Image Path: {stained_image_path}")
-
-    # A -> B (unstained -> stained)
-    original_size, padded_size, num_patches, stained_output_path = (
-        translate_image_from_patches(
-            input_image_path=unstained_image_path,
-            model=G_AB,
-            transform=transform,
-            output_path=os.path.join("data", "reconstructed_stained_output.png"),
-            patch_size=patch_size,
-            stride=stride,
-            device=device,
+    if model_version == 3:
+        if model_path is None:
+            raise ValueError("Checkpoint_path is required")
+        dit_model, cond_encoder, vae, sampler, diff_cfg = load_v3_components(
+            model_path, device=device
         )
-    )
 
-    print(f"[Stain] Original Image size: {original_size}")
-    print(f"[Stain] Padded Image size: {padded_size}")
-    print(f"[Stain] Num patches: {num_patches}")
-    print(f"[Stain] Saved reconstructed stained image at: {stained_output_path}")
-    print(f"[Stain] Patch stride: {stride}")
-
-    # B -> A (stained -> unstained)
-    original_size, padded_size, num_patches, unstained_output_path = (
-        translate_image_from_patches(
-            input_image_path=stained_image_path,
-            model=G_BA,
-            transform=transform,
-            output_path=os.path.join("data", "reconstructed_unstained_output.png"),
-            patch_size=patch_size,
-            stride=stride,
-            device=device,
+        unstained_image_path = input("Provide Path to Unstained Image: ")
+        unstained_image_path = (
+            os.path.join(
+                dataset_root,
+                "Un_Stained",
+                "HC21-01338(A3-1).10X unstained.jpg",
+            )
+            if not unstained_image_path
+            else os.path.normpath(unstained_image_path)
         )
-    )
-    print(f"[Unstain] Original Image size: {original_size}")
-    print(f"[Unstain] Padded Image size: {padded_size}")
-    print(f"[Unstain] Num patches: {num_patches}")
-    print(f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}")
-    print(f"[Unstain] Patch stride: {stride}")
+        print(f"Unstained Image Path: {unstained_image_path}")
+
+        batch_size = 4 if device == "cuda" else 1
+        original_size, padded_size, num_patches, stained_output_path = (
+            translate_image_from_patches_v3(
+                input_image_path=unstained_image_path,
+                dit_model=dit_model,
+                cond_encoder=cond_encoder,
+                vae=vae,
+                sampler=sampler,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+                batch_size=batch_size,
+                num_steps=diff_cfg.num_inference_steps,
+            )
+        )
+
+        print(f"[Stain/v3] Original Image size: {original_size}")
+        print(f"[Stain/v3] Padded Image size: {padded_size}")
+        print(f"[Stain/v3] Num patches: {num_patches}")
+        print(f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}")
+        print(f"[Stain/v3] Patch stride: {stride}")
+    else:
+        # Load the model
+        G_AB, G_BA = load_model(
+            checkpoint_path=model_path, device=device, model_version=model_version
+        )
+
+        # Image paths
+        unstained_image_path = input("Provide Path to Unstained Image: ")
+        stained_image_path = input("Provide Path to Stained Image: ")
+        unstained_image_path = (
+            os.path.join(
+                dataset_root,
+                "Un_Stained",
+                "HC21-01338(A3-1).10X unstained.jpg",
+            )
+            if not unstained_image_path
+            else os.path.normpath(unstained_image_path)
+        )
+        stained_image_path = (
+            os.path.join(
+                dataset_root,
+                "C_Stained",
+                "HC21-01338(A3-2).10X unstained.jpg",
+            )
+            if not stained_image_path
+            else os.path.normpath(stained_image_path)
+        )
+
+        print(f"Unstained Image Path: {unstained_image_path}")
+        print(f"Stained Image Path: {stained_image_path}")
+
+        # A -> B (unstained -> stained)
+        original_size, padded_size, num_patches, stained_output_path = (
+            translate_image_from_patches(
+                input_image_path=unstained_image_path,
+                model=G_AB,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+
+        print(f"[Stain] Original Image size: {original_size}")
+        print(f"[Stain] Padded Image size: {padded_size}")
+        print(f"[Stain] Num patches: {num_patches}")
+        print(f"[Stain] Saved reconstructed stained image at: {stained_output_path}")
+        print(f"[Stain] Patch stride: {stride}")
+
+        # B -> A (stained -> unstained)
+        original_size, padded_size, num_patches, unstained_output_path = (
+            translate_image_from_patches(
+                input_image_path=stained_image_path,
+                model=G_BA,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_unstained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+        print(f"[Unstain] Original Image size: {original_size}")
+        print(f"[Unstain] Padded Image size: {padded_size}")
+        print(f"[Unstain] Num patches: {num_patches}")
+        print(
+            f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}"
+        )
+        print(f"[Unstain] Patch stride: {stride}")
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
