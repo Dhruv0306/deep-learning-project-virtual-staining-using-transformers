@@ -483,7 +483,7 @@ def train_v3(
         num_steps=dcfg.num_inference_steps,
         writer=writer,
         max_batches=tcfg.test_size,
-        num_samples=min(6, tcfg.test_size),
+        num_samples=max(6, tcfg.test_size),
         is_test=True,
     )
     writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
