@@ -56,9 +56,9 @@ def load_v3_components(checkpoint_path: str, device: str):
     Load v3 DiT + ConditionEncoder + VAE + sampler components.
     """
     from config import get_dit_config
-    from dit_generator import ConditionEncoder, getGeneratorV3
-    from noise_scheduler import DDPMScheduler, DDIMSampler
-    from vae_wrapper import VAEWrapper
+    from model_v3.generator import ConditionEncoder, getGeneratorV3
+    from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
+    from model_v3.vae_wrapper import VAEWrapper
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     diff_cfg = checkpoint.get("config")
@@ -119,11 +119,11 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
 
     Args:
         checkpoint_path (str): Path to a ``.pth`` checkpoint file produced by
-            ``training_loop.train()`` or ``training_loop_v2.train_v2()``.
+            ``model_v1.training_loop.train()`` or ``model_v2.training_loop.train_v2()``.
         device (str): Device to load the model onto, e.g. ``"cpu"`` or
             ``"cuda"``.
-        model_version (int): ``1`` loads :class:`~generator.ViTUNetGenerator`;
-            ``2`` loads :class:`~uvcgan_v2_generator.ViTUNetGeneratorV2`.
+        model_version (int): ``1`` loads :class:`~model_v1.generator.ViTUNetGenerator`;
+            ``2`` loads :class:`~model_v2.generator.ViTUNetGeneratorV2`.
 
     Returns:
         tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` — both in ``eval()``
@@ -139,13 +139,13 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     if model_version == 1:
-        from generator import ViTUNetGenerator
+        from model_v1.generator import ViTUNetGenerator
 
         G_AB = ViTUNetGenerator().to(device)
         G_BA = ViTUNetGenerator().to(device)
 
     elif model_version == 2:
-        from uvcgan_v2_generator import ViTUNetGeneratorV2
+        from model_v2.generator import ViTUNetGeneratorV2
 
         # Infer the exact architecture that was used when this checkpoint was saved.
         kwargs = _infer_v2_kwargs(checkpoint["G_AB"])

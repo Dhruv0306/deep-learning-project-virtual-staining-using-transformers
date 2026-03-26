@@ -153,4 +153,5 @@ data/E_Staining_DermaRepo/H_E-Staining_dataset/
     testB/    ← stained   test patches      (PNG, 256×256, RGB)
 ```
 
-These folders are consumed directly by `data_loader.py`.
+These folders are consumed directly by `shared/data_loader.py`.
+

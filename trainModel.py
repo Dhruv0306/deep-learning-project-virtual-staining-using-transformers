@@ -8,10 +8,10 @@ loop, and persists training history for later inspection.
 import os
 from datetime import datetime
 
-from history_utils import save_history_to_csv, visualize_history
-from training_loop import train
+from shared.history_utils import save_history_to_csv, visualize_history
+from model_v1.training_loop import train_v1
 from config import get_8gb_config
-from training_loop_v2 import train_v2
+from model_v2.training_loop import train_v2
 
 
 def main():
@@ -67,7 +67,7 @@ def main():
         )
     elif model_version == 3:
         from config import get_dit_8gb_config
-        from training_loop_v3 import train_v3
+        from model_v3.training_loop import train_v3
 
         model_dir = os.path.join(
             dataset_root,
@@ -103,7 +103,7 @@ def main():
         val_dir = os.path.join(model_dir, "validation_images")
         os.makedirs(val_dir, exist_ok=True)
         print(f"Validation image directory: {val_dir}")
-        history, G_AB, G_BA, D_A, D_B = train(
+        history, G_AB, G_BA, D_A, D_B = train_v1(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
             model_dir=model_dir,
@@ -120,3 +120,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

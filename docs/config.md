@@ -3,7 +3,7 @@
 Source of truth: `../config.py`
 
 **Shared by:** Both v1 and v2  
-**Role:** Centralised hyperparameter management. V2 training reads hyperparameters from `UVCGANConfig`; v1 still keeps several values hardcoded inside `training_loop.py` for legacy compatibility.
+**Role:** Centralised hyperparameter management. V2 training reads hyperparameters from `UVCGANConfig`; v1 still keeps several values hardcoded inside `model_v1/training_loop.py` for legacy compatibility.
 
 ---
 
@@ -110,7 +110,7 @@ Controls data loading.
 | `image_size` | int | 256 | Images are resized to this resolution. Changing this requires updating `preprocess_data.py` and `app.py` together |
 | `batch_size` | int | 4 | Mini-batch size. 8GB config uses 2 |
 | `num_workers` | int | 4 | DataLoader worker processes for parallel data loading |
-| `augment` | bool | True | Reserved flag for future augmentation support (currently unused by `data_loader.py`) |
+| `augment` | bool | True | Reserved flag for future augmentation support (currently unused by `shared/data_loader.py`) |
 
 ---
 
@@ -210,3 +210,4 @@ Factory helpers for v3 diffusion:
 
 Both return a `UVCGANConfig` with `model_version=3` and a populated
 `diffusion` section.
+
