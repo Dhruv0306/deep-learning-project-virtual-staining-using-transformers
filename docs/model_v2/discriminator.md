@@ -1,200 +1,147 @@
-# `model_v2/discriminator.py` — v2 Discriminator
+# model_v2/discriminator.py - v2 Discriminator
 
-**Model:** True UVCGAN v2  
-**Role:** Multi-scale spectral-norm PatchGAN discriminator. Two instances are created — `D_A` for domain A (unstained) and `D_B` for domain B (stained).
+Source of truth: ../../model_v2/discriminator.py
 
----
-
-## Architecture Overview
-
-The v2 discriminator wraps multiple independent `SpectralNormDiscriminator` instances, each operating on a progressively downsampled version of the input. This **multi-scale design** allows discrimination at different spatial frequencies simultaneously: fine-scale discriminators catch local texture artefacts, while coarse-scale discriminators catch global structural inconsistencies.
-
-```
-Input Image (N, 3, 256, 256)
-        │
-        ├──────────────────────────────────────────────────┐
-        │ Scale 0 (finest)                                 │
-        │ SpectralNormDiscriminator on original 256×256    │
-        │ → logit map (N, 1, 30, 30)                      │
-        │                                                  │
-        ▼ AvgPool2d(k=3, s=2, p=1)                         │
-(N, 3, 128, 128)                                           │
-        │                                                  │
-        ├──────────────────────────────────────────────────┤
-        │ Scale 1 (medium)                                 │
-        │ SpectralNormDiscriminator on 128×128             │
-        │ → logit map (N, 1, 14, 14)                      │
-        │                                                  │
-        ▼ AvgPool2d(k=3, s=2, p=1)                         │
-(N, 3, 64, 64)                                             │
-        │                                                  │
-        ├──────────────────────────────────────────────────┤
-        │ Scale 2 (coarsest)                               │
-        │ SpectralNormDiscriminator on 64×64               │
-        │ → logit map (N, 1, 6, 6)                        │
-        └──────────────────────────────────────────────────┘
-
-Output: list of 3 logit maps [(N,1,30,30), (N,1,14,14), (N,1,6,6)]
-```
+Model: True UVCGAN v2
+Role: Multi-scale PatchGAN discriminator with optional spectral normalization.
 
 ---
 
-## Single-Scale Discriminator Architecture (`SpectralNormDiscriminator`)
+## Component Structure
 
-Each scale uses the same PatchGAN structure as v1 but with **spectral normalisation** on every convolutional layer:
-
-```
-Input (N, 3, H, W)
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Layer 1: SN-Conv(3→64, k=4, s=2, p=1) + LeakyReLU(0.2)     │
-│ No InstanceNorm on first layer                              │
-├─────────────────────────────────────────────────────────────┤
-│ Layer 2: SN-Conv(64→128, k=4, s=2, p=1) + IN + LeakyReLU   │
-├─────────────────────────────────────────────────────────────┤
-│ [repeat for n_layers-1 total strided layers,                │
-│  channels capped at base_channels×8 = 512]                  │
-├─────────────────────────────────────────────────────────────┤
-│ Stride-1 layer: SN-Conv(→512, k=4, s=1, p=1) + IN + LReLU │
-├─────────────────────────────────────────────────────────────┤
-│ Output: SN-Conv(512→1, k=4, s=1, p=1)   ← raw logits       │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-Logit map (N, 1, H', W')
-```
+1. _conv_block
+2. SpectralNormDiscriminator
+3. MultiScaleDiscriminator
+4. getDiscriminatorsV2
 
 ---
 
-## What Spectral Normalisation Does
+## 1) _conv_block
 
-Spectral normalisation divides each weight matrix `W` by its largest singular value `σ(W)`:
+Purpose:
+- builds one reusable conv stage for the discriminator
 
-```
-W_SN = W / σ(W)
-```
+Dataflow with shapes:
 
-This constrains the Lipschitz constant of each linear layer to 1, which in turn bounds the discriminator's overall Lipschitz constant. A Lipschitz-bounded discriminator cannot grow arbitrarily strong relative to the generator, stabilising the adversarial training dynamic. This is especially important when combined with the gradient penalty: both together enforce a smooth, well-behaved discriminator loss landscape.
+Input:
+- x: (N, Cin, H, W)
 
----
+Step 1:
+- Conv2d(Cin -> Cout, kernel=4 by default, stride and padding configurable)
+- Output: (N, Cout, Hout, Wout)
 
-## Classes
+Step 2:
+- optional InstanceNorm2d(Cout)
+- Output: (N, Cout, Hout, Wout)
 
-### `SpectralNormDiscriminator`
+Step 3:
+- LeakyReLU(0.2)
+- Output: (N, Cout, Hout, Wout)
 
-Single-scale PatchGAN with optional spectral normalisation on all layers.
-
-| Constructor Parameter | Default | Description |
-|---|---|---|
-| `input_nc` | 3 | Input image channels |
-| `base_channels` | 64 | Channels after the first conv layer |
-| `n_layers` | 3 | Number of strided downsampling layers (layer count excludes the stride-1 layer and output layer) |
-| `use_spectral_norm` | `True` | Wrap every conv with spectral normalisation |
-
-| Attribute | Description |
-|---|---|
-| `model` | `nn.Sequential` of all conv blocks |
-
-**Channel progression** (with `base_channels=64`, `n_layers=3`):
-
-| Layer | In → Out channels | Stride | Notes |
-|---|---|---|---|
-| 1 | 3 → 64 | 2 | No IN |
-| 2 | 64 → 128 | 2 | With IN |
-| 3 | 128 → 256 | 2 | With IN |
-| stride-1 | 256 → 512 | 1 | With IN, increases receptive field |
-| output | 512 → 1 | 1 | No IN, no activation |
-
-Channels are capped at `base_channels × 8 = 512`.
-
-**`forward(x)`** — returns logit map `(N, 1, H', W')`.
+Returns:
+- Sequential block preserving channel and spatial shape from step 1
 
 ---
 
-### `MultiScaleDiscriminator`
+## 2) SpectralNormDiscriminator
 
-Wraps `num_scales` independent `SpectralNormDiscriminator` instances, applying each to a progressively downsampled version of the input.
+Purpose:
+- single-scale PatchGAN logit predictor
 
-| Constructor Parameter | Default | Description |
-|---|---|---|
-| `input_nc` | 3 | Input channels |
-| `base_channels` | 64 | Channels at the finest scale |
-| `n_layers` | 3 | Strided layers per scale |
-| `num_scales` | 3 | Number of spatial scales to discriminate at. In `get_8gb_config()` this is reduced to 2 to save ~0.4 GB VRAM. |
-| `use_spectral_norm` | `True` | Spectral normalisation on all convolutions |
+Typical config:
+- input_nc=3, base_channels=64, n_layers=3
 
-| Attribute | Description |
-|---|---|
-| `discriminators` | `nn.ModuleList` of `num_scales` `SpectralNormDiscriminator` instances |
-| `downsample` | `nn.AvgPool2d(k=3, s=2, p=1)` — used to produce coarser inputs. `count_include_pad=False` avoids border artefacts. |
+Dataflow example for input 256 by 256:
 
-**`forward(x)`**
+Input:
+- x0: (N, 3, 256, 256)
 
-```python
-outputs = []
-for disc in self.discriminators:
-    outputs.append(disc(x))   # discriminate at current resolution
-    x = self.downsample(x)    # halve resolution for next scale
-return outputs
-```
+Block 1 (no instance norm):
+- Conv 3 -> 64, kernel=4, stride=2, pad=1
+- x1: (N, 64, 128, 128)
 
-Returns a list of logit maps, one per scale, from finest to coarsest.
+Block 2:
+- Conv 64 -> 128, stride=2
+- x2: (N, 128, 64, 64)
 
----
+Block 3:
+- Conv 128 -> 256, stride=2
+- x3: (N, 256, 32, 32)
 
-## Functions
+Stride-1 refinement block:
+- Conv 256 -> 512, stride=1
+- x4: (N, 512, 31, 31)
 
-### `_conv_block(in_channels, out_channels, kernel_size, stride, padding, use_norm, use_spectral)`
+Output layer:
+- Conv 512 -> 1, stride=1
+- y: (N, 1, 30, 30)
 
-Helper that builds a single discriminator layer: conv → (optional spectral norm) → (optional InstanceNorm) → LeakyReLU(0.2).
+Forward output:
+- patch logits map y
 
-| Parameter | Default | Description |
-|---|---|---|
-| `in_channels` | — | Input channels |
-| `out_channels` | — | Output channels |
-| `kernel_size` | 4 | Convolution kernel size |
-| `stride` | 2 | Convolution stride |
-| `padding` | 1 | Convolution padding |
-| `use_norm` | `True` | Apply InstanceNorm2d after conv. When `True`, `bias=False` on the conv. |
-| `use_spectral` | `True` | Wrap conv with `spectral_norm` |
-
-Returns: `nn.Sequential`.
+Notes:
+- spectral normalization wraps conv layers when enabled
+- spatial map values are patch-level realism scores
 
 ---
 
-### `getDiscriminatorsV2(...)`
+## 3) MultiScaleDiscriminator
 
-Factory function. Creates two `MultiScaleDiscriminator` instances, applies `init_weights` from `model_v1/generator.py` to both, runs a smoke-test, and returns them.
+Purpose:
+- evaluate realism at multiple spatial scales
 
-| Parameter | Default | Description |
-|---|---|---|
-| `input_nc` | 3 | Input channels |
-| `base_channels` | 64 | Channels at finest scale |
-| `n_layers` | 3 | Strided layers per scale |
-| `num_scales` | 3 | Number of spatial scales |
-| `use_spectral_norm` | `True` | Apply spectral normalisation |
+Internal components:
+- ModuleList of per-scale SpectralNormDiscriminator modules
+- AvgPool2d(kernel=3, stride=2, padding=1, count_include_pad=False)
 
-**Returns:** `(D_A, D_B)` — both on the available device.
+Dataflow with num_scales=3 and input 256 by 256:
+
+Scale 0:
+- in0: (N, 3, 256, 256)
+- out0 from discriminator: (N, 1, 30, 30)
+
+Downsample:
+- in1: (N, 3, 128, 128)
+
+Scale 1:
+- out1: (N, 1, 14, 14)
+
+Downsample:
+- in2: (N, 3, 64, 64)
+
+Scale 2:
+- out2: (N, 1, 6, 6)
+
+Return:
+- list [out0, out1, out2]
 
 ---
 
-## How Multi-Scale Output Is Used in Loss Computation
+## 4) getDiscriminatorsV2
 
-The `UVCGANLoss` (in `model_v2/losses.py`) handles the list of logit maps returned by `MultiScaleDiscriminator`. For discriminator loss, LSGAN is applied independently at each scale and averaged:
+Purpose:
+- factory that builds D_A and D_B
 
-```python
-# real_outputs and fake_outputs are both lists of (N, 1, H_i, W_i) tensors
-def _lsgan_disc_loss(self, real_outputs, fake_outputs):
-    losses = [_single(r, f) for r, f in zip(real_outputs, fake_outputs)]
-    return torch.stack(losses).mean()
-```
+Factory dataflow:
 
-For the gradient penalty, all scale outputs are summed into a single scalar before computing gradients, so the penalty enforces Lipschitz continuity across all scales simultaneously:
+1. choose device
+2. instantiate D_A and D_B as MultiScaleDiscriminator
+3. apply init_weights
+4. smoke test input:
+   - x: (1, 3, 256, 256)
+5. smoke test outputs per model:
+   - list of shapes typically [(1,1,30,30), (1,1,14,14), (1,1,6,6)]
 
-```python
-pred_scalar = torch.stack([p.sum() for p in pred]).sum()
-```
+Return:
+- D_A, D_B
 
+---
 
+## Training Integration
 
+In the v2 training loop:
+- D_A consumes real_A and fake_A batches
+- D_B consumes real_B and fake_B batches
+- each returns either one map per scale
+- losses reduce multi-scale outputs by averaging per-scale objectives
+- gradient penalty uses interpolated inputs and sums multi-scale outputs to a scalar before gradient computation

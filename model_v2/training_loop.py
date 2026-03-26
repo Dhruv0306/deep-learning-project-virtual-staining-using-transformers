@@ -320,7 +320,7 @@ def train_v2(
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
 
-            # ADD THIS RIGHT AFTER:
+            # Defensive NaN/Inf and near-uniform input checks.
             if not (real_A.isfinite().all() and real_B.isfinite().all()):
                 print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
                 continue

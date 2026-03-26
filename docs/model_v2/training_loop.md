@@ -1,304 +1,204 @@
-# `model_v2/training_loop.py` — V2 Training Loop
+# model_v2/training_loop.py - v2 Training Loop
 
-Source of truth: `../../model_v2/training_loop.py`
+Source of truth: ../../model_v2/training_loop.py
 
-**Model:** True UVCGAN v2  
-**Entry point:** `train_v2()`  
-**Role:** Orchestrates the complete v2 training process — data loading, model construction, loss computation, optimiser stepping, LR scheduling, validation, checkpointing, and early stopping. Everything is driven by a `UVCGANConfig` object.
-
----
-
-## Full Training Flow
-
-```
-train_v2(epoch_size, num_epochs, model_dir, val_dir, test_size, cfg)
-    │
-    ├── Build data loaders  (getDataLoader)
-    ├── Build models        (getGeneratorsV2, getDiscriminatorsV2)
-    ├── Build loss          (UVCGANLoss)
-    ├── Build optimisers    (3× Adam — G, D_A, D_B)
-    ├── Build LR schedulers (3× LambdaLR)
-    ├── Set up TensorBoard, CSV, directories
-    │
-    └── for epoch in range(num_epochs):
-            │
-            ├── for batch in train_loader:
-            │       │
-            │       ├── [Discriminator step × n_critic]
-            │       │     G frozen, D trainable
-            │       │     fake_B = G_AB(real_A)  [no_grad]
-            │       │     fake_A = G_BA(real_B)  [no_grad]
-            │       │     loss_D_A = discriminator_loss(D_A, real_A, fake_A, buffer)
-            │       │     loss_D_B = discriminator_loss(D_B, real_B, fake_B, buffer)
-            │       │     backward + clip + step D_A, D_B
-            │       │
-            │       └── [Generator step with gradient accumulation]
-            │             D frozen, G trainable
-            │             zero_grad every accumulate_grads batches
-            │             loss_G, fake_A, fake_B = generator_loss(...)
-            │             backward (loss_G / accumulate_grads)
-            │             clip + step G every accumulate_grads batches
-            │
-            ├── Log epoch losses + LR to TensorBoard
-            ├── Step LR schedulers
-            ├── Every 5 epochs: flush history CSV
-            ├── Every 20 epochs: save checkpoint
-            │
-                ├── After validation_warmup_epochs:
-                │       run_validation each epoch (save comparison images)
-                │
-                └── Every early_stopping_interval (after early_stopping_warmup):
-                    calculate_metrics (SSIM, PSNR, FID)
-                    check early stopping (SSIM + divergence)
-    │
-    ├── Final metrics on test set
-    ├── Final test inference + image export
-    └── Save final checkpoint
-```
+Model: True UVCGAN v2
+Entrypoint: train_v2(...)
 
 ---
 
-## Function: `_make_lr_lambda(warmup, decay_start, total)`
+## Component Structure
 
-Returns a `lr_lambda` callable for `LambdaLR`.
+1. _make_lr_lambda
+2. _global_grad_norm
+3. train_v2
 
-| Parameter | Type | Description |
-|---|---|---|
-| `warmup` | int | Epochs to ramp from 0 to 1 |
-| `decay_start` | int | Epoch where linear decay begins |
-| `total` | int | Total training epochs |
-
-**Schedule:**
-```
-epoch ∈ [0, warmup):        max(1e-8, epoch / warmup)       ← ramp up
-epoch ∈ [warmup, decay_start): 1.0                           ← constant
-epoch ∈ [decay_start, total):  max(0, 1 - (epoch-decay_start)/(total-decay_start))  ← decay
-```
-
-The `1e-8` floor during warm-up prevents the LR from being exactly 0 on epoch 0, which would give zero gradients before any learning has occurred.
+Within train_v2:
+- setup phase
+- epoch loop
+- per-batch checks
+- discriminator stage
+- generator stage
+- epoch logging and scheduler stage
+- validation and stopping stage
+- finalization stage
 
 ---
 
-## Function: `_global_grad_norm(parameters)`
+## 1) _make_lr_lambda
 
-Computes the global gradient L2 norm across all parameters.
+Input:
+- warmup, decay_start, total (integers)
 
-```python
-grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
-return float(torch.norm(torch.stack([g.norm() for g in grads])))
-```
+Dataflow:
+1. if epoch < warmup:
+   - return max(1e-8, epoch/warmup)
+2. else if epoch < decay_start:
+   - return 1.0
+3. else:
+   - return linear decay factor to zero
 
-Used for TensorBoard logging (`Diagnostics/GradNorm_G`) to detect gradient explosion early. Returns 0.0 when no gradients exist (e.g. before the first backward).
-
----
-
-## Function: `train_v2(...)`
-
-### Arguments
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `epoch_size` | int or None | None | Overrides `cfg.training.epoch_size` |
-| `num_epochs` | int or None | None | Overrides `cfg.training.num_epochs` |
-| `model_dir` | str or None | None | Overrides `cfg.model_dir` |
-| `val_dir` | str or None | None | Overrides `cfg.val_dir` |
-| `test_size` | int or None | None | Overrides `cfg.training.test_size` |
-| `cfg` | `UVCGANConfig` or None | None | Full config. `get_default_config(2)` used if None |
-
-**Returns:** `(history, G_AB, G_BA, D_A, D_B)`
+Output:
+- scalar multiplier for LR scheduler
 
 ---
 
-### Model Construction
+## 2) _global_grad_norm
 
-```python
-G_AB, G_BA = getGeneratorsV2(
-    base_channels, vit_depth, vit_heads, vit_mlp_ratio,
-    vit_dropout, layerscale_init, use_cross_domain,
-    use_gradient_checkpointing   ← from GeneratorConfig
-)
-D_A, D_B = getDiscriminatorsV2(
-    input_nc, base_channels, n_layers, num_scales, use_spectral_norm
-)
-```
+Input:
+- iterable of parameters
 
-Both generators and both discriminators are moved to the device (CUDA if available).
+Dataflow:
+1. collect non-None grads
+2. each grad converted to float and L2 norm computed
+3. stack norms and compute global L2
+
+Output:
+- scalar float grad norm
 
 ---
 
-### Optimiser Setup
+## 3) train_v2
 
-Three independent Adam optimisers share the same `lr`, `beta1`, `beta2`:
+### 3A) Setup Phase
 
-| Optimiser | Parameters | Description |
-|---|---|---|
-| `optimizer_G` | All G_AB + G_BA params | Updated once per `accumulate_grads` batches |
-| `optimizer_D_A` | All D_A params | Updated once per discriminator step |
-| `optimizer_D_B` | All D_B params | Updated once per discriminator step |
+Input data objects:
+- cfg and optional override args
 
-Three corresponding `LambdaLR` schedulers step once per epoch.
+Dataflow:
+1. resolve cfg
+2. load train/test dataloaders
+3. instantiate G_AB, G_BA, D_A, D_B
+4. instantiate loss module
+5. configure optimizers/schedulers/scaler/writer
 
----
+Initial model I/O shapes expected:
+- real_A: (N,3,H,W)
+- real_B: (N,3,H,W)
+- fake_A/fake_B: (N,3,H,W)
+- discriminator outputs: tensor or list by scale
 
-### AMP (Automatic Mixed Precision)
+### 3B) Epoch Loop
 
-```python
-use_amp = tcfg.use_amp and device.type == "cuda"
-scaler  = GradScaler("cuda", enabled=use_amp)
-```
+Per epoch dataflow:
+1. set train mode
+2. reset scalar accumulators
+3. iterate batch data
 
-When enabled, generator forward passes run in float16 (saving ~50% activation memory), while the GradScaler rescales gradients to prevent underflow.
+### 3C) Per-batch Defensive Checks
 
-**The gradient penalty always runs in float32** regardless of `use_amp` — `UVCGANLoss.discriminator_loss` wraps the GP call in `torch.autocast(enabled=False)` internally. This is critical: float16 precision is insufficient for the `torch.autograd.grad` call in the penalty computation and produces NaN gradients.
+Input:
+- real_A, real_B from dataloader
 
----
+Checks with shapes:
+- finite check on (N,3,H,W)
+- std check over dims [1,2,3] producing (N,) for each domain
 
-### Per-Batch Training Step
+### 3D) Discriminator Stage
 
-#### Discriminator step (`n_critic` times)
+Inputs:
+- real_A: (N,3,H,W)
+- real_B: (N,3,H,W)
 
-```python
-# Freeze G so it doesn't accumulate gradients
-for p in G_AB.parameters(): p.requires_grad_(False)
-for p in G_BA.parameters(): p.requires_grad_(False)
+Dataflow:
+1. freeze G, unfreeze D
+2. no_grad generation:
+   - fake_B_d = G_AB(real_A): (N,3,H,W)
+   - fake_A_d = G_BA(real_B): (N,3,H,W)
+3. compute loss_D_A via discriminator_loss(D_A, real_A, fake_A_d, buffer)
+4. compute loss_D_B via discriminator_loss(D_B, real_B, fake_B_d, buffer)
+5. backward and optimizer steps for D_A, D_B
 
-with torch.no_grad():
-    fake_B_d = G_AB(real_A)    # generate fakes for D training
-    fake_A_d = G_BA(real_B)
+Discriminator output shapes in loss path:
+- single-scale: (N,1,h,w)
+- multi-scale: list of such tensors
 
-# D_A update
-optimizer_D_A.zero_grad()
-loss_D_A = loss_fn.discriminator_loss(D_A, real_A, fake_A_d, fake_A_buffer)
-loss_D_A.backward()
-clip_grad_norm_(D_A.parameters(), grad_clip_norm)
-optimizer_D_A.step()
+Stage output:
+- scalar loss_D_A_val and loss_D_B_val per batch
 
-# D_B update (same pattern)
-```
+### 3E) Generator Stage
 
-The fakes are generated with `torch.no_grad()` during the discriminator step — the generator's computation graph is not needed here, saving memory and compute.
+Inputs:
+- same real_A and real_B
 
-#### Generator step (with gradient accumulation)
+Dataflow:
+1. unfreeze G, freeze D
+2. optional accumulation window zero_grad
+3. forward under autocast:
+   - loss_G, fake_A, fake_B = generator_loss(...)
+   - fake_A, fake_B each (N,3,H,W)
+4. scale by accumulate_grads
+5. backward via scaler
+6. step optimizer_G at accumulation boundary
 
-```python
-# Freeze D
-for p in D_A.parameters(): p.requires_grad_(False)
-for p in D_B.parameters(): p.requires_grad_(False)
+Stage outputs:
+- scalar loss_G_val
+- optional scalar grad_norm_G when stepping
 
-# Zero grad only at start of accumulation window
-if (i - 1) % accumulate == 0:
-    optimizer_G.zero_grad(set_to_none=True)
+### 3F) Epoch logging and scheduler stage
 
-with autocast("cuda", enabled=use_amp):
-    loss_G, fake_A, fake_B = loss_fn.generator_loss(
-        real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, num_epochs
-    )
-    loss_G_scaled = loss_G / accumulate    # scale for accumulation
+Dataflow:
+1. aggregate scalar averages over batches
+2. write TensorBoard scalars
+3. step LR schedulers
+4. write LR scalars
+5. periodic CSV flush
+6. periodic checkpoint save
 
-scaler.scale(loss_G_scaled).backward()
+Checkpoint payload shapes:
+- model state dict tensors with model-defined parameter shapes
+- optimizer state tensors with matching parameter groups
 
-# Step only at end of accumulation window
-if i % accumulate == 0 or i == len(train_loader):
-    scaler.unscale_(optimizer_G)
-    clip_grad_norm_(G_params, grad_clip_norm)
-    scaler.step(optimizer_G)
-    scaler.update()
-```
+### 3G) Validation and stopping stage
 
-**Why divide by `accumulate`?** Without scaling, accumulating `K` batches would produce gradients `K×` larger than a single batch. Dividing each loss by `K` before backward makes the accumulated gradient equal to the average gradient over the `K` batches — equivalent to training on a batch of size `batch_size × K`.
+Validation image path:
+- run_validation after warmup
 
-**Effective batch size:** `effective_batch = batch_size × accumulate_grads`.
-With the current 8GB profile (`batch_size=2`, `accumulate_grads=2`), the
-effective batch size is 4.
+Metrics path:
+1. calculate_metrics -> scalar metrics dictionary
+2. avg_ssim computed from domain A and B SSIM scalars
+3. EarlyStopping call with scalar ssim and scalar losses
+4. possible break
 
-**Why `set_to_none=True`?** Setting gradients to `None` instead of zero is slightly faster (avoids a memset) and uses less memory since `None` tensors don't occupy memory.
+### 3H) Finalization stage
 
----
+Dataflow:
+1. final calculate_metrics call
+2. run_testing image export
+3. final checkpoint save
+4. append and reload history
+5. close writer
 
-### Epoch-Level Logging
-
-At the end of each epoch:
-
-| TensorBoard scalar | Description |
-|---|---|
-| `Loss/Generator` | Average generator loss across all batches |
-| `Loss/Discriminator_A` | Average D_A loss |
-| `Loss/Discriminator_B` | Average D_B loss |
-| `Diagnostics/GradNorm_G` | Average generator gradient L2 norm |
-| `LR/Generator` | Current learning rate after scheduler step |
-| `LR/Discriminator_A` | Current D_A learning rate |
-| `LR/Discriminator_B` | Current D_B learning rate |
-
----
-
-### Validation and Early Stopping
-
-Validation image export and validation metrics are scheduled separately.
-
-Validation images start only after `validation_warmup_epochs`, then run every epoch:
-
-```python
-if (epoch + 1) > tcfg.validation_warmup_epochs:
-    run_validation(...)
-```
-
-Validation metrics and early stopping are checked on `early_stopping_interval`:
-
-```python
-if (
-    (epoch + 1) % tcfg.early_stopping_interval == 0
-    and epoch + 1 >= tcfg.early_stopping_warmup
-):
-    val_metrics = calculate_metrics(...)
-    avg_ssim = (val_metrics.get("ssim_A", 0.0) + val_metrics.get("ssim_B", 0.0)) / 2.0
-    should_stop = early_stopping(ssim=avg_ssim, losses={...})
-```
-
-This keeps image monitoring frequent after warmup while controlling metric/early-stopping overhead with a separate interval.
-
-| TensorBoard scalar | Description |
-|---|---|
-| `Validation/ssim_A` | SSIM between real_A and fake_A |
-| `Validation/ssim_B` | SSIM between real_B and fake_B |
-| `Validation/psnr_A` | PSNR for domain A |
-| `Validation/psnr_B` | PSNR for domain B |
-| `EarlyStopping/ssim` | Average SSIM used for early stopping |
-| `EarlyStopping/counter` | Steps without SSIM improvement |
-| `EarlyStopping/divergence_counter` | Consecutive divergence checks |
+Return:
+- history dictionary
+- G_AB, G_BA, D_A, D_B modules
 
 ---
 
-### Checkpointing
+## Batch-level Shape Summary
 
-Every 20 epochs:
-```
-checkpoint_epoch_N.pth  ← G_AB, G_BA, D_A, D_B state dicts + all optimiser states
-```
+Given input batch size N and image size H by W:
 
-At end of training:
-```
-final_checkpoint_epoch_N.pth  ← same structure
-```
+- real_A: (N,3,H,W)
+- real_B: (N,3,H,W)
+- fake_B from G_AB: (N,3,H,W)
+- fake_A from G_BA: (N,3,H,W)
+- D outputs: list of per-scale maps
+  - example for H=W=256 and 3 scales:
+    - (N,1,30,30)
+    - (N,1,14,14)
+    - (N,1,6,6)
 
-The checkpoint always saves all four models and three optimisers so training can be resumed from any checkpoint.
+All scalar losses are reduced from these tensors before optimizer updates.
 
 ---
 
-### Output Directory Structure
+## Artifacts
 
-```
-model_dir/
-    checkpoint_epoch_20.pth
-    checkpoint_epoch_40.pth
-    ...
-    final_checkpoint_epoch_N.pth
-    training_history.csv
-    training_history.png
-    tensorboard_logs/
-    validation_images/
-        image_1_A.png    ← Real A | Fake B | Rec A | Real B
-        image_1_B.png    ← Real B | Fake A | Rec B | Real A
-        ...
-    test_images/
-```
-
+Written under model_dir:
+- tensorboard_logs
+- training_history.csv
+- checkpoint_epoch_*.pth
+- final_checkpoint_epoch_*.pth
+- validation_images
+- test_images
