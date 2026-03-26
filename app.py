@@ -22,9 +22,13 @@ CLI usage::
 
 You will be prompted for:
   - Path to the trained checkpoint (``.pth`` file)
-  - Model version (1 or 2)
-  - Path to an unstained image  (A → B translation via G_AB)
-  - Path to a stained image     (B → A translation via G_BA)
+    - Model version (1, 2, or 3)
+    - Path to an unstained image  (A -> B translation)
+    - Path to a stained image     (B -> A translation, v1/v2 only)
+
+Model-version behavior:
+    - v1/v2 run bidirectional translation using ``G_AB`` and ``G_BA``.
+    - v3 runs unstained -> stained only via diffusion sampling.
 
 Outputs are written to:
   - ``data/reconstructed_stained_output.png``
@@ -46,14 +50,23 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def is_v3_checkpoint(ckpt: dict) -> bool:
     """
-    Return True if the checkpoint matches the v3 schema.
+    Return True when a checkpoint dictionary appears to follow v3 schema.
+
+    The current heuristic checks for ``dit_state_dict``.
     """
     return "dit_state_dict" in ckpt
 
 
 def load_v3_components(checkpoint_path: str, device: str):
     """
-    Load v3 DiT + ConditionEncoder + VAE + sampler components.
+    Load v3 DiT + conditioning encoder + VAE + sampler components.
+
+    The function prefers a serialized diffusion config stored in the
+    checkpoint under ``config`` and falls back to ``get_dit_config()`` when
+    not present.
+
+    Returns:
+        tuple: ``(dit_model, cond_encoder, vae, sampler, diff_cfg)``.
     """
     from config import get_dit_config
     from model_v3.generator import ConditionEncoder, getGeneratorV3
@@ -470,7 +483,29 @@ def translate_image_from_patches_v3(
     num_steps=50,
 ):
     """
-    Translate a whole-slide image using v3 diffusion (A -> B only).
+    Translate a whole-slide image using the v3 diffusion pipeline.
+
+    This path supports A -> B translation only (unstained -> stained).
+    Patches are processed in mini-batches, denoised with DDIM sampling, then
+    decoded by the VAE and blended back into a full-resolution image.
+
+    Args:
+        input_image_path (str): Path to the source image.
+        dit_model (nn.Module): DiT denoiser network.
+        cond_encoder (nn.Module): Conditioning encoder producing DiT context.
+        vae (nn.Module): VAE decoder wrapper used to decode latent samples.
+        sampler: DDIM sampler instance.
+        transform (callable): Preprocessing transform returning normalized tensors.
+        output_path (str): Output image path.
+        patch_size (int): Patch side length.
+        stride (int): Patch stride; use ``patch_size // 2`` for overlap.
+        device (str): Inference device.
+        batch_size (int): Number of patches per diffusion batch.
+        num_steps (int): DDIM inference steps.
+
+    Returns:
+        tuple[tuple[int, int], tuple[int, int], int, str]:
+            ``(original_size, padded_size, num_patches, output_path)``.
     """
     from torch.amp.autocast_mode import autocast
 

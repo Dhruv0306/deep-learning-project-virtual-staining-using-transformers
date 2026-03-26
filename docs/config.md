@@ -1,213 +1,73 @@
-# `config.py` — Configuration Manager
+# config.py Configuration Reference
 
-Source of truth: `../config.py`
+Source of truth: ../config.py
 
-**Shared by:** Both v1 and v2  
-**Role:** Centralised hyperparameter management. V2 training reads hyperparameters from `UVCGANConfig`; v1 still keeps several values hardcoded inside `model_v1/training_loop.py` for legacy compatibility.
+This module centralizes hyperparameters for all model versions.
 
----
+## Top-Level Container
 
-## Design
+UVCGANConfig groups all sub-configs:
 
-The config is structured as nested dataclasses — one per concern — all wrapped in a top-level `UVCGANConfig`. This makes it easy to override individual values without touching anything else:
+- model_version (1, 2, or 3)
+- generator
+- discriminator
+- loss
+- training
+- data
+- diffusion
+- model_dir
+- val_dir
 
-```python
-cfg = get_8gb_config()
-cfg.training.num_epochs = 500        # just change what you need
-cfg.loss.lambda_cycle = 15.0
-```
+Validation in __post_init__ enforces:
 
----
+- model_version must be one of 1, 2, 3
+- decay_start_epoch must be at least 2 epochs before num_epochs
 
-## `GeneratorConfig`
+## Sub-Configs
 
-Controls the architecture of `ViTUNetGeneratorV2` (v2 only — v1 does not use this config).
+- GeneratorConfig
+  - v2 generator architecture settings (ViT UNet based)
+  - includes use_cross_domain and use_gradient_checkpointing
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `input_nc` | int | 3 | Input image channels |
-| `output_nc` | int | 3 | Output image channels |
-| `base_channels` | int | 64 | Channels at the first encoder level. Subsequent levels are ×2, ×4, ×8. Directly determines model size — doubling this roughly quadruples peak activation memory |
-| `vit_depth` | int | 4 | Number of LayerScale Transformer blocks in the ViT bottleneck. Each block adds `(N, H×W, C)` activation storage during training. Current 8GB profile keeps this at 4 |
-| `vit_heads` | int | 8 | Attention heads per Transformer block. Must evenly divide the bottleneck channel count (`base_channels × 8 = 512`) |
-| `vit_mlp_ratio` | float | 4.0 | MLP hidden dimension = `bottleneck_channels × vit_mlp_ratio` |
-| `vit_dropout` | float | 0.0 | Dropout inside each Transformer block. 0 is standard for GAN training |
-| `use_layerscale` | bool | True | Enable LayerScale residual scaling in ViT blocks |
-| `layerscale_init` | float | 1e-4 | Initial value for LayerScale per-channel vectors. Near-zero init means the block starts as identity |
-| `use_cross_domain` | bool | True | Allocate CrossDomainFusion layers on skip connections. This is the defining UVCGAN feature |
-| `use_gradient_checkpointing` | bool | False | Recompute ViT block activations during backward instead of storing them. Optional for tighter VRAM budgets; disabled in the current 8GB profile for faster training |
+- DiscriminatorConfig
+  - multi-scale PatchGAN settings
+  - includes spectral normalization toggle and number of scales
 
----
+- LossConfig
+  - cycle, identity, perceptual, and regularization weights
+  - includes lambda_gp, lambda_contrastive, lambda_spectral
 
-## `DiscriminatorConfig`
+- TrainingConfig
+  - optimizer and schedule controls
+  - includes warmup, decay, AMP, gradient accumulation, and stopping controls
 
-Controls the architecture of `MultiScaleDiscriminator` (v2) or `PatchDiscriminator` (v1).
+- DataConfig
+  - dataset root, image size, batch size, and dataloader workers
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `input_nc` | int | 3 | Input image channels |
-| `base_channels` | int | 64 | Channels after the first conv layer |
-| `n_layers` | int | 3 | Number of strided downsampling layers (excluding the stride-1 layer and the output layer) |
-| `num_scales` | int | 3 | Number of spatial scales in the multi-scale discriminator. Current 8GB profile keeps all 3 scales |
-| `use_spectral_norm` | bool | True | Apply spectral normalisation to all conv layers |
-
----
-
-## `LossConfig`
-
-Controls all loss weights and the gradient penalty configuration.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `lambda_cycle` | float | 10.0 | Cycle-consistency L1 weight. Standard CycleGAN value |
-| `lambda_identity` | float | 5.0 | Identity L1 weight at the start of training. Decays after 50% of training |
-| `lambda_cycle_perceptual` | float | 0.1 | VGG perceptual loss weight on cycle outputs |
-| `lambda_identity_perceptual` | float | 0.05 | VGG perceptual loss weight on identity outputs |
-| `lambda_gp` | float | 0.1 | One-sided gradient penalty weight. Paper value. Much smaller than WGAN-GP's typical 10.0 because the γ²-normalised GP has a different scale |
-| `lambda_contrastive` | float | 0.0 | NT-Xent contrastive loss weight. Disabled by default — enable only after GAN training has stabilised |
-| `lambda_spectral` | float | 0.0 | Spectral frequency loss weight. Disabled by default for the same reason |
-| `perceptual_resize` | int | 128 | Bilinear resize applied to images before VGG19. Current 8GB profile uses 180 |
-| `use_wgan_gp` | bool | False | Legacy field kept for v1 compatibility. Always False for v2 — LSGAN is the paper's best configuration |
-| `contrastive_temperature` | float | 0.07 | NT-Xent softmax temperature |
-
----
-
-## `TrainingConfig`
-
-Controls the training loop behaviour — optimiser, scheduling, and stopping.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `num_epochs` | int | 200 | Total training epochs |
-| `epoch_size` | int | 3000 | Maximum samples drawn per epoch. The dataloader wraps around if the dataset is smaller |
-| `test_size` | int | 200 | Number of test samples to export in the final evaluation |
-| `lr` | float | 2e-4 | Base learning rate for all Adam optimisers |
-| `beta1` | float | 0.5 | Adam β₁. Standard CycleGAN/LSGAN value. Lower than the default 0.9 reduces momentum and stabilises GAN training |
-| `beta2` | float | 0.999 | Adam β₂. Standard value |
-| `warmup_epochs` | int | 5 | Number of epochs to linearly ramp the LR from 0 to `lr`. Prevents large gradient steps at the start of training |
-| `decay_start_epoch` | int | 100 | Epoch at which the LR begins its linear decay from `lr` to 0. Constant between `warmup_epochs` and `decay_start_epoch` |
-| `grad_clip_norm` | float | 1.0 | Maximum L2 norm for gradient clipping. 0 disables clipping |
-| `early_stopping_patience` | int | 40 | Number of validation checks without SSIM improvement before stopping. Measured in check intervals, not epochs |
-| `early_stopping_warmup` | int | 80 | Epoch before early stopping can trigger, even if validation runs earlier |
-| `early_stopping_interval` | int | 10 | How often to compute validation metrics and run early stopping checks (in epochs) |
-| `divergence_threshold` | float | 5.0 | If all losses simultaneously exceed 5× their best-ever value, the divergence counter increments |
-| `divergence_patience` | int | 2 | Consecutive divergence checks before training stops |
-| `use_amp` | bool | True | Use PyTorch Automatic Mixed Precision (float16 activations, float32 master weights). The gradient penalty always runs in float32 regardless |
-| `replay_buffer_size` | int | 50 | Number of past generated images stored in each replay buffer |
-| `n_critic` | int | 1 | Discriminator update steps per generator update. 1 is correct for LSGAN |
-| `accumulate_grads` | int | 1 | Gradient accumulation steps. Effective batch = `batch_size × accumulate_grads`. 8GB config uses 2 with `batch_size=2` to match the effective batch of the default `batch_size=4` |
-| `validation_warmup_epochs` | int | 10 | In v2, controls when validation image export starts. Validation images run every epoch after this threshold |
-
----
-
-## `DataConfig`
-
-Controls data loading.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `data_root` | str | `data/E_Staining_DermaRepo/...` | Root directory containing `trainA`, `trainB`, `testA`, `testB` |
-| `image_size` | int | 256 | Images are resized to this resolution. Changing this requires updating `preprocess_data.py` and `app.py` together |
-| `batch_size` | int | 4 | Mini-batch size. 8GB config uses 2 |
-| `num_workers` | int | 4 | DataLoader worker processes for parallel data loading |
-| `augment` | bool | True | Reserved flag for future augmentation support (currently unused by `shared/data_loader.py`) |
-
----
-
-## `DiffusionConfig`
-
-Controls the v3 DiT diffusion model.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `num_timesteps` | int | 1000 | DDPM forward process steps |
-| `beta_schedule` | str | `"cosine"` | `"linear"` or `"cosine"` |
-| `dit_hidden_dim` | int | 512 | Transformer hidden dimension |
-| `dit_depth` | int | 8 | Number of DiT blocks |
-| `dit_heads` | int | 8 | Attention heads per block |
-| `dit_patch_size` | int | 2 | Latent patch size |
-| `dit_mlp_ratio` | float | 4.0 | MLP expansion ratio |
-| `lambda_perceptual_v3` | float | 0.0 | Perceptual loss weight (0 = off) |
-| `num_inference_steps` | int | 50 | DDIM steps for validation/inference |
-| `use_gradient_checkpointing` | bool | False | Checkpoint DiT blocks |
-| `vae_model_id` | str | `"stabilityai/sd-vae-ft-mse"` | VAE checkpoint id or local path |
-
----
-
-## `UVCGANConfig`
-
-Top-level container. Holds one instance of each sub-config above plus output path overrides.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `model_version` | int | 2 | `1` for v1 hybrid, `2` for true UVCGAN v2, `3` for DiT diffusion |
-| `generator` | `GeneratorConfig` | default | Generator architecture settings |
-| `discriminator` | `DiscriminatorConfig` | default | Discriminator architecture settings |
-| `loss` | `LossConfig` | default | Loss weights and settings |
-| `training` | `TrainingConfig` | default | Training loop settings |
-| `data` | `DataConfig` | default | Data loading settings |
-| `diffusion` | `DiffusionConfig` | default | v3 diffusion settings |
-| `model_dir` | `str` or `None` | None | Override checkpoint output directory |
-| `val_dir` | `str` or `None` | None | Override validation images directory |
-
-### `__post_init__()`
-
-Validates cross-field constraints at construction time:
-- `model_version` must be 1, 2, or 3
-- `decay_start_epoch` must be at least 2 epochs before `num_epochs` (otherwise the LR decay period is too short to be useful)
-
----
-
-## LR Schedule
-
-The learning rate follows a three-phase schedule defined by `warmup_epochs`, `decay_start_epoch`, and `num_epochs`:
-
-```
-Epoch                LR multiplier
-─────────────────────────────────────────
-0 → warmup_epochs    Linear ramp: 0 → 1
-warmup → decay_start Constant:       1
-decay_start → total  Linear decay: 1 → 0
-```
-
-With defaults (`warmup=5`, `decay_start=100`, `total=200`):
-```
-Epochs 0–5:    ramp from 0 to 2e-4
-Epochs 5–100:  constant at 2e-4
-Epochs 100–200: linear decay from 2e-4 to 0
-```
-
----
+- DiffusionConfig
+  - v3 DiT/DDPM settings
+  - includes timesteps, beta schedule, architecture dimensions, and VAE id
 
 ## Factory Functions
 
-### `get_default_config(model_version=2)`
+- get_default_config(model_version=2)
+  - baseline config for selected version
+  - applies legacy overrides when model_version == 1
 
-Returns a standard config suitable for 12+ GB VRAM. For `model_version=1`, overrides v2-specific fields to their v1 equivalents (no cross-domain, no spectral norm, single discriminator scale, `batch_size=2`).
+- get_8gb_config()
+  - v2 profile for 8 GB GPUs
+  - keeps full v2 architecture defaults and reduces memory mainly through:
+    - batch_size = 2
+    - accumulate_grads = 2
 
-### `get_8gb_config()`
+- get_dit_config()
+  - default v3 diffusion config
 
-Returns a VRAM-optimised config for 8 GB GPUs. Changes from default:
+- get_dit_8gb_config()
+  - v3 profile for 8 GB GPUs
+  - enables diffusion gradient checkpointing and lighter validation setup
 
-| Change | VRAM saving | Quality impact |
-|---|---|---|
-| `use_gradient_checkpointing=False` | 0 GB (faster training) | None |
-| `batch_size=2`, `accumulate_grads=2` | ~1.5 GB | None (effective batch stays 4) |
-| `num_scales=3` | 0 GB (full multi-scale) | Best stability/quality |
-| `vit_depth=4` | 0 GB (full depth) | Best generator capacity |
-| `perceptual_resize=180` | Slight increase vs 128 | Better perceptual supervision |
+## Practical Note
 
-Current profile note: this repository's 8GB config applies the highest-impact
-memory reduction (batch size + accumulation) and keeps the other defaults at
-quality-oriented values.
-
-### `get_dit_config()` and `get_dit_8gb_config()`
-
-Factory helpers for v3 diffusion:
-
-- `get_dit_config()` uses full-size DiT defaults.
-- `get_dit_8gb_config()` reduces DiT size and enables gradient checkpointing.
-
-Both return a `UVCGANConfig` with `model_version=3` and a populated
-`diffusion` section.
-
+For v2 training, start with get_8gb_config() on limited VRAM hardware.
+For v3 training, start with get_dit_8gb_config() on limited VRAM hardware.

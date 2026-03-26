@@ -1,8 +1,14 @@
 """
-Training entry point for the CycleGAN pipeline.
+Training entry point for all model variants in this repository.
 
-Prompts for key training parameters, sets up output folders, launches the training
-loop, and persists training history for later inspection.
+This script collects run-time parameters from stdin, creates a timestamped
+output directory, dispatches to the selected training loop, and persists the
+training history as both a figure and CSV.
+
+Supported model versions:
+    1 -> Hybrid CycleGAN/UVCGAN baseline (model_v1)
+    2 -> True UVCGAN v2 (model_v2)
+    3 -> DiT diffusion pipeline (model_v3)
 """
 
 import os
@@ -16,14 +22,25 @@ from model_v2.training_loop import train_v2
 
 def main():
     """
-    Collect user inputs, run training, and save results.
+    Collect user inputs, run the selected training loop, and save artifacts.
 
     Returns:
-        tuple: (history, G_AB, G_BA, D_A, D_B)
+        tuple: ``(history, G_AB, G_BA, D_A, D_B)``.
+
+        For model versions 1 and 2, these are the CycleGAN-style generators
+        and discriminators returned by the corresponding training loop.
+
+        For model version 3, this return shape is preserved for compatibility
+        with downstream tooling by mapping:
+            - ``G_AB`` <- ``dit_model``
+            - ``G_BA`` <- ``ema_model``
+            - ``D_A``  <- ``cond_encoder``
+            - ``D_B``  <- ``None``
 
     Notes:
-        model_version=1 launches the hybrid v1 training loop.
-        model_version=2 launches the true UVCGAN v2 loop with get_8gb_config().
+        model_version=1 launches ``train_v1``.
+        model_version=2 launches ``train_v2`` with ``get_8gb_config()``.
+        model_version=3 launches ``train_v3`` with ``get_dit_8gb_config()``.
     """
 
     # User-controlled training parameters.

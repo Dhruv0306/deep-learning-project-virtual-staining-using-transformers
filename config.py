@@ -1,9 +1,11 @@
 """
-Centralized configuration manager for UVCGAN training.
+Centralized configuration manager for training and inference presets.
 
-Provides dataclasses for generator, discriminator, loss, training, and data
-hyperparameters.  Supports switching between the original v1 (CycleGAN/
-UVCGAN-style) and the new v2 (true UVCGAN) architecture via model_version.
+Provides dataclasses for generator, discriminator, loss, training, data, and
+diffusion hyperparameters. The top-level ``model_version`` switch supports:
+    - v1: Hybrid CycleGAN/UVCGAN baseline
+    - v2: True UVCGAN v2
+    - v3: DiT diffusion pipeline
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - GAN objective  : LSGAN, NOT Wasserstein
@@ -12,7 +14,8 @@ v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - Adam betas      : (0.5, 0.999), lr=2e-4  (standard LSGAN/CycleGAN values)
   - lambda_contrastive / lambda_spectral: 0.0 initially; enable once stable
 
-For 8 GB VRAM use get_8gb_config() instead of get_default_config().
+For 8 GB VRAM, prefer ``get_8gb_config()`` for v2 and
+``get_dit_8gb_config()`` for v3.
 """
 
 import os
@@ -239,10 +242,15 @@ class UVCGANConfig:
 def get_default_config(model_version: int = 2) -> UVCGANConfig:
     """
     Return a default UVCGANConfig for the requested model version.
-    Assumes sufficient VRAM (12+ GB).
+    Assumes sufficient VRAM (roughly 12+ GB).
 
     Args:
-        model_version: 1 (original CycleGAN/UVCGAN) or 2 (true UVCGAN v2).
+        model_version: ``1`` (hybrid baseline), ``2`` (true UVCGAN v2),
+            or ``3`` (DiT diffusion).
+
+    Notes:
+        Explicit architecture overrides are applied only for ``model_version=1``
+        to keep legacy behavior aligned with the v1 training loop.
     """
     cfg = UVCGANConfig(model_version=model_version)
 
@@ -311,7 +319,10 @@ def get_8gb_config() -> UVCGANConfig:
 
 def get_dit_config() -> UVCGANConfig:
     """
-    Return a full-precision config for v3 diffusion training.
+    Return a default config for v3 diffusion training.
+
+    The returned profile keeps gradient checkpointing disabled and uses the
+    standard v3 architecture settings defined in :class:`DiffusionConfig`.
     """
     cfg = UVCGANConfig(model_version=3)
     cfg.diffusion.dit_hidden_dim = 512
@@ -328,6 +339,9 @@ def get_dit_config() -> UVCGANConfig:
 def get_dit_8gb_config() -> UVCGANConfig:
     """
     Return a VRAM-optimised config for v3 diffusion training.
+
+    Relative to :func:`get_dit_config`, this profile enables gradient
+    checkpointing for DiT blocks and uses a lighter validation setup.
     """
     cfg = UVCGANConfig(model_version=3)
     cfg.diffusion.dit_hidden_dim = 512

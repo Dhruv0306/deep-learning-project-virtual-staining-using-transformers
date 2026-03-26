@@ -1,143 +1,68 @@
-# `app.py` — Inference / Whole-Slide Translation
+# app.py Inference and Whole-Slide Translation
 
-Source of truth: `../app.py`
+Source of truth: ../app.py
 
-**Role:** Loads a trained checkpoint and performs patch-based stain/unstain translation on whole-slide images. Uses overlapping patches with cosine blending to produce seamless full-image outputs.
+This script runs patch-based translation for large histology images.
 
----
+## Supported Model Versions
 
-## Overview
+- version 1: ViTUNetGenerator (CycleGAN-style)
+- version 2: ViTUNetGeneratorV2 (true UVCGAN)
+- version 3: DiT diffusion pipeline
 
-Whole-slide images are too large to process in one GPU forward pass. `app.py` divides the input image into 256×256 patches (with a configurable stride), translates each patch independently, and reconstructs the full image by averaging overlapping patch contributions through a smooth blending window.
+## Runtime Behavior
 
-```
-Input image (arbitrary size)
-     │
-     ▼ pad_to_patch_multiple (white padding to exact multiple of patch_size)
-     │
-     ▼ extract_patches_with_coords (function default stride = patch_size)
-     │
-     ▼ [G_AB or G_BA forward pass on each 256×256 patch]
-     │
-     ▼ reconstruct_tensor_from_patches (weighted average with blend window)
-     │
-     ▼ crop back to original_size
-     │
-     ▼ save_image (normalize=True, value_range=(-1, 1))
-     │
-Output image (same size as input)
-```
+- All paths use patch_size = 256 by default in main().
+- main() sets stride = patch_size // 2 for overlapping patches and smoother blending.
 
----
+Version-specific behavior:
 
-## Functions
+- v1 and v2:
+  - loads G_AB and G_BA from checkpoint
+  - performs both directions:
+    - unstained -> stained
+    - stained -> unstained
 
-### `load_model(checkpoint_path, device, model_version)`
+- v3:
+  - loads DiT model, condition encoder, VAE wrapper, and DDIM sampler
+  - performs unstained -> stained only
 
-Loads a saved checkpoint and returns two generators.
+## Core Functions
 
-| Parameter | Default | Description |
-|---|---|---|
-| `checkpoint_path` | required | Path to a `.pth` file saved by the training loop |
-| `device` | `"cpu"` | Device to load the model onto (`"cuda"` or `"cpu"`) |
-| `model_version` | 2 | `1` loads `ViTUNetGenerator` (v1); `2` loads `ViTUNetGeneratorV2` (v2) |
+- load_model(checkpoint_path, device, model_version)
+  - supports model_version 1 and 2
+  - v2 architecture args are inferred from checkpoint keys via _infer_v2_kwargs
 
-For `model_version=2`, the architecture hyperparameters (`vit_depth`, `use_cross_domain`) are auto-detected from the checkpoint state dict via `_infer_v2_kwargs`. This ensures the loaded model always matches the saved architecture regardless of which config was active during training.
+- load_v3_components(checkpoint_path, device)
+  - loads diffusion components and config used for inference step count
 
-**Returns:** `(G_AB, G_BA)` — both in `eval()` mode on the specified device.
+- pad_to_patch_multiple(image, patch_size)
+  - right/bottom white padding so dimensions are multiples of patch size
 
----
+- extract_patches_with_coords(image, patch_size, stride)
+  - extracts patches and stores (top, left) positions
 
-### `_infer_v2_kwargs(state_dict)`
+- reconstruct_tensor_from_patches(...)
+  - blends overlapping outputs using a 2D Hann-style window
 
-Inspects a v2 checkpoint's state dict keys to recover the architecture parameters used during training.
+- translate_image_from_patches(...)
+  - v1/v2 patch inference path
 
-| Detected parameter | Method |
-|---|---|
-| `vit_depth` | Count distinct block indices in keys like `vit.blocks.{i}.*` |
-| `use_cross_domain` | Check if any key starts with `fuse` |
+- translate_image_from_patches_v3(...)
+  - v3 batched diffusion inference path
 
----
+## Outputs
 
-### `translate_image_from_patches(input_image_path, model, transform, output_path, patch_size, stride, device)`
+- data/reconstructed_stained_output.png
+- data/reconstructed_unstained_output.png (v1/v2 only)
 
-Full pipeline for translating one whole-slide image.
+## CLI Prompts
 
-| Parameter | Default | Description |
-|---|---|---|
-| `input_image_path` | — | Path to the input image (any PIL-supported format) |
-| `model` | — | Generator model (`G_AB` for staining, `G_BA` for unstaining) |
-| `transform` | — | Preprocessing transform (resize + normalize) |
-| `output_path` | — | Path to save the translated output image |
-| `patch_size` | 256 | Patch side length in pixels |
-| `stride` | 256 | Stride between patch centres. Default (`256`) means no overlap; set `128` for 50% overlap |
-| `device` | `"cpu"` | Computation device |
+python app.py
 
-**Returns:** `(original_size, padded_size, num_patches, output_path)` — useful for logging and validation.
+Prompts:
 
----
-
-### `pad_to_patch_multiple(image, patch_size=256)`
-
-Pads a PIL image with white pixels on the right and bottom to make its dimensions exact multiples of `patch_size`. Returns `(padded_image, original_size)`.
-
----
-
-### `extract_patches_with_coords(pil_image, patch_size=256, stride=256)`
-
-Extracts all `patch_size × patch_size` patches and their `(top, left)` coordinates from a PIL image. Ensures the final row/column of patches is always included (handles non-divisible sizes).
-
-Returns `(patches, positions)` where `positions[i] = (top, left)` is the pixel offset of patch `i`.
-
----
-
-### `reconstruct_tensor_from_patches(patches, positions, image_size, patch_size, stride)`
-
-Reassembles translated patches into a full-resolution image tensor.
-
-When `stride < patch_size` (overlapping patches), each patch is weighted by a **2D Hann window** (`sin²(π × position / patch_size)`) before accumulation. The weight map is used to normalise the final output, producing smooth blending across patch boundaries.
-
-| Parameter | Description |
-|---|---|
-| `patches` | List of translated patch tensors, each `(3, patch_size, patch_size)` in `[-1, 1]` |
-| `positions` | List of `(top, left)` coordinates matching `patches` |
-| `image_size` | `(width, height)` of the padded image |
-
-Returns a `(3, height, width)` float tensor in `[-1, 1]`.
-
----
-
-### `_blend_window(patch_size, device, dtype, eps=0.05)`
-
-Generates a 2D sinusoidal blending window for seamless patch reconstruction.
-
-```
-window_1d = sin(linspace(0, π, patch_size))²       ← peak at centre, 0 at edges
-window_1d = window_1d × (1 - eps) + eps             ← avoid exact zeros at edges
-window_2d = window_1d[:, None] × window_1d[None, :] ← outer product
-```
-
----
-
-### `stain_image(image, model, device)` / `unstain_image(image, model, device)`
-
-Simple single-patch helpers for applying a generator to a pre-processed tensor.
-
----
-
-## CLI Usage
-
-```
-$ python app.py
-Using device: cuda
-Enter model path: data/.../final_model.pth
-Enter 1 for Hybrid UVCGAN based or 2 for True-UVCGAN based generator model: 2
-Provide Path to Unstained Image: data/.../HC21-01338(A3-1).jpg
-Provide Path to Stained Image:   data/.../HC21-01338(A3-2).jpg
-```
-
-Outputs:
-- `data/reconstructed_stained_output.png` — unstained→stained translation
-- `data/reconstructed_unstained_output.png` — stained→unstained translation
-
-In `main()`, the script explicitly sets `stride = patch_size // 2` (128), so adjacent patches overlap by 50% and are blended together for a seamless result. The function default remains `stride=256`.
+- Enter model path
+- Enter model version (1, 2, or 3)
+- Path to unstained input
+- Path to stained input (v1/v2 path)
