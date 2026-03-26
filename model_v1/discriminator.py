@@ -1,8 +1,10 @@
 """
-Discriminator definition for CycleGAN.
+PatchGAN discriminator definition for the v1 training pipeline.
 
-Implements a PatchGAN discriminator and a helper to build the two
-required discriminators for the A and B domains.
+Provides:
+        - ``PatchDiscriminator``: single-domain discriminator network.
+        - ``getDiscriminators()``: factory that builds and initializes
+            ``(D_A, D_B)`` for the two CycleGAN domains.
 """
 
 # Imports
@@ -117,8 +119,9 @@ def getDiscriminators():
     """
     Create and initialize two PatchDiscriminator instances for CycleGAN.
 
-    This function creates two discriminators (D_A and D_B) for the two domains
-    in CycleGAN, initializes their weights, and tests them with random input.
+    This function creates two discriminators (``D_A`` and ``D_B``) for the
+    two domains used in v1 training, applies weight initialization, and runs
+    a small forward-pass smoke test.
 
     Returns:
         tuple: (D_A, D_B) - The two discriminator networks.

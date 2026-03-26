@@ -1,8 +1,10 @@
 """
-Loss definitions for the CycleGAN training loop.
+Loss definitions for the v1 training loop.
 
-Includes a VGG19-based perceptual loss and a composite CycleGAN loss
-with GAN, cycle-consistency, identity, and perceptual terms.
+Includes:
+        - ``VGGPerceptualLoss`` based on frozen VGG19 features.
+        - ``CycleGANLoss`` combining GAN, cycle, identity, perceptual, and
+            optional gradient-penalty terms.
 """
 
 # Imports
@@ -120,8 +122,8 @@ class CycleGANLoss:
     """
     Composite loss for CycleGAN training.
 
-    Combines GAN losses (LSGAN), cycle-consistency, identity, and
-    optional perceptual components.
+    Combines GAN losses (LSGAN), cycle-consistency, identity, perceptual,
+    and optional gradient-penalty components.
     """
 
     def __init__(

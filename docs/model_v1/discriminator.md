@@ -1,110 +1,95 @@
-# `model_v1/discriminator.py` — v1 Discriminator
+# model_v1/discriminator.py - v1 Discriminator
 
-**Model:** Hybrid UVCGAN + CycleGAN (v1)  
-**Role:** Classifies image patches as real or fake. Two instances are created — `D_A` judges domain A (unstained) images, `D_B` judges domain B (stained) images.
+Source of truth: ../../model_v1/discriminator.py
 
----
-
-## Architecture Overview
-
-The v1 discriminator is a **PatchGAN** — a fully convolutional network producing a spatial grid of real/fake logits rather than a single scalar. Each value in the output grid corresponds to a **70×70 receptive field** patch of the 256×256 input. This design encourages the generator to produce locally realistic textures rather than just globally plausible images.
-
-```
-Input Image (N, 3, 256, 256)
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 1: Conv(3→64, k=4, s=2, p=1) + LeakyReLU(0.2)       │
-│  Output:  (N, 64, 128, 128)                                 │
-│  Note: No normalisation on first layer                      │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 2: Conv(64→128, k=4, s=2, p=1) + IN + LeakyReLU(0.2)│
-│  Output:  (N, 128, 64, 64)                                  │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 3: Conv(128→256, k=4, s=2, p=1) + IN + LeakyReLU(0.2│
-│  Output:  (N, 256, 32, 32)                                  │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 4: Conv(256→512, k=4, s=1, p=1) + IN + LeakyReLU(0.2│ ← stride=1
-│  Output:  (N, 512, 31, 31)                                  │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 5: Conv(512→1, k=4, s=1, p=1)                        │ ← logit output
-│  Output:  (N, 1, 30, 30)                                    │
-└─────────────────────────────────────────────────────────────┘
-        │
-        ▼
-Logit map (N, 1, 30, 30)
-Each value = real/fake score for one 70×70 patch of the input.
-Higher = more likely real. No activation (raw logits).
-```
+Model: Hybrid CycleGAN/UVCGAN v1
+Role: Provides PatchGAN discriminators for both domains used during adversarial training.
 
 ---
 
-## Design Choices Explained
+## Overview
 
-**Why no normalisation on layer 1?**  
-Normalising the very first layer removes low-level statistics (mean colour, intensity range) that are important for the discriminator to judge whether an image looks like it belongs to the correct domain. All subsequent layers use InstanceNorm.
+The v1 discriminator is a single-scale PatchGAN classifier. Instead of producing one scalar real/fake score for the full image, it produces a spatial grid of logits where each location corresponds to a local receptive field in the input image.
 
-**Why InstanceNorm instead of BatchNorm?**  
-InstanceNorm normalises per-image rather than per-batch. This makes the discriminator robust to small batch sizes and better at capturing per-image style variations — important for histology where staining intensity varies across slides.
+Two instances are used in training:
 
-**Why LeakyReLU(0.2) instead of ReLU?**  
-Standard ReLU kills negative activations, which can cause dead neurons in discriminators. LeakyReLU preserves a small gradient (slope 0.2) for negative values, keeping all neurons active throughout training.
+- D_A: judges realism in domain A (unstained)
+- D_B: judges realism in domain B (stained)
 
-**Why stride-1 at layer 4?**  
-The last strided layer uses stride=1 to increase the receptive field without further halving spatial resolution. This provides a larger patch context for the final logit without losing spatial resolution in the output map.
+Both share the same architecture and are initialized independently.
 
 ---
 
-## Classes
+## Architecture
 
-### `PatchDiscriminator`
+PatchDiscriminator is built as a stack of convolutional blocks:
 
-The single-scale PatchGAN discriminator used in v1.
+1. Conv2d(input_nc -> 64, kernel=4, stride=2, padding=1)
+   - followed by LeakyReLU(0.2)
+   - no normalization on first layer
 
-| Constructor Parameter | Default | Description |
-|---|---|---|
-| `input_nc` | 3 | Number of input image channels |
+2. Conv2d(64 -> 128, kernel=4, stride=2, padding=1, bias=False)
+   - InstanceNorm2d
+   - LeakyReLU(0.2)
 
-| Attribute | Description |
-|---|---|
-| `model` | `nn.Sequential` containing all 5 convolutional layers |
+3. Conv2d(128 -> 256, kernel=4, stride=2, padding=1, bias=False)
+   - InstanceNorm2d
+   - LeakyReLU(0.2)
 
-**`forward(x)`**
+4. Conv2d(256 -> 512, kernel=4, stride=1, padding=1, bias=False)
+   - InstanceNorm2d
+   - LeakyReLU(0.2)
 
-| Parameter | Shape | Description |
-|---|---|---|
-| `x` | `(N, input_nc, H, W)` | Input image tensor |
+5. Conv2d(512 -> 1, kernel=4, stride=1, padding=1)
+   - output logits per spatial patch
 
-Returns: logit map `(N, 1, H', W')`. Each value is an unbounded real/fake score for one patch. Used with LSGAN loss (MSE against 0.97 for real, 0 for fake).
-
----
-
-## Functions
-
-### `getDiscriminators()`
-
-Factory function. Creates two `PatchDiscriminator` instances (`D_A` and `D_B`), applies `init_weights` from `model_v1/generator.py` to both, runs a smoke-test forward pass to verify output shapes, and returns them.
-
-**Returns:** `(D_A, D_B)` — both on CUDA if available, otherwise CPU.
+For input (N, 3, 256, 256), output is a 1-channel score map (patch-level logits).
 
 ---
 
-## How the Discriminator Fits Into Training
+## Class Reference
 
-During each training step the discriminator is updated after the generator step:
+### PatchDiscriminator(input_nc=3)
 
-```
-# Step 1: Update generators (D frozen)
-loss_G, fake_A, fake_B = loss_fn.generator_loss(real_A, real_B, G_AB, G_BA, D_A, D_B, ...)
+Constructs the PatchGAN network.
 
-# Step 2: Update D_A
-loss_D_A = loss_fn.discriminator_loss(D_A, real_A, fake_A, loss_fn.fake_A_buffer)
+Arguments:
 
-# Step 3: Update D_B
-loss_D_B = loss_fn.discriminator_loss(D_B, real_B, fake_B, loss_fn.fake_B_buffer)
-```
+- input_nc: number of input channels; defaults to 3 (RGB)
 
-The discriminator receives a mix of fresh fakes and buffered fakes (via `ReplayBuffer`) to avoid oscillating between the current and previous generator outputs.
+Forward:
 
+- input: tensor shaped (batch, channels, height, width)
+- output: patch logit map used by the LSGAN objective in losses.py
 
+---
 
+## Factory Function
+
+### getDiscriminators()
+
+Builds the pair (D_A, D_B) and handles initialization.
+
+Steps:
+
+1. Select device (CUDA if available, else CPU)
+2. Instantiate two PatchDiscriminator models
+3. Apply init_weights imported from model_v1.generator
+4. Run a smoke-test forward pass on random input
+5. Print output shapes for quick verification
+6. Return (D_A, D_B)
+
+This function is used by model_v1/training_loop.py during setup.
+
+---
+
+## Training Integration Notes
+
+Inside the v1 training loop:
+
+- discriminators are frozen during generator update
+- discriminators are unfrozen for their own update steps
+- each domain discriminator loss uses replay-buffered fakes
+- optional gradient penalty term from CycleGANLoss can be added
+
+The discriminator objective itself is implemented in model_v1/losses.py, not in this file.

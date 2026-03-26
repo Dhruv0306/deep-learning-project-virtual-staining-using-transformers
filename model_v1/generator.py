@@ -1,10 +1,10 @@
 """
-Generator definition for UVCGAN.
+Generator definition for the v1 hybrid CycleGAN/UVCGAN model.
 
 Includes:
-- UVCGAN-style U-Net + ViT generator (default)
-- Weight initialization helpers
-- Helper to build the two generators required for bidirectional translation
+    - U-Net + pixelwise ViT generator architecture
+    - weight-initialization helper
+    - factory that builds the bidirectional pair ``(G_AB, G_BA)``
 """
 
 # Imports
@@ -302,7 +302,7 @@ class UpsampleBlock(nn.Module):
 
 class ViTUNetGenerator(nn.Module):
     """
-    UVCGAN-style generator: U-Net backbone with a ViT bottleneck.
+    v1 generator: U-Net backbone with a pixelwise ViT bottleneck.
     """
 
     def __init__(
@@ -445,7 +445,7 @@ def getGenerators():
     different transformations.
 
     Returns:
-        tuple: (G_AB, G_BA) - Two initialized UVCGAN generators.
+        tuple: (G_AB, G_BA) - Two initialized v1 generators.
     """
     # Determine device (GPU if available, otherwise CPU).
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

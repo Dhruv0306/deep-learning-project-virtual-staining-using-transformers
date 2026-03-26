@@ -1,8 +1,8 @@
 """
-Training loop for the CycleGAN/UVCGAN model.
+Training loop for the v1 hybrid CycleGAN/UVCGAN pipeline.
 
 Handles data loading, model setup, loss computation, optimization, logging,
-validation, early stopping, and final evaluation.
+validation, early stopping, checkpointing, and final testing.
 """
 
 import os
@@ -32,7 +32,7 @@ def train(
     epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None
 ):
     """
-    Train CycleGAN generators and discriminators.
+    Train v1 generators and discriminators.
 
     Args:
         epoch_size (int | None): Max samples per epoch (defaults to loader default).
@@ -43,6 +43,10 @@ def train(
 
     Returns:
         tuple: (history, G_AB, G_BA, D_A, D_B)
+
+    Notes:
+        This function is the primary implementation for v1 training and is
+        exported through ``train_v1`` below as a compatibility alias.
     """
     # Backend tuning for faster convolutions on GPU.
     torch.backends.cudnn.benchmark = True

@@ -1,205 +1,226 @@
-# `model_v1/training_loop.py` — V1 Training Loop
+# model_v1/training_loop.py - v1 Training Loop
 
-**Model:** Hybrid UVCGAN + CycleGAN (v1)  
-**Entry point:** `train()`  
-**Role:** Orchestrates the complete v1 training process. Unlike v2, all hyperparameters are hardcoded inside the function rather than read from a config object.
+Source of truth: ../../model_v1/training_loop.py
 
----
-
-## Full Training Flow
-
-```
-train(epoch_size, num_epochs, model_dir, val_dir, test_size)
-    │
-    ├── Build data loaders  (getDataLoader, epoch_size=3000 default)
-    ├── Build models        (getGenerators, getDiscriminators)
-    ├── Build loss          (CycleGANLoss)
-    ├── Build optimisers    (3× Adam)
-    ├── Build LR schedulers (3× LambdaLR, linear decay from epoch 100)
-    ├── Set up TensorBoard, CSV, directories
-    │
-    └── for epoch in range(num_epochs):
-            │
-            ├── for batch in train_loader:
-            │       │
-            │       ├── [Generator step]
-            │       │     D frozen
-            │       │     loss_G, fake_A, fake_B = generator_loss(...)
-            │       │     backward + step G
-            │       │
-            │       └── [Discriminator steps]
-            │             G frozen
-            │             loss_D_A = discriminator_loss(D_A, real_A, fake_A)
-            │             loss_D_B = discriminator_loss(D_B, real_B, fake_B)
-            │             backward + step D_A, D_B
-            │
-            ├── Log losses to TensorBoard and CSV
-            ├── Step LR schedulers
-            ├── Every 5 epochs: flush CSV
-            ├── Every 20 epochs: save checkpoint
-            │
-                ├── Every epoch:
-                │       run_validation    (save comparison images)
-                │
-                └── Every 10 epochs:
-                    calculate_metrics (SSIM, PSNR, FID)
-                    check early stopping (enabled from epoch 80)
-    │
-    ├── Final metrics + test inference
-    └── Save final checkpoint
-```
+Model: Hybrid CycleGAN/UVCGAN v1
+Primary entrypoint: train(...)
+Compatibility entrypoint: train_v1(...)
 
 ---
 
-## Key Differences from V2
+## Purpose
 
-| Aspect | V1 | V2 |
-|---|---|---|
-| Hyperparameters | Hardcoded in function | Read from `UVCGANConfig` |
-| Training order | Generator step first, then discriminator | Discriminator first, then generator |
-| Gradient accumulation | Not supported | Supported via `accumulate_grads` |
-| LR schedule | Simple linear decay from epoch 100 | Warm-up ramp + constant + linear decay |
-| Gradient clipping | Not applied | Applied to G and D separately |
-| Validation | Validation images every epoch; metrics every 10 epochs; early stopping enabled from epoch 80 | Validation images start after `validation_warmup_epochs`; metrics/early-stopping checks run by `early_stopping_interval` |
-| AMP for discriminator | Yes (autocast enabled) | GP always float32 (autocast disabled for D loss) |
+This file orchestrates full v1 training:
 
----
-
-## Hardcoded Hyperparameters
-
-| Parameter | Value | Description |
-|---|---|---|
-| `lr` | 0.0002 | Learning rate for all optimisers |
-| `beta1` | 0.5 | Adam β₁ |
-| `beta2` | 0.999 | Adam β₂ (implicit) |
-| `lambda_cycle` | 10.0 | Cycle-consistency weight |
-| `lambda_identity` | 5.0 | Identity weight |
-| `lambda_cycle_perceptual` | 0.2 | Perceptual cycle weight |
-| `lambda_identity_perceptual` | 0.1 | Perceptual identity weight |
-| `lambda_gp` | 10.0 | Gradient penalty weight |
-| `perceptual_resize` | 160 | VGG input resolution |
-| LR decay start | epoch 100 | Linear decay from 100 to `num_epochs` |
-| Early stopping check interval | 10 epochs | |
-| Early stopping warmup | 80 epochs | |
-| Early stopping patience | 40 epochs | |
-| Divergence threshold | 5.0× | |
-| Divergence patience | 2 checks | |
-| Checkpoint interval | 20 epochs | |
+- data loading
+- model construction
+- loss setup
+- optimizer and scheduler setup
+- mixed-precision training
+- checkpointing
+- validation image export
+- metric computation
+- early stopping
+- final testing and artifact persistence
 
 ---
 
-## Function: `train(...)`
+## Public Functions
 
-### Arguments
+### train(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None)
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `epoch_size` | int or None | None | Samples per epoch (3000 if None) |
-| `num_epochs` | int or None | None | Training epochs (200 if None) |
-| `model_dir` | str or None | None | Output directory |
-| `val_dir` | str or None | None | Validation images directory |
-| `test_size` | float or None | None | Number of test samples to export |
+Main v1 training function.
 
-**Returns:** `(history, G_AB, G_BA, D_A, D_B)`
+Arguments:
 
----
+- epoch_size: max samples per epoch (defaults to 3000)
+- num_epochs: number of epochs (defaults to 200)
+- model_dir: output directory for checkpoints/logs
+- val_dir: directory for validation image exports
+- test_size: number of test samples to save in final testing
 
-### LR Schedule
+Returns:
 
-```python
-lr_lambda = lambda epoch: 1.0 - max(0, epoch - 100) / 100
-```
+- history
+- G_AB
+- G_BA
+- D_A
+- D_B
 
-| Epoch range | LR multiplier |
-|---|---|
-| 0–100 | 1.0 (constant) |
-| 100–200 | linear decay from 1.0 to 0.0 |
+### train_v1(*args, **kwargs)
 
-No warm-up phase. If `num_epochs` ≠ 200, the decay rate changes proportionally.
+Thin alias that forwards to train(...), used for import consistency in top-level scripts.
 
 ---
 
-### Per-Batch Training Step
+## Runtime Setup
 
-#### Generator step
+Environment/performance setup:
 
-```python
-# Freeze discriminators
-for p in D_A.parameters(): p.requires_grad_(False)
-for p in D_B.parameters(): p.requires_grad_(False)
+- sets TF_ENABLE_ONEDNN_OPTS=0 for consistency across systems
+- enables cuDNN benchmark mode
+- enables TF32 for CUDA matmul and cuDNN when available
 
-optimizer_G.zero_grad(set_to_none=True)
+Data:
 
-with autocast("cuda", enabled=use_amp):
-    loss_G, fake_A, fake_B = loss_fn.generator_loss(
-        real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, num_epochs
-    )
+- train_loader and test_loader from shared.data_loader.getDataLoader
 
-scaler.scale(loss_G).backward()
-scaler.step(optimizer_G)
-scaler.update()
-```
+Models:
 
-**Note:** v1 does the generator step before the discriminator step. v2 reverses this order (discriminator first) which is theoretically more correct — the discriminator should be reasonably converged before the generator receives its adversarial gradient signal.
+- generators from model_v1.generator.getGenerators
+- discriminators from model_v1.discriminator.getDiscriminators
 
-#### Discriminator steps
+Loss:
 
-```python
-# Re-enable discriminators
-for p in D_A.parameters(): p.requires_grad_(True)
-for p in D_B.parameters(): p.requires_grad_(True)
+- CycleGANLoss with v1-specific hardcoded lambdas
 
-optimizer_D_A.zero_grad(set_to_none=True)
-with autocast("cuda", enabled=use_amp):
-    loss_D_A = loss_fn.discriminator_loss(D_A, real_A, fake_A, fake_A_buffer)
-scaler.scale(loss_D_A).backward()
-scaler.step(optimizer_D_A)
-scaler.update()
+AMP:
 
-# Same for D_B with fake_B
-```
+- autocast and GradScaler enabled only when device is CUDA
 
-**Important:** `fake_A` and `fake_B` are reused from the generator step without re-running the generators. This is more efficient but means the discriminator sees the same fakes in both the G and D steps within one batch — v2 generates fresh fakes with `torch.no_grad()` for the D step to avoid this.
+Logging:
+
+- TensorBoard SummaryWriter in model_dir/tensorboard_logs
+- rolling CSV persistence via shared.history_utils helpers
 
 ---
 
-### Validation and Early Stopping
+## Optimization and Schedulers
 
-Validation image export runs every epoch:
+Optimizers:
 
-```python
-save_dir = os.path.join(val_dir, f"epoch_{epoch+1}")
-run_validation(...)
-```
+- optimizer_G: Adam over G_AB + G_BA parameters
+- optimizer_D_A: Adam over D_A
+- optimizer_D_B: Adam over D_B
 
-Validation metrics are computed every 10 epochs, and early stopping is only evaluated after epoch 80:
+Hardcoded optimizer params:
 
-```python
-if (epoch + 1) % early_stopping_check_interval == 0:
-    avg_metrics = calculate_metrics(...)
-    ...
-    if (epoch + 1) >= early_stopping_warmup_epochs:
-        should_stop = early_stopping(avg_ssim, tracked_losses)
-        if should_stop:
-            break
-```
+- lr = 2e-4
+- betas = (0.5, 0.999)
 
-So in v1 you will see validation images from epoch 1, but early-stopping decisions start at epoch 80.
+Schedulers:
+
+- LambdaLR on all three optimizers
+- schedule factor: 1.0 - max(0, epoch - 100) / 100
+- effect: constant until epoch 100, then linear decay
 
 ---
 
-### Output Directory Structure
+## Per-Epoch Training Flow
 
-```
-model_dir/
-    checkpoint_epoch_20.pth
-    checkpoint_epoch_40.pth
-    ...
-    final_checkpoint_epoch_N.pth
-    training_history.csv
-    training_history.png
-    tensorboard_logs/
-    validation_images/
-    test_images/
-```
+For each epoch:
 
+1. switch all models to train mode
+2. iterate over train_loader batches
+3. for each batch:
+   - move A and B tensors to device
+   - generator step
+   - discriminator A step
+   - discriminator B step
+   - accumulate scalar losses and save batch history
+4. log epoch-mean losses to TensorBoard
+5. flush history CSV every 5 epochs
+6. save checkpoint every 20 epochs
+7. step all LR schedulers
+8. run validation image generation
+9. periodically compute metrics and early-stopping decision
+
+---
+
+## Per-Batch Update Order
+
+### 1) Generator Step
+
+- freeze D_A and D_B params (requires_grad=False)
+- zero optimizer_G grads
+- compute loss_G, fake_A, fake_B via loss_fn.generator_loss
+- backward with scaler
+- optimizer_G step
+- scaler update
+
+### 2) Discriminator Steps
+
+- unfreeze D_A and D_B params
+
+D_A update:
+
+- zero optimizer_D_A grads
+- compute loss_D_A = loss_fn.discriminator_loss(D_A, real_A, fake_A, fake_A_buffer)
+- backward with scaler
+- optimizer_D_A step
+- scaler update
+
+D_B update:
+
+- zero optimizer_D_B grads
+- compute loss_D_B = loss_fn.discriminator_loss(D_B, real_B, fake_B, fake_B_buffer)
+- backward with scaler
+- optimizer_D_B step
+- scaler update
+
+---
+
+## Validation, Metrics, Early Stopping
+
+Validation images:
+
+- run_validation executes every epoch
+- outputs saved in val_dir/epoch_{k}
+
+Metrics and stopping checks:
+
+- every 10 epochs, calculate_metrics is called
+- average SSIM from both domains is used as primary stopping score
+- tracked losses: mean G, D_A, D_B for the epoch
+- early stopping checks begin only after warmup epoch 80
+
+EarlyStopping configuration in this file:
+
+- check interval: 10 epochs
+- patience: 40 epochs converted to check-count internally
+- divergence threshold: 5.0
+- divergence patience: 2
+
+If early stopping triggers, loop exits and stopped_epoch is recorded.
+
+---
+
+## Checkpointing and Artifacts
+
+Periodic checkpoint every 20 epochs includes:
+
+- epoch number
+- G_AB, G_BA, D_A, D_B state_dicts
+- optimizer_G, optimizer_D_A, optimizer_D_B states
+
+Final phase after training loop:
+
+1. compute final metrics
+2. run test-image export through shared.testing.run_testing
+3. save final checkpoint as final_checkpoint_epoch_{stopped_epoch}.pth
+4. flush remaining history to CSV
+5. reload history from CSV for consistent return format
+6. close TensorBoard writer
+
+---
+
+## Default Directory Layout
+
+Within model_dir:
+
+- tensorboard_logs/
+- validation_images/
+- test_images/
+- training_history.csv
+- checkpoint_epoch_*.pth
+- final_checkpoint_epoch_*.pth
+
+If model_dir is not provided, a default path under data/E_Staining_DermaRepo/H_E-Staining_dataset/models is used.
+
+---
+
+## Notes
+
+- v1 hyperparameters are hardcoded here, unlike v2/v3 config-driven loops.
+- test_size is cast to int before being passed to run_testing.
+- history is temporarily accumulated in-memory and periodically flushed to CSV to reduce memory growth.
