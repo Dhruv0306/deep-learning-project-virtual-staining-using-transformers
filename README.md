@@ -71,6 +71,8 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 | `shared/validation.py` | Per-interval validation — runs generators, computes metrics, saves comparison images |
 | `shared/testing.py` | End-of-training test inference and comparison image export |
 | `shared/history_utils.py` | Training history visualisation and CSV persistence |
+| `model_v3/data_loader.py` | v3 paired data loader for aligned A/B training pairs |
+| `model_v3/history_utils.py` | v3 training history CSV/plots (no discriminator terms) |
 
 ---
 
@@ -302,6 +304,8 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 ---
 
 ### v3 — DiT Diffusion (`model_v3/training_loop.py`)
+
+v3 training assumes paired A/B patches with matching filenames in `trainA/trainB` and `testA/testB` (see `model_v3/data_loader.py`).
 
 Conditional latent diffusion with a full Transformer backbone:
 

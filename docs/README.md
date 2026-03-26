@@ -31,6 +31,8 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `model_v3/vae_wrapper.py` | [vae_wrapper.md](model_v3/vae_wrapper.md) | SD VAE wrapper for latent diffusion |
 | `model_v3/training_loop.py` | [training_loop.md](model_v3/training_loop.md) | Diffusion training loop with EMA and AMP |
 | `model_v3/losses.py` | [losses.md](model_v3/losses.md) | v3 diffusion loss helper functions |
+| `model_v3/data_loader.py` | [data_loader.md](model_v3/data_loader.md) | Paired A/B dataloader for v3 diffusion |
+| `model_v3/history_utils.py` | [history_utils.md](model_v3/history_utils.md) | v3 training history CSV/plots (no discriminator terms) |
 
 ## Shared
 

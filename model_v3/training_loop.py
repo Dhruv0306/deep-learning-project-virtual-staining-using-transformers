@@ -16,9 +16,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from model_v2.losses import VGGPerceptualLossV2
 from config import UVCGANConfig, get_dit_config
-from shared.data_loader import getDataLoader
+from model_v3.data_loader import getDataLoaderV3
 from shared.EarlyStopping import EarlyStopping
-from shared.history_utils import append_history_to_csv, load_history_from_csv
+from model_v3.history_utils import append_history_to_csv_v3, load_history_from_csv_v3
 from shared.metrics import MetricsCalculator
 from shared.validation import save_images_with_title
 from shared.testing import run_testing
@@ -184,7 +184,7 @@ def train_v3(
     torch.backends.cudnn.allow_tf32 = True
 
     # ---- Data ----
-    train_loader, test_loader = getDataLoader(
+    train_loader, test_loader = getDataLoaderV3(
         epoch_size=tcfg.epoch_size,
         image_size=dtcfg.image_size,
         batch_size=dtcfg.batch_size,
@@ -356,9 +356,9 @@ def train_v3(
 
             epoch_step[i] = {
                 "Batch": i,
-                "Loss_G": float(loss_simple.item()),
-                "Loss_D_A": 0.0,
-                "Loss_D_B": 0.0,
+                "Loss_DiT": float(loss_simple.item()),
+                "Loss_Perceptual": float(loss_perc_val),
+                "GradNorm": float(grad_norm),
             }
             epoch_loss += float(loss_simple.item())
             epoch_loss_perc += float(loss_perc_val)
@@ -393,7 +393,7 @@ def train_v3(
         )
 
         if (epoch + 1) % 5 == 0:
-            append_history_to_csv(history, history_csv_path)
+            append_history_to_csv_v3(history, history_csv_path)
             history.clear()
 
         if (epoch + 1) % 20 == 0:
@@ -427,6 +427,8 @@ def train_v3(
                 num_steps=dcfg.num_inference_steps,
                 writer=writer,
                 is_test=False,
+                max_batches=tcfg.validation_size,
+                num_samples=max(6, tcfg.validation_size),
             )
 
         if (
@@ -486,9 +488,11 @@ def train_v3(
     )
     writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
 
-    append_history_to_csv(history, history_csv_path)
-    history = load_history_from_csv(history_csv_path)
+    append_history_to_csv_v3(history, history_csv_path)
+    history = load_history_from_csv_v3(history_csv_path)
 
     writer.close()
     return history, dit_model, ema_model, cond_encoder
+
+
 

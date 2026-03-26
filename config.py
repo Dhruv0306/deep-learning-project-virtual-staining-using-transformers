@@ -132,6 +132,7 @@ class TrainingConfig:
     # Set to 2 when batch_size=2 to keep effective batch = 4.
     accumulate_grads: int = 1
     validation_warmup_epochs: int = 10
+    validation_size: int = 100
 
 
 @dataclass
@@ -334,9 +335,12 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.dit_heads = 8
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
-    cfg.diffusion.use_gradient_checkpointing = False
+    cfg.diffusion.use_gradient_checkpointing = True
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
+    cfg.diffusion.lambda_perceptual_v3 = 0.5
+    cfg.training.validation_size = 20
+
     return cfg
 

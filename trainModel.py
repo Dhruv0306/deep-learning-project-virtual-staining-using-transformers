@@ -112,12 +112,19 @@ def main():
         )
 
     # Persist training history in both visual and CSV form.
-    visualize_history(history, model_dir=model_dir)
-    save_history_to_csv(history, os.path.join(model_dir, "training_history.csv"))
+    history_visualizer = visualize_history
+    history_saver = save_history_to_csv
+    if model_version == 3:
+        from model_v3.history_utils import visualize_history_v3, save_history_to_csv_v3
+        history_visualizer = visualize_history_v3
+        history_saver = save_history_to_csv_v3
+    history_visualizer(history, model_dir=model_dir)
+    history_saver(history, os.path.join(model_dir, "training_history.csv"))
 
     return history, G_AB, G_BA, D_A, D_B
 
 
 if __name__ == "__main__":
     main()
+
 
