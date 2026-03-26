@@ -114,25 +114,46 @@ Controls data loading.
 
 ---
 
+## `DiffusionConfig`
+
+Controls the v3 DiT diffusion model.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `num_timesteps` | int | 1000 | DDPM forward process steps |
+| `beta_schedule` | str | `"cosine"` | `"linear"` or `"cosine"` |
+| `dit_hidden_dim` | int | 512 | Transformer hidden dimension |
+| `dit_depth` | int | 8 | Number of DiT blocks |
+| `dit_heads` | int | 8 | Attention heads per block |
+| `dit_patch_size` | int | 2 | Latent patch size |
+| `dit_mlp_ratio` | float | 4.0 | MLP expansion ratio |
+| `lambda_perceptual_v3` | float | 0.0 | Perceptual loss weight (0 = off) |
+| `num_inference_steps` | int | 50 | DDIM steps for validation/inference |
+| `use_gradient_checkpointing` | bool | False | Checkpoint DiT blocks |
+| `vae_model_id` | str | `"stabilityai/sd-vae-ft-mse"` | VAE checkpoint id or local path |
+
+---
+
 ## `UVCGANConfig`
 
 Top-level container. Holds one instance of each sub-config above plus output path overrides.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `model_version` | int | 2 | `1` for v1 hybrid, `2` for true UVCGAN v2 |
+| `model_version` | int | 2 | `1` for v1 hybrid, `2` for true UVCGAN v2, `3` for DiT diffusion |
 | `generator` | `GeneratorConfig` | default | Generator architecture settings |
 | `discriminator` | `DiscriminatorConfig` | default | Discriminator architecture settings |
 | `loss` | `LossConfig` | default | Loss weights and settings |
 | `training` | `TrainingConfig` | default | Training loop settings |
 | `data` | `DataConfig` | default | Data loading settings |
+| `diffusion` | `DiffusionConfig` | default | v3 diffusion settings |
 | `model_dir` | `str` or `None` | None | Override checkpoint output directory |
 | `val_dir` | `str` or `None` | None | Override validation images directory |
 
 ### `__post_init__()`
 
 Validates cross-field constraints at construction time:
-- `model_version` must be 1 or 2
+- `model_version` must be 1, 2, or 3
 - `decay_start_epoch` must be at least 2 epochs before `num_epochs` (otherwise the LR decay period is too short to be useful)
 
 ---
@@ -179,3 +200,13 @@ Returns a VRAM-optimised config for 8 GB GPUs. Changes from default:
 Current profile note: this repository's 8GB config applies the highest-impact
 memory reduction (batch size + accumulation) and keeps the other defaults at
 quality-oriented values.
+
+### `get_dit_config()` and `get_dit_8gb_config()`
+
+Factory helpers for v3 diffusion:
+
+- `get_dit_config()` uses full-size DiT defaults.
+- `get_dit_8gb_config()` reduces DiT size and enables gradient checkpointing.
+
+Both return a `UVCGANConfig` with `model_version=3` and a populated
+`diffusion` section.

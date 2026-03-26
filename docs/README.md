@@ -22,6 +22,16 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `advanced_losses.py` | [advanced_losses.md](advanced_losses.md) | V2 loss functions: LSGAN + one-sided GP (γ=100) + contrastive + spectral. Paper-aligned formulas and full data flow |
 | `training_loop_v2.py` | [training_loop_v2.md](training_loop_v2.md) | V2 training loop: gradient accumulation, AMP safety, per-batch step detail, validation/early stopping separation |
 
+## Model V3 — DiT Diffusion
+
+| File | Documentation | Description |
+|---|---|---|
+| `dit_generator.py` | [dit_generator.md](dit_generator.md) | DiT backbone, ConditionEncoder, adaLN-Zero blocks |
+| `noise_scheduler.py` | [noise_scheduler.md](noise_scheduler.md) | DDPM scheduler and DDIM sampler |
+| `vae_wrapper.py` | [vae_wrapper.md](vae_wrapper.md) | SD VAE wrapper for latent diffusion |
+| `training_loop_v3.py` | [training_loop_v3.md](training_loop_v3.md) | Diffusion training loop with EMA and AMP |
+| `v3_losses.py` | [v3_losses.md](v3_losses.md) | v3 diffusion loss helper functions |
+
 ## Shared
 
 | File | Documentation | Description |

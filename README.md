@@ -164,6 +164,12 @@ data\E_Staining_DermaRepo\H_E-Staining_dataset\
 
 ## Model Versions
 
+| Version | Generator | Training | Notes |
+|---|---|---|---|
+| v1 | U-Net + ViT (ReZero) | CycleGAN + LSGAN | `training_loop.py` |
+| v2 | U-Net + ViT (LayerScale, cross-domain) | UVCGAN v2 + one-sided GP | `training_loop_v2.py` |
+| v3 | DiT (full Transformer, adaLN-Zero) | Latent diffusion (DDPM/DDIM) | `training_loop_v3.py` |
+
 ### v1 — Hybrid UVCGAN + CycleGAN (`training_loop.py`)
 
 A hybrid model that uses the UVCGAN generator architecture inside a standard CycleGAN training framework.
@@ -281,6 +287,19 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 - Mixed precision (AMP) for generator step; GP always in float32
 - Validation after `validation_warmup_epochs` epochs
 - Early stopping activates after `early_stopping_warmup` epochs, monitors SSIM improvement and loss divergence
+
+---
+
+### v3 — DiT Diffusion (`training_loop_v3.py`)
+
+Conditional latent diffusion with a full Transformer backbone:
+
+- VAE latent space (4 channels, 32x32 for 256x256 inputs)
+- Conditioning via external `ConditionEncoder` and adaLN-Zero
+- Noise prediction objective (MSE), optional VGG perceptual term
+- DDIM sampling for inference (default 50 steps)
+
+Note: the VAE checkpoint downloads ~335 MB on first run.
 
 ---
 
