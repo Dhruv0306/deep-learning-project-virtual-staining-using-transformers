@@ -1,5 +1,13 @@
 """
 Noise scheduler and DDIM sampler for the v3 latent diffusion pipeline.
+
+Component structure:
+    1) beta schedule builders
+    2) DDPMScheduler (forward process helpers)
+    3) DDIMSampler (reverse sampling)
+
+Primary latent shape:
+    z: (N, 4, 32, 32)
 """
 
 from __future__ import annotations
@@ -27,6 +35,9 @@ def _cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> Tensor:
 class DDPMScheduler(nn.Module):
     """
     DDPM forward-process scheduler with precomputed buffers.
+
+Key buffer shapes:
+    betas, alphas, alphas_cumprod: (T,)
     """
 
     betas: Tensor
@@ -76,6 +87,11 @@ class DDPMScheduler(nn.Module):
     def add_noise(self, x0: Tensor, noise: Tensor, t: Tensor) -> Tensor:
         """
         Forward diffusion: x_t = sqrt(alpha_bar_t) * x0 + sqrt(1-alpha_bar_t) * noise
+
+        Shapes:
+            x0, noise: (N, C, H, W)
+            t:         (N,)
+            x_t:       (N, C, H, W)
         """
         sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x0.shape)
         sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x0.shape)
@@ -84,6 +100,11 @@ class DDPMScheduler(nn.Module):
     def predict_x0(self, x_t: Tensor, eps_pred: Tensor, t: Tensor) -> Tensor:
         """
         Reconstruct x0 estimate from noisy latent and predicted noise.
+
+        Shapes:
+            x_t, eps_pred: (N, C, H, W)
+            t:             (N,)
+            x0_pred:       (N, C, H, W)
         """
         sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
         sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
@@ -99,6 +120,8 @@ class DDPMScheduler(nn.Module):
 class DDIMSampler:
     """
     Deterministic DDIM sampler.
+
+Sample output shape equals requested ``shape`` argument.
     """
 
     def __init__(self, scheduler: DDPMScheduler):

@@ -1,5 +1,17 @@
 """
 Training loop for the v3 DiT diffusion model.
+
+Component structure:
+    1) LR helper
+    2) grad-norm helper
+    3) validation runner
+    4) train_v3 main loop
+
+Core per-batch shape flow:
+    real_A:(N,3,256,256), real_B:(N,3,256,256)
+      -> z0 via VAE encode: (N,4,32,32)
+      -> z_t via add_noise:  (N,4,32,32)
+      -> eps_pred from DiT:  (N,4,32,32)
 """
 
 from __future__ import annotations
@@ -159,6 +171,17 @@ def train_v3(
     test_size=None,
     cfg: Optional[UVCGANConfig] = None,
 ):
+    """
+    Train v3 latent diffusion model (DiT + condition encoder + frozen VAE).
+
+    Args:
+        epoch_size, num_epochs, model_dir, val_dir, test_size: optional
+            overrides for corresponding config fields.
+        cfg: full ``UVCGANConfig`` configured for model_version=3.
+
+    Returns:
+        tuple: ``(history, dit_model, ema_model, cond_encoder)``.
+    """
     if cfg is None:
         cfg = get_dit_config()
 

@@ -1,5 +1,12 @@
 """
 Loss helpers for the v3 diffusion training loop.
+
+Component structure:
+    1) compute_diffusion_loss
+
+Primary shapes:
+    z_t, noise, eps_pred: (N, 4, 32, 32)
+    real_B:              (N, 3, 256, 256)
 """
 
 from __future__ import annotations
@@ -26,12 +33,19 @@ def compute_diffusion_loss(
     lambda_perc: float,
 ) -> Tuple[Tensor, Tensor, float]:
     """
-    Compute the diffusion loss with optional perceptual term.
+     Compute diffusion training loss with optional perceptual term.
+
+     Dataflow:
+          1) MSE noise-prediction loss:
+              mse(eps_pred, noise)
+          2) optional perceptual branch:
+              predict x0 -> decode to fake_B_pred -> perceptual(fake_B_pred, real_B)
+          3) total = mse + lambda_perc * perceptual
 
     Returns:
-        loss: total loss (scalar tensor)
-        loss_simple: MSE noise prediction loss (scalar tensor)
-        loss_perc_val: perceptual loss value as float
+        loss: total scalar tensor
+        loss_simple: scalar tensor (MSE term)
+        loss_perc_val: perceptual scalar as float (0.0 when disabled)
     """
     noise = noise.to(dtype=eps_pred.dtype)
     loss_simple = F.mse_loss(eps_pred, noise).float()

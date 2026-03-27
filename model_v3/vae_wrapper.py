@@ -1,8 +1,14 @@
 """
 VAE wrapper for the v3 latent diffusion pipeline.
 
-Provides a thin interface around diffusers.AutoencoderKL with the
-Stable Diffusion latent scaling factor applied.
+Component structure:
+    1) pretrained AutoencoderKL loader
+    2) encode helper (image -> latent)
+    3) decode helper (latent -> image)
+
+Scaling convention:
+    Stable Diffusion latent scaling factor 0.18215 is applied on encode
+    and undone on decode.
 """
 
 from __future__ import annotations
@@ -48,6 +54,9 @@ class VAEWrapper(nn.Module):
         """
         Encode an image batch into latents.
 
+        Dataflow:
+            x -> clamp -> VAE encode -> latent sample -> scale by 0.18215
+
         Args:
             x: (N, 3, H, W) in [-1, 1]
 
@@ -62,6 +71,9 @@ class VAEWrapper(nn.Module):
     def decode(self, z: Tensor) -> Tensor:
         """
         Decode a latent batch into images.
+
+        Dataflow:
+            z -> unscale -> VAE decode -> clamp to [-1, 1]
 
         Args:
             z: (N, 4, H, W) latent (scaled)

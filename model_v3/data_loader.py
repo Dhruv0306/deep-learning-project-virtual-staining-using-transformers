@@ -1,8 +1,15 @@
 """
-V3-specific data loader helpers for paired image translation.
+V3 paired-data loader utilities for diffusion training.
 
-DiT diffusion uses paired (A, B) samples, so this module builds paired
-train/test datasets from matching filenames in trainA/trainB and testA/testB.
+Component structure:
+    1) PairedImageDataset  - filename-aligned A/B sample provider.
+    2) getDataLoaderV3     - train/test DataLoader factory.
+
+Data contract:
+    Each batch item is a dict with keys:
+        - "A": tensor of shape (N, 3, image_size, image_size)
+        - "B": tensor of shape (N, 3, image_size, image_size)
+    with values normalized to [-1, 1].
 """
 
 import os
@@ -19,6 +26,10 @@ class PairedImageDataset(Dataset):
     Paired dataset for aligned A/B domains.
 
     Pairs are formed by matching filenames across the two directories.
+
+    Item dataflow:
+        filename_A, filename_B -> PIL RGB -> optional transform ->
+        {"A": tensor(3,H,W), "B": tensor(3,H,W)}
     """
 
     def __init__(self, dir_A, dir_B, transform=None, epoch_size=None, strict_pairs=True):
@@ -73,7 +84,7 @@ def getDataLoaderV3(
     strict_pairs=True,
 ):
     """
-    Create and return paired train/test data loaders for v3 diffusion.
+    Create paired train/test data loaders for v3 diffusion training.
 
     Args:
         epoch_size (int | None): Fixed number of samples per epoch.
@@ -82,8 +93,14 @@ def getDataLoaderV3(
         num_workers (int): Data loader workers.
         strict_pairs (bool): Require matching filenames across A/B dirs.
 
-    Returns:
-        tuple[DataLoader, DataLoader]: (train_loader, test_loader)
+        Returns:
+                tuple[DataLoader, DataLoader]: ``(train_loader, test_loader)`` where:
+                        - train_loader yields batches:
+                            A:(batch_size,3,image_size,image_size),
+                            B:(batch_size,3,image_size,image_size)
+                        - test_loader yields batches:
+                            A:(1,3,image_size,image_size),
+                            B:(1,3,image_size,image_size)
     """
     print(f"torch version: {torch.__version__}")
     print("Checking GPU available:")

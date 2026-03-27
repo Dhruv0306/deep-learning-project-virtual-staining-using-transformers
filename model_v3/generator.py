@@ -1,5 +1,18 @@
 """
 DiT generator components for the v3 latent diffusion pipeline.
+
+Component structure:
+    1) PatchEmbed
+    2) TimestepEmbedding
+    3) ConditionEncoder
+    4) DiTBlock (adaLN-Zero)
+    5) DiTGenerator
+    6) getGeneratorV3 factory
+
+Core tensor flow in DiTGenerator.forward:
+    z_t:(N,4,32,32) -> tokens:(N,L,Hd) -> blocks ->
+    noise prediction latents:(N,4,32,32)
+where L=(32/patch_size)^2 and Hd=hidden_dim.
 """
 
 from __future__ import annotations
@@ -17,6 +30,10 @@ from model_v2.generator import _get_2d_sincos_pos_embed, init_weights_v2
 class PatchEmbed(nn.Module):
     """
     Patchify latent and project to token embeddings.
+
+    Shape flow:
+        input  z: (N, C, H, W)
+        output t: (N, (H/p)*(W/p), hidden_dim)
     """
 
     def __init__(
@@ -86,6 +103,10 @@ class TimestepEmbedding(nn.Module):
 class ConditionEncoder(nn.Module):
     """
     Shallow CNN encoder mapping an input image to a conditioning vector.
+
+    Shape flow for 256x256 input:
+        (N,3,256,256) -> (N,64,128,128) -> (N,128,64,64) ->
+        (N,256,32,32) -> (N,512,16,16) -> GAP -> (N,512) -> (N,hidden_dim)
     """
 
     def __init__(self, hidden_dim: int = 512):
@@ -154,6 +175,14 @@ class DiTBlock(nn.Module):
 class DiTGenerator(nn.Module):
     """
     Diffusion Transformer backbone.
+
+    Forward inputs:
+        z_t: (N,4,32,32)
+        t:   (N,)
+        c:   (N,hidden_dim)
+
+    Forward output:
+        eps_pred: (N,4,32,32)
     """
 
     def __init__(
@@ -232,6 +261,10 @@ class DiTGenerator(nn.Module):
 def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
     """
     Factory for DiTGenerator based on DiffusionConfig.
+
+    Returns a model configured for latent size 32x32 and channel count 4,
+    then runs a smoke test on tensors shaped:
+        z_t:(1,4,32,32), t:(1,), c:(1,dit_hidden_dim)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

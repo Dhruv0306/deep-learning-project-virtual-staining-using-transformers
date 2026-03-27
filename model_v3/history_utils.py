@@ -1,9 +1,21 @@
 """
 V3-specific training history utilities.
 
-Tracks diffusion losses and gradient norms without discriminator terms.
+Component structure:
+    1) save/append CSV helpers
+    2) CSV reload helper
+    3) visualization helper
+
 CSV schema:
     Epoch, Batch, Loss_DiT, Loss_Perceptual, GradNorm
+
+History structure in memory:
+    history[epoch][batch] = {
+        "Batch": int,
+        "Loss_DiT": float,
+        "Loss_Perceptual": float,
+        "GradNorm": float,
+    }
 """
 
 import os
@@ -69,6 +81,10 @@ def load_history_from_csv_v3(filename):
 def visualize_history_v3(history, model_dir=None):
     """
     Plot v3 training history charts.
+
+    Dataflow:
+        history dict -> per-epoch means -> 3 line plots:
+        DiT loss, perceptual loss, gradient norm.
     """
     if not history:
         print("No training history to visualize.")

@@ -1,42 +1,75 @@
-# `model_v3/vae_wrapper.py` — VAE Wrapper
+# model_v3/vae_wrapper.py - VAE Wrapper
 
-Source of truth: `../../model_v3/vae_wrapper.py`
+Source of truth: ../../model_v3/vae_wrapper.py
 
-**Role:** Loads a pretrained Stable Diffusion VAE and exposes `encode` / `decode` for latent diffusion.
-
----
-
-## Overview
-
-The v3 pipeline operates in the latent space of a pretrained VAE. `VAEWrapper`:
-
-- Loads `diffusers.AutoencoderKL` from a model id or local path.
-- Freezes all VAE parameters (`requires_grad=False`).
-- Applies the Stable Diffusion latent scaling factor `0.18215`.
+Role: Wraps AutoencoderKL encode/decode with Stable Diffusion latent scaling.
 
 ---
 
-## Interface
+## Component Structure
 
-```python
-vae = VAEWrapper(model_id="stabilityai/sd-vae-ft-mse")
+1. VAEWrapper.__init__
+2. VAEWrapper.encode
+3. VAEWrapper.decode
 
-z = vae.encode(x)   # x: (N, 3, 256, 256) -> z: (N, 4, 32, 32)
-img = vae.decode(z) # z: (N, 4, 32, 32) -> img: (N, 3, 256, 256)
-```
+---
 
-### `encode(x)`
-- Input: `(N, 3, H, W)` in `[-1, 1]`
-- Output: `(N, 4, H/8, W/8)` scaled by `0.18215`
+## 1) __init__
 
-### `decode(z)`
-- Input: `(N, 4, H, W)` scaled
-- Output: `(N, 3, H*8, W*8)` in `[-1, 1]`
+Input:
+- model_id string
+
+Dataflow:
+1. load AutoencoderKL from pretrained source
+2. freeze parameters (requires_grad=False)
+3. set eval mode
+4. set latent_scale = 0.18215
+
+Output state:
+- ready wrapper with frozen VAE and scaling rule
+
+---
+
+## 2) encode
+
+Input:
+- x: (N,3,H,W), expected range [-1,1]
+
+Dataflow:
+1. clamp input to [-1,1]
+2. VAE encode distribution
+3. sample latent
+4. scale latent by 0.18215
+
+Shape transitions (typical H=W=256):
+- (N,3,256,256) -> latent sample (N,4,32,32) -> scaled (N,4,32,32)
+
+Output:
+- z: (N,4,H/8,W/8)
+
+---
+
+## 3) decode
+
+Input:
+- z: (N,4,h,w), expected scaled latent
+
+Dataflow:
+1. unscale latent by dividing 0.18215
+2. cast to float32
+3. VAE decode
+4. clamp output to [-1,1]
+
+Shape transitions (typical h=w=32):
+- (N,4,32,32) -> decoded (N,3,256,256) -> clamped (N,3,256,256)
+
+Output:
+- img: (N,3,h*8,w*8)
 
 ---
 
 ## Notes
 
-- The VAE is frozen, but gradients can still flow through it unless you wrap calls in `torch.no_grad()`.
-- If `diffusers` is missing, `VAEWrapper` raises a clear `ImportError` with install instructions.
-
+- Wrapper keeps VAE frozen by default.
+- Gradients can still flow through encode/decode unless caller wraps calls with no_grad.
+- Module raises informative ImportError when diffusers is unavailable.

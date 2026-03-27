@@ -353,7 +353,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.5
+    cfg.diffusion.lambda_perceptual_v3 = 1
     cfg.training.validation_size = 20
 
     return cfg
