@@ -11,7 +11,7 @@ Core per-batch shape flow:
     real_A:(N,3,256,256), real_B:(N,3,256,256)
       -> z0 via VAE encode: (N,4,32,32)
       -> z_t via add_noise:  (N,4,32,32)
-      -> eps_pred from DiT:  (N,4,32,32)
+    -> model_pred from DiT: (N,4,32,32)
 """
 
 from __future__ import annotations
@@ -33,9 +33,8 @@ from shared.EarlyStopping import EarlyStopping
 from model_v3.history_utils import append_history_to_csv_v3, load_history_from_csv_v3
 from shared.metrics import MetricsCalculator
 from shared.validation import save_images_with_title
-from shared.testing import run_testing
 
-from model_v3.generator import ConditionEncoder, getGeneratorV3
+from model_v3.generator import ConditionTokenizer, getGeneratorV3
 from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
 from model_v2.generator import init_weights_v2
 from model_v3.vae_wrapper import VAEWrapper
@@ -71,7 +70,7 @@ def _global_grad_norm(parameters) -> float:
 def _run_validation_v3(
     epoch: int,
     ema_model: torch.nn.Module,
-    cond_encoder: torch.nn.Module,
+    cond_tokenizer: torch.nn.Module,
     vae: VAEWrapper,
     sampler: DDIMSampler,
     test_loader,
@@ -82,10 +81,14 @@ def _run_validation_v3(
     writer: SummaryWriter,
     max_batches: int = 50,
     num_samples: int = 6,
+    fid_max_samples: int = 200,
+    fid_min_samples: int = 50,
+    prediction_type: str = "v",
+    cfg_scale: float = 1.0,
     is_test: bool = False,
 ):
     ema_model.eval()
-    cond_encoder.eval()
+    cond_tokenizer.eval()
     vae.eval()
 
     print(f"[{ 'Testing' if is_test else 'Validation' }] Starting run at epoch {epoch}")
@@ -106,7 +109,8 @@ def _run_validation_v3(
             real_A = batch["A"].to(device)
             real_B = batch["B"].to(device)
 
-            c = cond_encoder(real_A)
+            c = cond_tokenizer(real_A)
+            uncond = torch.zeros_like(c)
             z0 = sampler.sample(
                 ema_model,
                 c,
@@ -114,6 +118,9 @@ def _run_validation_v3(
                 device=device,
                 num_steps=num_steps,
                 eta=0.0,
+                prediction_type=prediction_type,
+                cfg_scale=cfg_scale,
+                uncond_condition=uncond,
             )
             fake_B = vae.decode(z0)
 
@@ -142,9 +149,10 @@ def _run_validation_v3(
         "psnr_B": float(sum(metrics["psnr_B"]) / max(1, len(metrics["psnr_B"]))),
     }
 
-    if len(real_B_list) >= 10:
-        real_B_tensor = torch.cat(real_B_list[:10])
-        fake_B_tensor = torch.cat(fake_B_list[:10])
+    fid_count = min(fid_max_samples, len(real_B_list))
+    if fid_count >= fid_min_samples:
+        real_B_tensor = torch.cat(real_B_list[:fid_count])
+        fake_B_tensor = torch.cat(fake_B_list[:fid_count])
         avg_metrics["fid"] = calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
 
     for metric_name, value in avg_metrics.items():
@@ -159,7 +167,7 @@ def _run_validation_v3(
     print(f"[{prefix}] Completed run at epoch {epoch}")
 
     # ema_model.train()
-    cond_encoder.train()
+    cond_tokenizer.train()
     return avg_metrics
 
 
@@ -172,7 +180,7 @@ def train_v3(
     cfg: Optional[UVCGANConfig] = None,
 ):
     """
-    Train v3 latent diffusion model (DiT + condition encoder + frozen VAE).
+    Train v3 latent diffusion model (DiT + condition tokenizer + frozen VAE).
 
     Args:
         epoch_size, num_epochs, model_dir, val_dir, test_size: optional
@@ -180,7 +188,7 @@ def train_v3(
         cfg: full ``UVCGANConfig`` configured for model_version=3.
 
     Returns:
-        tuple: ``(history, dit_model, ema_model, cond_encoder)``.
+        tuple: ``(history, dit_model, ema_model, cond_tokenizer)``.
     """
     if cfg is None:
         cfg = get_dit_config()
@@ -223,8 +231,12 @@ def train_v3(
     vae = VAEWrapper(dcfg.vae_model_id).to(device)
     vae.eval()
 
-    cond_encoder = ConditionEncoder(dcfg.dit_hidden_dim).to(device)
-    init_weights_v2(cond_encoder)
+    cond_tokenizer = ConditionTokenizer(
+        hidden_dim=dcfg.dit_hidden_dim,
+        image_size=dtcfg.image_size,
+        patch_size=dcfg.cond_patch_size,
+    ).to(device)
+    init_weights_v2(cond_tokenizer)
 
     dit_model = getGeneratorV3(dcfg, device=device)
     ema_model = copy.deepcopy(dit_model).to(device)
@@ -235,7 +247,7 @@ def train_v3(
 
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(
-        list(dit_model.parameters()) + list(cond_encoder.parameters()),
+        list(dit_model.parameters()) + list(cond_tokenizer.parameters()),
         lr=1e-4,
         betas=(0.9, 0.999),
         weight_decay=0.01,
@@ -305,7 +317,7 @@ def train_v3(
     for epoch in range(tcfg.num_epochs):
         print()
         dit_model.train()
-        cond_encoder.train()
+        cond_tokenizer.train()
 
         epoch_step = {}
         epoch_loss = 0.0
@@ -334,19 +346,27 @@ def train_v3(
                 optimizer.zero_grad(set_to_none=True)
 
             with autocast("cuda", enabled=use_amp):
-                c = cond_encoder(real_A)
-                eps_pred = dit_model(z_t, t, c)
+                c = cond_tokenizer(real_A)
+                if dcfg.cond_dropout_prob > 0.0:
+                    drop_mask = (
+                        torch.rand((c.size(0), 1, 1), device=device)
+                        < dcfg.cond_dropout_prob
+                    ).to(c.dtype)
+                    c = c * (1.0 - drop_mask)
+                model_pred = dit_model(z_t, t, c)
 
             loss, loss_simple, loss_perc_val = compute_diffusion_loss(
+                z0=z0,
                 z_t=z_t,
                 t=t,
                 noise=noise,
-                eps_pred=eps_pred,
+                model_pred=model_pred,
                 real_B=real_B,
                 scheduler=scheduler,
                 vae=vae,
                 perceptual_loss=perceptual_loss,
                 lambda_perc=dcfg.lambda_perceptual_v3,
+                prediction_type=dcfg.prediction_type,
             )
 
             if not torch.isfinite(loss):
@@ -365,11 +385,11 @@ def train_v3(
                 if tcfg.grad_clip_norm > 0.0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
-                        list(dit_model.parameters()) + list(cond_encoder.parameters()),
+                        list(dit_model.parameters()) + list(cond_tokenizer.parameters()),
                         tcfg.grad_clip_norm,
                     )
                 grad_norm = _global_grad_norm(
-                    list(dit_model.parameters()) + list(cond_encoder.parameters())
+                    list(dit_model.parameters()) + list(cond_tokenizer.parameters())
                 )
                 scaler.step(optimizer)
                 scaler.update()
@@ -430,7 +450,8 @@ def train_v3(
                 {
                     "epoch": epoch + 1,
                     "dit_state_dict": dit_model.state_dict(),
-                    "cond_encoder_state_dict": cond_encoder.state_dict(),
+                    "cond_tokenizer_state_dict": cond_tokenizer.state_dict(),
+                    "cond_encoder_state_dict": cond_tokenizer.state_dict(),
                     "ema_state_dict": ema_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": dcfg,
@@ -445,7 +466,7 @@ def train_v3(
             val_metrics = _run_validation_v3(
                 epoch=epoch + 1,
                 ema_model=ema_model,
-                cond_encoder=cond_encoder,
+                cond_tokenizer=cond_tokenizer,
                 vae=vae,
                 sampler=sampler,
                 test_loader=test_loader,
@@ -457,6 +478,10 @@ def train_v3(
                 is_test=False,
                 max_batches=tcfg.validation_size,
                 num_samples=max(6, tcfg.validation_size),
+                fid_max_samples=tcfg.validation_fid_samples,
+                fid_min_samples=tcfg.validation_fid_min_samples,
+                prediction_type=dcfg.prediction_type,
+                cfg_scale=dcfg.cfg_scale,
             )
 
         if (
@@ -486,7 +511,8 @@ def train_v3(
         {
             "epoch": stopped_epoch,
             "dit_state_dict": dit_model.state_dict(),
-            "cond_encoder_state_dict": cond_encoder.state_dict(),
+            "cond_tokenizer_state_dict": cond_tokenizer.state_dict(),
+            "cond_encoder_state_dict": cond_tokenizer.state_dict(),
             "ema_state_dict": ema_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": dcfg,
@@ -501,7 +527,7 @@ def train_v3(
     _run_validation_v3(
         epoch=stopped_epoch,
         ema_model=ema_model,
-        cond_encoder=cond_encoder,
+        cond_tokenizer=cond_tokenizer,
         vae=vae,
         sampler=sampler,
         test_loader=test_loader,
@@ -512,6 +538,10 @@ def train_v3(
         writer=writer,
         max_batches=tcfg.test_size,
         num_samples=max(6, tcfg.test_size),
+        fid_max_samples=tcfg.validation_fid_samples,
+        fid_min_samples=tcfg.validation_fid_min_samples,
+        prediction_type=dcfg.prediction_type,
+        cfg_scale=dcfg.cfg_scale,
         is_test=True,
     )
     writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
@@ -520,7 +550,7 @@ def train_v3(
     history = load_history_from_csv_v3(history_csv_path)
 
     writer.close()
-    return history, dit_model, ema_model, cond_encoder
+    return history, dit_model, ema_model, cond_tokenizer
 
 
 

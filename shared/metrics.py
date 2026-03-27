@@ -8,6 +8,7 @@ Includes SSIM, PSNR, and FID utilities with an InceptionV3 feature extractor.
 import torch
 import torch.nn.functional as F
 import numpy as np
+import warnings
 from torchvision import models, transforms
 from scipy import linalg
 from skimage.metrics import structural_similarity as ssim
@@ -133,17 +134,28 @@ class MetricsCalculator:
         mu1, sigma1 = real_features.mean(axis=0), np.cov(real_features, rowvar=False)
         mu2, sigma2 = fake_features.mean(axis=0), np.cov(fake_features, rowvar=False)
 
+        sigma1 = np.atleast_2d(sigma1)
+        sigma2 = np.atleast_2d(sigma2)
+
+        # Keep covariance positive-definite in small-sample settings.
+        eps = 1e-4
+        sigma1 = sigma1 + eps * np.eye(sigma1.shape[0], dtype=sigma1.dtype)
+        sigma2 = sigma2 + eps * np.eye(sigma2.shape[0], dtype=sigma2.dtype)
+
         diff = mu1 - mu2
         try:
-            covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=linalg.LinAlgWarning)
+                covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
             if np.iscomplexobj(covmean):
                 covmean = covmean.real
-        except:
+        except Exception:
             # Add small regularization to diagonal if matrix is singular.
-            eps = 1e-6
-            sigma1_reg = sigma1 + eps * np.eye(sigma1.shape[0])
-            sigma2_reg = sigma2 + eps * np.eye(sigma2.shape[0])
-            covmean, _ = linalg.sqrtm(sigma1_reg.dot(sigma2_reg), disp=False)
+            sigma1_reg = sigma1 + eps * np.eye(sigma1.shape[0], dtype=sigma1.dtype)
+            sigma2_reg = sigma2 + eps * np.eye(sigma2.shape[0], dtype=sigma2.dtype)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=linalg.LinAlgWarning)
+                covmean, _ = linalg.sqrtm(sigma1_reg.dot(sigma2_reg), disp=False)
             if np.iscomplexobj(covmean):
                 covmean = covmean.real
 

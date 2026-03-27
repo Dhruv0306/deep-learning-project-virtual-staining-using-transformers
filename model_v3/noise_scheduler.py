@@ -110,6 +110,32 @@ class DDPMScheduler(nn.Module):
         sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
         return (x_t - sqrt_one_minus * eps_pred) / sqrt_alpha_bar
 
+    def get_v_target(self, x0: Tensor, noise: Tensor, t: Tensor) -> Tensor:
+        """
+        Compute v-parameterization target.
+
+        v = sqrt(alpha_bar) * noise - sqrt(1 - alpha_bar) * x0
+        """
+        sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x0.shape)
+        sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x0.shape)
+        return sqrt_alpha_bar * noise - sqrt_one_minus * x0
+
+    def predict_eps_from_v(self, x_t: Tensor, v_pred: Tensor, t: Tensor) -> Tensor:
+        """
+        Recover eps prediction from v prediction.
+        """
+        sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
+        sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+        return sqrt_alpha_bar * v_pred + sqrt_one_minus * x_t
+
+    def predict_x0_from_v(self, x_t: Tensor, v_pred: Tensor, t: Tensor) -> Tensor:
+        """
+        Recover x0 prediction from v prediction.
+        """
+        sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
+        sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
+        return sqrt_alpha_bar * x_t - sqrt_one_minus * v_pred
+
     def get_alpha_bar(self, t: Tensor) -> Tensor:
         """
         Return alpha_bar(t) for scalar or batched timesteps.
@@ -163,6 +189,9 @@ class DDIMSampler:
         device: torch.device,
         num_steps: int = 50,
         eta: float = 0.0,
+        prediction_type: str = "v",
+        cfg_scale: float = 1.0,
+        uncond_condition: Tensor | None = None,
     ) -> Tensor:
         """
         Sample a denoised latent z0 from pure noise using DDIM.
@@ -189,7 +218,22 @@ class DDIMSampler:
 
         for i, t in enumerate(timesteps):
             t_batch = torch.full((b,), int(t.item()), device=device, dtype=torch.long)
-            eps_pred = model(z_t, t_batch, condition)
+            cond_out = model(z_t, t_batch, condition)
+            model_out = cond_out
+            if cfg_scale > 1.0:
+                if uncond_condition is None:
+                    uncond_condition = torch.zeros_like(condition)
+                uncond_out = model(z_t, t_batch, uncond_condition)
+                model_out = uncond_out + cfg_scale * (cond_out - uncond_out)
+
+            if prediction_type == "v":
+                eps_pred = self.scheduler.predict_eps_from_v(z_t, model_out, t_batch)
+            elif prediction_type == "eps":
+                eps_pred = model_out
+            else:
+                raise ValueError(
+                    f"prediction_type must be 'v' or 'eps', got {prediction_type!r}"
+                )
 
             alpha_bar_t = self.scheduler.alphas_cumprod[t]
             if i + 1 < len(timesteps):

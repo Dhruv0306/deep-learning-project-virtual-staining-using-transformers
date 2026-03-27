@@ -136,6 +136,8 @@ class TrainingConfig:
     accumulate_grads: int = 1
     validation_warmup_epochs: int = 10
     validation_size: int = 100
+    validation_fid_samples: int = 200
+    validation_fid_min_samples: int = 50
 
 
 @dataclass
@@ -182,6 +184,10 @@ class DiffusionConfig:
     num_inference_steps: int = 50
     use_gradient_checkpointing: bool = False
     vae_model_id: str = "stabilityai/sd-vae-ft-mse"
+    prediction_type: str = "v"
+    cond_dropout_prob: float = 0.1
+    cfg_scale: float = 2.0
+    cond_patch_size: int = 16
 
 
 @dataclass
@@ -330,9 +336,15 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.dit_heads = 8
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
-    cfg.diffusion.use_gradient_checkpointing = False
+    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.prediction_type = "v"
+    cfg.diffusion.cond_dropout_prob = 0.1
+    cfg.diffusion.cfg_scale = 2.0
+    cfg.diffusion.cond_patch_size = 16
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
+    cfg.training.validation_fid_samples = 200
+    cfg.training.validation_fid_min_samples = 50
     return cfg
 
 
@@ -349,12 +361,18 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.dit_heads = 6
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
-    cfg.diffusion.use_gradient_checkpointing = False
+    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.prediction_type = "v"
+    cfg.diffusion.cond_dropout_prob = 0.1
+    cfg.diffusion.cfg_scale = 1.8
+    cfg.diffusion.cond_patch_size = 16
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.training.validation_size = 20
+    cfg.training.validation_fid_samples = 200
+    cfg.training.validation_fid_min_samples = 30
 
     return cfg
 

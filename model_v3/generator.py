@@ -4,8 +4,8 @@ DiT generator components for the v3 latent diffusion pipeline.
 Component structure:
     1) PatchEmbed
     2) TimestepEmbedding
-    3) ConditionEncoder
-    4) DiTBlock (adaLN-Zero)
+    3) ConditionTokenizer
+    4) DiTBlock (adaLN-Zero + cross-attention)
     5) DiTGenerator
     6) getGeneratorV3 factory
 
@@ -100,38 +100,45 @@ class TimestepEmbedding(nn.Module):
         return self.mlp(self._sincos(t))
 
 
-class ConditionEncoder(nn.Module):
+class ConditionTokenizer(nn.Module):
     """
-    Shallow CNN encoder mapping an input image to a conditioning vector.
+    Patchify conditioning image and project to token embeddings.
 
-    Shape flow for 256x256 input:
-        (N,3,256,256) -> (N,64,128,128) -> (N,128,64,64) ->
-        (N,256,32,32) -> (N,512,16,16) -> GAP -> (N,512) -> (N,hidden_dim)
+    Shape flow for 256x256 input and patch_size=16:
+        (N,3,256,256) -> (N,hidden_dim,16,16) -> (N,256,hidden_dim)
     """
 
-    def __init__(self, hidden_dim: int = 512):
+    def __init__(
+        self,
+        hidden_dim: int = 512,
+        image_size: int = 256,
+        patch_size: int = 16,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(512),
-            nn.ReLU(inplace=True),
+        if image_size % patch_size != 0:
+            raise ValueError("image_size must be divisible by cond patch_size.")
+        self.hidden_dim = hidden_dim
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.proj = nn.Conv2d(
+            3,
+            hidden_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
         )
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.proj = nn.Linear(512, hidden_dim)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = self.net(x)
-        x = self.pool(x).flatten(1)
-        return self.proj(x)
+        x = self.proj(x)
+        n, c, h, w = x.shape
+        tokens = x.flatten(2).transpose(1, 2).contiguous()
+        pos = _get_2d_sincos_pos_embed(
+            self.hidden_dim,
+            h,
+            w,
+            device=tokens.device,
+            dtype=tokens.dtype,
+        )
+        return tokens + pos.unsqueeze(0)
 
 
 class DiTBlock(nn.Module):
@@ -143,6 +150,11 @@ class DiTBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        self.norm_xc = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.norm_c = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.cross_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, batch_first=True
+        )
         self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         mlp_hidden = int(hidden_dim * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -150,20 +162,36 @@ class DiTBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(mlp_hidden, hidden_dim),
         )
-        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, 6 * hidden_dim))
+        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, 9 * hidden_dim))
         ada_linear = self.adaLN[1]
         if isinstance(ada_linear, nn.Linear):
             nn.init.zeros_(ada_linear.weight)
             nn.init.zeros_(ada_linear.bias)
 
-    def forward(self, tokens: Tensor, cond: Tensor) -> Tensor:
+    def forward(self, tokens: Tensor, cond_tokens: Tensor, cond: Tensor) -> Tensor:
         params = self.adaLN(cond)
-        gamma1, beta1, alpha1, gamma2, beta2, alpha2 = params.chunk(6, dim=1)
+        (
+            gamma1,
+            beta1,
+            alpha1,
+            gamma_x,
+            beta_x,
+            alpha_x,
+            gamma2,
+            beta2,
+            alpha2,
+        ) = params.chunk(9, dim=1)
 
         x = self.norm1(tokens)
         x = x * (1 + gamma1.unsqueeze(1)) + beta1.unsqueeze(1)
         attn_out, _ = self.attn(x, x, x)
         tokens = tokens + alpha1.unsqueeze(1) * attn_out
+
+        x = self.norm_xc(tokens)
+        x = x * (1 + gamma_x.unsqueeze(1)) + beta_x.unsqueeze(1)
+        c = self.norm_c(cond_tokens)
+        cross_out, _ = self.cross_attn(x, c, c)
+        tokens = tokens + alpha_x.unsqueeze(1) * cross_out
 
         x = self.norm2(tokens)
         x = x * (1 + gamma2.unsqueeze(1)) + beta2.unsqueeze(1)
@@ -179,7 +207,7 @@ class DiTGenerator(nn.Module):
     Forward inputs:
         z_t: (N,4,32,32)
         t:   (N,)
-        c:   (N,hidden_dim)
+        c:   (N,Lc,hidden_dim)
 
     Forward output:
         eps_pred: (N,4,32,32)
@@ -243,7 +271,8 @@ class DiTGenerator(nn.Module):
     def forward(self, z_t: Tensor, t: Tensor, c: Tensor) -> Tensor:
         tokens = self.patch_embed(z_t)
         tokens = tokens + self._pos_embed(tokens.device, tokens.dtype)
-        cond = self.time_embed(t) + c
+        cond_global = c.mean(dim=1)
+        cond = self.time_embed(t) + cond_global
         for block in self.blocks:
             if (
                 self.use_gradient_checkpointing
@@ -251,9 +280,9 @@ class DiTGenerator(nn.Module):
                 and isinstance(tokens, torch.Tensor)
                 and tokens.requires_grad
             ):
-                tokens = checkpoint(block, tokens, cond, use_reentrant=False)
+                tokens = checkpoint(block, tokens, c, cond, use_reentrant=False)
             else:
-                tokens = block(tokens, cond)
+                tokens = block(tokens, c, cond)
         tokens = self.head(tokens)
         return self.unpatchify(tokens)
 
@@ -291,7 +320,8 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
     with torch.no_grad():
         z_t = torch.randn(1, 4, 32, 32, device=device)
         t = torch.randint(0, 1000, (1,), device=device)
-        c = torch.randn(1, cfg.dit_hidden_dim, device=device)
+        cond_len = (256 // max(1, cfg.cond_patch_size)) ** 2
+        c = torch.randn(1, cond_len, cfg.dit_hidden_dim, device=device)
         _ = model(z_t, t, c)
 
     return model
