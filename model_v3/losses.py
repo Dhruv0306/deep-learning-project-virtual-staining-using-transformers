@@ -34,6 +34,9 @@ def compute_diffusion_loss(
     lambda_perc: float,
     prediction_type: str = "v",
     min_snr_gamma: float = 0.0,
+    global_step: int = 0,
+    perceptual_every_n_steps: int = 1,
+    perceptual_batch_fraction: float = 1.0,
 ) -> Tuple[Tensor, Tensor, float]:
     """
      Compute diffusion training loss with optional perceptual term.
@@ -85,10 +88,17 @@ def compute_diffusion_loss(
     loss = loss_simple
     loss_perc_val = 0.0
 
-    if perceptual_loss is not None and lambda_perc > 0.0:
+    use_perc_this_step = (global_step % max(1, perceptual_every_n_steps)) == 0
+    if perceptual_loss is not None and lambda_perc > 0.0 and use_perc_this_step:
         # Perceptual term runs in FP32 outside autocast.
-        fake_B_pred = vae.decode(x0_pred)
-        loss_perc = perceptual_loss(fake_B_pred, real_B)
+        bs = real_B.size(0)
+        frac = min(1.0, max(0.1, float(perceptual_batch_fraction)))
+        n_perc = max(1, int(bs * frac))
+        x0_sub = x0_pred[:n_perc]
+        real_sub = real_B[:n_perc].detach()
+
+        fake_B_pred = vae.decode(x0_sub)
+        loss_perc = perceptual_loss(fake_B_pred, real_sub)
         loss = loss + lambda_perc * loss_perc
         loss_perc_val = float(loss_perc.item())
 

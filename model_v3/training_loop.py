@@ -368,6 +368,9 @@ def train_v3(
                 lambda_perc=dcfg.lambda_perceptual_v3,
                 prediction_type=dcfg.prediction_type,
                 min_snr_gamma=dcfg.min_snr_gamma,
+                global_step=(epoch * len(train_loader) + i),
+                perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
+                perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
 
             if not torch.isfinite(loss):

@@ -189,6 +189,8 @@ class DiffusionConfig:
     cfg_scale: float = 2.0
     cond_patch_size: int = 16
     min_snr_gamma: float = 5.0
+    perceptual_every_n_steps: int = 4
+    perceptual_batch_fraction: float = 0.5
 
 
 @dataclass
@@ -344,6 +346,8 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.cond_patch_size = 8
     cfg.diffusion.num_inference_steps = 100
     cfg.diffusion.min_snr_gamma = 5.0
+    cfg.diffusion.perceptual_every_n_steps = 4
+    cfg.diffusion.perceptual_batch_fraction = 0.5
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 2
     cfg.training.validation_size = 100
@@ -372,10 +376,12 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.cond_patch_size = 8
     cfg.diffusion.num_inference_steps = 100
     cfg.diffusion.min_snr_gamma = 5.0
+    cfg.diffusion.perceptual_every_n_steps = 4
+    cfg.diffusion.perceptual_batch_fraction = 0.5
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 2
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.0
+    cfg.diffusion.lambda_perceptual_v3 = 0.07
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
