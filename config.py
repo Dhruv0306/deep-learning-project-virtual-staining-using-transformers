@@ -369,20 +369,20 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.dit_heads = 10
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
-    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.use_gradient_checkpointing = False
     cfg.diffusion.prediction_type = "v"
     cfg.diffusion.cond_dropout_prob = 0.1
     cfg.diffusion.cfg_scale = 2.5
     cfg.diffusion.cond_patch_size = 8
     cfg.diffusion.num_inference_steps = 100
     cfg.diffusion.min_snr_gamma = 5.0
-    cfg.diffusion.perceptual_every_n_steps = 4
+    cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
     cfg.data.batch_size = 4
-    cfg.training.accumulate_grads = 2
+    cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.07
-    cfg.training.validation_size = 100
+    cfg.diffusion.lambda_perceptual_v3 = 0.03
+    cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
 

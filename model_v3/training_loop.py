@@ -420,7 +420,9 @@ def train_v3(
                 print(
                     f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
                     f"Batch [{i}/{len(train_loader)}] "
-                    f"Loss: {loss_simple.item():.4f} "
+                    f"Loss DiT: {loss_simple.item():.4f} "
+                    f"Loss Perceptual: {loss_perc_val:.4f} "
+                    f"Loss Total: {loss.item():.4f} "
                     f"GradNorm: {grad_norm:.4f}"
                 )
 
