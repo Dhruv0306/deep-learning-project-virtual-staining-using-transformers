@@ -46,7 +46,7 @@ def main():
     # User-controlled training parameters.
     epoch_size = int(input("Enter Epoch Size: "))
     num_epochs = int(input("Enter Number of Epochs: "))
-    test_size = float(input("Enter Test Size: "))
+    test_size = int(input("Enter Test Size: "))
     model_version = int(
         input(
             "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, 3 for DiT diffusion: "

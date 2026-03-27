@@ -344,16 +344,16 @@ def get_dit_8gb_config() -> UVCGANConfig:
     checkpointing for DiT blocks and uses a lighter validation setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 512
-    cfg.diffusion.dit_depth = 8
-    cfg.diffusion.dit_heads = 8
+    cfg.diffusion.dit_hidden_dim = 384
+    cfg.diffusion.dit_depth = 6
+    cfg.diffusion.dit_heads = 6
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
-    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.use_gradient_checkpointing = False
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 1
+    cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.training.validation_size = 20
 
     return cfg

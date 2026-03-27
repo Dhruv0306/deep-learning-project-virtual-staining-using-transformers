@@ -182,11 +182,12 @@ def save_images_with_title(
         value_range (tuple): Min/max for normalization.
         header_h (int): Header height in pixels.
     """
-    grid = make_grid(row_tensor, nrow=4, normalize=True, value_range=value_range)
+    nrow = row_tensor.size(0)
+    grid = make_grid(row_tensor, nrow=nrow, normalize=True, value_range=value_range)
     grid_img = to_pil_image(grid)  # PIL RGB
 
     w, h = grid_img.size
-    cell_w = w // 4
+    cell_w = w // nrow
 
     canvas = Image.new("RGB", (w, h + header_h), color=(255, 255, 255))
     canvas.paste(grid_img, (0, header_h))

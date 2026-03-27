@@ -125,12 +125,12 @@ def _run_validation_v3(
 
             if i < num_samples:
                 row = torch.cat(
-                    [real_A[:1], fake_B[:1], real_B[:1], real_B[:1]], dim=0
+                    [real_A[:1], fake_B[:1], real_B[:1]], dim=0
                 ).cpu()
                 out_path = os.path.join(save_dir, f"image_{i + 1}_A.png")
                 save_images_with_title(
                     row,
-                    labels=["Real A", "Fake B", "Real B", "Real B"],
+                    labels=["Real A", "Fake B", "Real B"],
                     out_path=out_path,
                     value_range=(-1, 1),
                 )
@@ -158,7 +158,7 @@ def _run_validation_v3(
         print(f"{prefix} FID Score: {avg_metrics['fid']:.2f}")
     print(f"[{prefix}] Completed run at epoch {epoch}")
 
-    ema_model.train()
+    # ema_model.train()
     cond_encoder.train()
     return avg_metrics
 
@@ -200,6 +200,11 @@ def train_v3(
     dtcfg = cfg.data
     dcfg = cfg.diffusion
     lcfg = cfg.loss
+
+    assert tcfg.num_epochs is not None, "num_epochs must be specified"
+    assert tcfg.epoch_size is not None, "epoch_size must be specified"
+    assert tcfg.validation_size is not None, "validation_size must be specified"
+    assert tcfg.validation_warmup_epochs < tcfg.early_stopping_warmup, "validation_warmup_epochs must be less than early_stopping_warmup"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True

@@ -34,10 +34,10 @@ def _cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> Tensor:
 
 class DDPMScheduler(nn.Module):
     """
-    DDPM forward-process scheduler with precomputed buffers.
+        DDPM forward-process scheduler with precomputed buffers.
 
-Key buffer shapes:
-    betas, alphas, alphas_cumprod: (T,)
+    Key buffer shapes:
+        betas, alphas, alphas_cumprod: (T,)
     """
 
     betas: Tensor
@@ -121,7 +121,34 @@ class DDIMSampler:
     """
     Deterministic DDIM sampler.
 
-Sample output shape equals requested ``shape`` argument.
+    Sample output shape equals requested ``shape`` argument.
+
+    The timestep sequence runs from high noise (t ≈ T-1) down to the
+    lowest scheduled timestep (t = 0).  At the final denoising step there
+    is no "previous" timestep in the subsequence, so ``alpha_bar_prev``
+    must be set to ``alphas_cumprod[0]`` — the actual cumulative noise
+    level at t=0.  The previous implementation used the value 1.0 as a
+    fallback, which is incorrect:
+
+      * With eta=0 (default):
+          dir_xt = sqrt(1 - alpha_bar_prev) * eps_pred
+          When alpha_bar_prev = 1.0, this term collapses to zero, and the
+          update reduces to z_t = sqrt(1.0) * z0_pred = z0_pred, silently
+          discarding the directional component.  For the cosine schedule
+          alphas_cumprod[0] ≈ 0.9999, so the directional term is tiny but
+          non-zero and formally correct.
+
+      * With eta > 0 (stochastic):
+          sigma = eta * sqrt((1-alpha_bar_prev)/(1-alpha_bar_t))
+                      * sqrt(1 - alpha_bar_t / alpha_bar_prev)
+          When alpha_bar_prev = 1.0, the first factor becomes
+          sqrt(0 / ...) = 0, zeroing out sigma entirely on the last step.
+          This silently suppresses the intended stochastic noise injection
+          and makes the final step deterministic regardless of eta.
+
+    Both effects are silent — no NaN, no error — which is why the bug
+    survived testing.  Using alphas_cumprod[0] as the terminal boundary
+    restores the correct DDIM update at every step.
     """
 
     def __init__(self, scheduler: DDPMScheduler):
@@ -138,7 +165,19 @@ Sample output shape equals requested ``shape`` argument.
         eta: float = 0.0,
     ) -> Tensor:
         """
-        Sample a denoised latent z0 from pure noise.
+        Sample a denoised latent z0 from pure noise using DDIM.
+
+        Args:
+            model:     DiTGenerator — accepts (z_t, t_batch, condition).
+            condition: Pre-computed condition vector (N, hidden_dim).
+            shape:     Output shape (N, 4, 32, 32).
+            device:    Target device.
+            num_steps: Number of DDIM denoising steps (default 50).
+            eta:       Stochasticity coefficient.  0 = deterministic DDIM;
+                       1 = equivalent to DDPM.
+
+        Returns:
+            Denoised latent tensor of shape ``shape``.
         """
         b = shape[0]
         z_t = torch.randn(shape, device=device)
@@ -146,7 +185,7 @@ Sample output shape equals requested ``shape`` argument.
         timesteps = torch.linspace(
             0, self.scheduler.num_timesteps - 1, num_steps, device=device
         ).long()
-        timesteps = timesteps.flip(0)
+        timesteps = timesteps.flip(0)  # [T-1, ..., t_1, t_0]
 
         for i, t in enumerate(timesteps):
             t_batch = torch.full((b,), int(t.item()), device=device, dtype=torch.long)
@@ -157,18 +196,21 @@ Sample output shape equals requested ``shape`` argument.
                 t_prev = timesteps[i + 1]
                 alpha_bar_prev = self.scheduler.alphas_cumprod[t_prev]
             else:
-                alpha_bar_prev = torch.tensor(
-                    1.0, device=device, dtype=alpha_bar_t.dtype
-                )
+                alpha_bar_prev = self.scheduler.alphas_cumprod[
+                    torch.zeros(1, device=device, dtype=torch.long)
+                ].squeeze()
 
             z0_pred = self.scheduler.predict_x0(z_t, eps_pred, t_batch)
 
-            sigma = (
-                eta
-                * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar_t))
-                * torch.sqrt(1 - alpha_bar_t / alpha_bar_prev)
-            )
-            dir_xt = torch.sqrt((1 - alpha_bar_prev) - sigma**2) * eps_pred
+            sigma_arg = (
+                (1.0 - alpha_bar_prev)
+                / (1.0 - alpha_bar_t).clamp(min=1e-8)
+                * (1.0 - alpha_bar_t / alpha_bar_prev.clamp(min=1e-8))
+            ).clamp(min=0.0)
+            sigma = eta * torch.sqrt(sigma_arg)
+
+            dir_arg = (1.0 - alpha_bar_prev - sigma**2).clamp(min=0.0)
+            dir_xt = torch.sqrt(dir_arg) * eps_pred
 
             z_t = torch.sqrt(alpha_bar_prev) * z0_pred + dir_xt
             if eta > 0.0:
