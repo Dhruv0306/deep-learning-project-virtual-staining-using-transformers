@@ -188,6 +188,7 @@ class DiffusionConfig:
     cond_dropout_prob: float = 0.1
     cfg_scale: float = 2.0
     cond_patch_size: int = 16
+    min_snr_gamma: float = 5.0
 
 
 @dataclass
@@ -331,19 +332,22 @@ def get_dit_config() -> UVCGANConfig:
     standard v3 architecture settings defined in :class:`DiffusionConfig`.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 512
-    cfg.diffusion.dit_depth = 8
-    cfg.diffusion.dit_heads = 8
+    cfg.diffusion.dit_hidden_dim = 768
+    cfg.diffusion.dit_depth = 12
+    cfg.diffusion.dit_heads = 12
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
     cfg.diffusion.use_gradient_checkpointing = True
     cfg.diffusion.prediction_type = "v"
     cfg.diffusion.cond_dropout_prob = 0.1
-    cfg.diffusion.cfg_scale = 2.0
-    cfg.diffusion.cond_patch_size = 16
+    cfg.diffusion.cfg_scale = 2.5
+    cfg.diffusion.cond_patch_size = 8
+    cfg.diffusion.num_inference_steps = 100
+    cfg.diffusion.min_snr_gamma = 5.0
     cfg.data.batch_size = 4
-    cfg.training.accumulate_grads = 1
-    cfg.training.validation_fid_samples = 200
+    cfg.training.accumulate_grads = 2
+    cfg.training.validation_size = 100
+    cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
     return cfg
 
@@ -356,23 +360,25 @@ def get_dit_8gb_config() -> UVCGANConfig:
     checkpointing for DiT blocks and uses a lighter validation setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 384
-    cfg.diffusion.dit_depth = 6
-    cfg.diffusion.dit_heads = 6
+    cfg.diffusion.dit_hidden_dim = 640
+    cfg.diffusion.dit_depth = 10
+    cfg.diffusion.dit_heads = 10
     cfg.diffusion.dit_patch_size = 2
     cfg.diffusion.dit_mlp_ratio = 4.0
     cfg.diffusion.use_gradient_checkpointing = True
     cfg.diffusion.prediction_type = "v"
     cfg.diffusion.cond_dropout_prob = 0.1
-    cfg.diffusion.cfg_scale = 1.8
-    cfg.diffusion.cond_patch_size = 16
+    cfg.diffusion.cfg_scale = 2.5
+    cfg.diffusion.cond_patch_size = 8
+    cfg.diffusion.num_inference_steps = 100
+    cfg.diffusion.min_snr_gamma = 5.0
     cfg.data.batch_size = 4
-    cfg.training.accumulate_grads = 1
+    cfg.training.accumulate_grads = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.0
-    cfg.training.validation_size = 20
-    cfg.training.validation_fid_samples = 200
-    cfg.training.validation_fid_min_samples = 30
+    cfg.training.validation_size = 100
+    cfg.training.validation_fid_samples = 600
+    cfg.training.validation_fid_min_samples = 50
 
     return cfg
 

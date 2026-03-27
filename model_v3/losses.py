@@ -33,12 +33,13 @@ def compute_diffusion_loss(
     perceptual_loss: Optional[nn.Module],
     lambda_perc: float,
     prediction_type: str = "v",
+    min_snr_gamma: float = 0.0,
 ) -> Tuple[Tensor, Tensor, float]:
     """
      Compute diffusion training loss with optional perceptual term.
 
      Dataflow:
-          1) MSE prediction loss:
+          1) MSE prediction loss (optionally Min-SNR weighted):
               - eps mode: mse(eps_pred, noise)
               - v mode:   mse(v_pred, v_target)
           2) optional perceptual branch:
@@ -51,17 +52,35 @@ def compute_diffusion_loss(
         loss_perc_val: perceptual scalar as float (0.0 when disabled)
     """
     noise = noise.to(dtype=model_pred.dtype)
+
+    def _mse_per_sample(pred: Tensor, target: Tensor) -> Tensor:
+        dims = tuple(range(1, pred.dim()))
+        return ((pred - target) ** 2).mean(dim=dims)
+
+    def _min_snr_weights() -> Tensor:
+        alpha_bar = scheduler.get_alpha_bar(t).to(model_pred.dtype)
+        snr = alpha_bar / (1.0 - alpha_bar).clamp(min=1e-8)
+        snr_cap = torch.full_like(snr, float(min_snr_gamma))
+        if prediction_type == "v":
+            return torch.minimum(snr, snr_cap) / (snr + 1.0)
+        return torch.minimum(snr, snr_cap) / snr.clamp(min=1e-8)
+
     if prediction_type == "v":
         target = scheduler.get_v_target(z0.float(), noise.float(), t).to(model_pred.dtype)
-        loss_simple = F.mse_loss(model_pred, target).float()
+        loss_per = _mse_per_sample(model_pred, target)
         x0_pred = scheduler.predict_x0_from_v(z_t.float(), model_pred.float(), t)
     elif prediction_type == "eps":
-        loss_simple = F.mse_loss(model_pred, noise).float()
+        loss_per = _mse_per_sample(model_pred, noise)
         x0_pred = scheduler.predict_x0(z_t.float(), model_pred.float(), t)
     else:
         raise ValueError(
             f"prediction_type must be 'v' or 'eps', got {prediction_type!r}"
         )
+
+    if min_snr_gamma > 0.0:
+        loss_per = loss_per * _min_snr_weights()
+
+    loss_simple = loss_per.mean().float()
 
     loss = loss_simple
     loss_perc_val = 0.0
