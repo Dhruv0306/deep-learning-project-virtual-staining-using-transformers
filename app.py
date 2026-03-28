@@ -59,7 +59,7 @@ def is_v3_checkpoint(ckpt: dict) -> bool:
 
 def load_v3_components(checkpoint_path: str, device: str):
     """
-    Load v3 DiT + conditioning encoder + VAE + sampler components.
+    Load v3 DiT + VAE + sampler components.
 
     The function prefers a serialized diffusion config stored in the
     checkpoint under ``config`` and falls back to ``get_dit_config()`` when
@@ -67,9 +67,11 @@ def load_v3_components(checkpoint_path: str, device: str):
 
     Returns:
         tuple: ``(dit_model, cond_encoder, vae, sampler, diff_cfg)``.
+        ``cond_encoder`` is kept as ``None`` for backward compatibility,
+        since v3 now tokenizes conditions inside the generator.
     """
     from config import get_dit_config
-    from model_v3.generator import ConditionEncoder, getGeneratorV3
+    from model_v3.generator import getGeneratorV3
     from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
     from model_v3.vae_wrapper import VAEWrapper
 
@@ -79,12 +81,13 @@ def load_v3_components(checkpoint_path: str, device: str):
         diff_cfg = get_dit_config().diffusion
 
     dit_model = getGeneratorV3(diff_cfg, device=torch.device(device))
-    dit_model.load_state_dict(checkpoint["ema_state_dict"])
+    if "ema_state_dict" in checkpoint:
+        dit_model.load_state_dict(checkpoint["ema_state_dict"])
+    elif "dit_state_dict" in checkpoint:
+        dit_model.load_state_dict(checkpoint["dit_state_dict"])
+    else:
+        raise KeyError("Checkpoint missing both 'ema_state_dict' and 'dit_state_dict'.")
     dit_model.eval()
-
-    cond_encoder = ConditionEncoder(diff_cfg.dit_hidden_dim).to(device)
-    cond_encoder.load_state_dict(checkpoint["cond_encoder_state_dict"])
-    cond_encoder.eval()
 
     vae = VAEWrapper(diff_cfg.vae_model_id).to(device)
     vae.eval()
@@ -92,6 +95,7 @@ def load_v3_components(checkpoint_path: str, device: str):
     scheduler = DDPMScheduler(diff_cfg.num_timesteps, diff_cfg.beta_schedule).to(device)
     sampler = DDIMSampler(scheduler)
 
+    cond_encoder = None
     return dit_model, cond_encoder, vae, sampler, diff_cfg
 
 
@@ -481,6 +485,8 @@ def translate_image_from_patches_v3(
     device="cpu",
     batch_size=1,
     num_steps=50,
+    prediction_type="v",
+    cfg_scale=1.0,
 ):
     """
     Translate a whole-slide image using the v3 diffusion pipeline.
@@ -492,7 +498,8 @@ def translate_image_from_patches_v3(
     Args:
         input_image_path (str): Path to the source image.
         dit_model (nn.Module): DiT denoiser network.
-        cond_encoder (nn.Module): Conditioning encoder producing DiT context.
+        cond_encoder (nn.Module | None): Deprecated placeholder for backward
+            compatibility. The generator handles condition tokenization.
         vae (nn.Module): VAE decoder wrapper used to decode latent samples.
         sampler: DDIM sampler instance.
         transform (callable): Preprocessing transform returning normalized tensors.
@@ -526,14 +533,16 @@ def translate_image_from_patches_v3(
             batch_tensor = torch.stack([transform(p) for p in batch]).to(device)
 
             with autocast("cuda", enabled=use_amp):
-                c = cond_encoder(batch_tensor)
                 z0 = sampler.sample(
                     dit_model,
-                    c,
+                    batch_tensor,
                     shape=(batch_tensor.size(0), 4, 32, 32),
                     device=torch.device(device),
                     num_steps=num_steps,
                     eta=0.0,
+                    prediction_type=prediction_type,
+                    cfg_scale=cfg_scale,
+                    target_domain=1,
                 )
                 fake_B = vae.decode(z0)
 
@@ -587,7 +596,7 @@ if __name__ == "__main__":
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
 
     if model_version == 3:
-        if model_path is None:
+        if not model_path or not model_path.strip():
             raise ValueError("Checkpoint_path is required")
         dit_model, cond_encoder, vae, sampler, diff_cfg = load_v3_components(
             model_path, device=device
@@ -620,6 +629,8 @@ if __name__ == "__main__":
                 device=device,
                 batch_size=batch_size,
                 num_steps=diff_cfg.num_inference_steps,
+                prediction_type=diff_cfg.prediction_type,
+                cfg_scale=diff_cfg.cfg_scale,
             )
         )
 
