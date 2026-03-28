@@ -287,7 +287,110 @@ class DiTGenerator(nn.Module):
         return self.unpatchify(tokens)
 
 
-def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
+class DomainEmbedding(nn.Module):
+    """
+    Learned domain embedding for conditional A/B translation.
+
+    Domain ids:
+        0 -> domain A (Un-Stained)
+        1 -> domain B (Stained)
+    """
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.embed = nn.Embedding(2, hidden_dim)
+
+    def forward(self, domain_ids: Tensor) -> Tensor:
+        return self.embed(domain_ids)
+
+
+class CycleDiTGenerator(nn.Module):
+    """
+    Phase-0 CycleDiT wrapper:
+      - internal condition tokenizer
+      - learned domain embedding
+      - DiT backbone
+
+    Forward contract returns:
+      {
+        "v_pred": (N,4,32,32),
+        "x0_pred": (N,4,32,32) or None
+      }
+    """
+
+    def __init__(
+        self,
+        backbone: DiTGenerator,
+        cond_tokenizer: ConditionTokenizer,
+        domain_embedding: DomainEmbedding,
+    ):
+        super().__init__()
+        self.backbone = backbone
+        self.cond_tokenizer = cond_tokenizer
+        self.domain_embedding = domain_embedding
+
+    def _prepare_condition_tokens(self, condition: Tensor) -> Tensor:
+        # Condition can be a raw image (N,3,H,W) or precomputed tokens (N,L,Hd).
+        if condition.dim() == 4:
+            return self.cond_tokenizer(condition)
+        if condition.dim() == 3:
+            return condition
+        raise ValueError(
+            "condition must be an image tensor (N,3,H,W) or token tensor (N,L,Hd)."
+        )
+
+    def _prepare_domain_ids(
+        self,
+        target_domain: Tensor | int,
+        batch_size: int,
+        device: torch.device,
+    ) -> Tensor:
+        if isinstance(target_domain, int):
+            domain_ids = torch.full(
+                (batch_size,), int(target_domain), device=device, dtype=torch.long
+            )
+        else:
+            domain_ids = target_domain.to(device=device, dtype=torch.long)
+            if domain_ids.dim() == 0:
+                domain_ids = domain_ids.repeat(batch_size)
+        if domain_ids.shape[0] != batch_size:
+            raise ValueError("target_domain must broadcast to batch size.")
+        return domain_ids.clamp(min=0, max=1)
+
+    def forward(
+        self,
+        z_t: Tensor,
+        t: Tensor,
+        condition: Tensor,
+        target_domain: Tensor | int,
+        scheduler=None,
+        prediction_type: str = "v",
+    ) -> dict[str, Tensor | None]:
+        cond_tokens = self._prepare_condition_tokens(condition)
+        domain_ids = self._prepare_domain_ids(target_domain, z_t.size(0), z_t.device)
+
+        # Input-level domain conditioning (v3.1 can extend to per-block hooks).
+        domain_token = self.domain_embedding(domain_ids).to(cond_tokens.dtype)
+        cond_tokens = cond_tokens + domain_token.unsqueeze(1)
+
+        v_pred = self.backbone(z_t, t, cond_tokens)
+
+        x0_pred = None
+        if scheduler is not None:
+            if prediction_type == "v":
+                x0_pred = scheduler.predict_x0_from_v(z_t.float(), v_pred.float(), t)
+            elif prediction_type == "eps":
+                x0_pred = scheduler.predict_x0(z_t.float(), v_pred.float(), t)
+            else:
+                raise ValueError(
+                    f"prediction_type must be 'v' or 'eps', got {prediction_type!r}"
+                )
+            x0_pred = x0_pred.to(v_pred.dtype)
+
+        return {"v_pred": v_pred, "x0_pred": x0_pred}
+
+
+def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> CycleDiTGenerator:
     """
     Factory for DiTGenerator based on DiffusionConfig.
 
@@ -298,7 +401,7 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = DiTGenerator(
+    backbone = DiTGenerator(
         in_channels=4,
         hidden_dim=cfg.dit_hidden_dim,
         depth=cfg.dit_depth,
@@ -309,9 +412,22 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
         use_gradient_checkpointing=cfg.use_gradient_checkpointing,
     ).to(device)
 
+    cond_tokenizer = ConditionTokenizer(
+        hidden_dim=cfg.dit_hidden_dim,
+        image_size=256,
+        patch_size=cfg.cond_patch_size,
+    ).to(device)
+    domain_embedding = DomainEmbedding(cfg.dit_hidden_dim).to(device)
+
+    model = CycleDiTGenerator(
+        backbone=backbone,
+        cond_tokenizer=cond_tokenizer,
+        domain_embedding=domain_embedding,
+    ).to(device)
+
     init_weights_v2(model)
-    nn.init.zeros_(model.head.weight)
-    nn.init.zeros_(model.head.bias)
+    nn.init.zeros_(model.backbone.head.weight)
+    nn.init.zeros_(model.backbone.head.bias)
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f"[getGeneratorV3] DiT params: {num_params/1e6:.2f}M")
@@ -320,9 +436,9 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> DiTGenerator:
     with torch.no_grad():
         z_t = torch.randn(1, 4, 32, 32, device=device)
         t = torch.randint(0, 1000, (1,), device=device)
-        cond_len = (256 // max(1, cfg.cond_patch_size)) ** 2
-        c = torch.randn(1, cond_len, cfg.dit_hidden_dim, device=device)
-        _ = model(z_t, t, c)
+        x = torch.randn(1, 3, 256, 256, device=device)
+        out = model(z_t, t, x, target_domain=1)
+        _ = out["v_pred"]
 
     return model
 

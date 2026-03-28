@@ -191,6 +191,30 @@ class DiffusionConfig:
     min_snr_gamma: float = 5.0
     perceptual_every_n_steps: int = 4
     perceptual_batch_fraction: float = 0.5
+    # --- CycleDiT v3 (phase-0/phase-1/phase-2) controls ---
+    lambda_denoising: float = 1.0
+    lambda_adv_v3: float = 0.5
+    lambda_adv_warmup_steps: int = 3000
+    lambda_cycle_v3: float = 5.0
+    lambda_identity_v3_start: float = 1.0
+    lambda_identity_v3_end: float = 0.0
+    identity_decay_end_ratio: float = 0.3
+    cycle_ddim_steps: int = 10
+    cycle_ddim_eta: float = 0.0
+    use_r1_penalty: bool = True
+    r1_gamma: float = 10.0
+    r1_interval: int = 16
+    adaptive_d_update: bool = True
+    adaptive_d_loss_threshold: float = 0.1
+    grad_clip_norm_g: float = 1.0
+    # ProjectionDiscriminator toggles
+    disc_use_local: bool = True
+    disc_use_global: bool = True
+    disc_use_fft: bool = True
+    disc_base_channels: int = 64
+    disc_global_base_channels: int = 64
+    disc_fft_base_channels: int = 32
+    disc_n_layers: int = 3
 
 
 @dataclass
@@ -346,6 +370,7 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.cond_patch_size = 8
     cfg.diffusion.num_inference_steps = 100
     cfg.diffusion.min_snr_gamma = 5.0
+    cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.diffusion.perceptual_every_n_steps = 4
     cfg.diffusion.perceptual_batch_fraction = 0.5
     cfg.data.batch_size = 4
@@ -381,7 +406,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.data.batch_size = 4
     cfg.training.accumulate_grads = 1
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.03
+    cfg.diffusion.lambda_perceptual_v3 = 0.00
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50

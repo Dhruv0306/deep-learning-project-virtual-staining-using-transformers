@@ -192,6 +192,7 @@ class DDIMSampler:
         prediction_type: str = "v",
         cfg_scale: float = 1.0,
         uncond_condition: Tensor | None = None,
+        target_domain: int = 1,
     ) -> Tensor:
         """
         Sample a denoised latent z0 from pure noise using DDIM.
@@ -218,13 +219,22 @@ class DDIMSampler:
 
         for i, t in enumerate(timesteps):
             t_batch = torch.full((b,), int(t.item()), device=device, dtype=torch.long)
-            cond_out = model(z_t, t_batch, condition)
-            model_out = cond_out
+            cond_out = model(z_t, t_batch, condition, target_domain=target_domain)
+            cond_out_tensor = cond_out["v_pred"] if isinstance(cond_out, dict) else cond_out
+            model_out = cond_out_tensor
             if cfg_scale > 1.0:
                 if uncond_condition is None:
                     uncond_condition = torch.zeros_like(condition)
-                uncond_out = model(z_t, t_batch, uncond_condition)
-                model_out = uncond_out + cfg_scale * (cond_out - uncond_out)
+                uncond_out = model(
+                    z_t,
+                    t_batch,
+                    uncond_condition,
+                    target_domain=target_domain,
+                )
+                uncond_out = (
+                    uncond_out["v_pred"] if isinstance(uncond_out, dict) else uncond_out
+                )
+                model_out = uncond_out + cfg_scale * (cond_out_tensor - uncond_out)
 
             if prediction_type == "v":
                 eps_pred = self.scheduler.predict_eps_from_v(z_t, model_out, t_batch)

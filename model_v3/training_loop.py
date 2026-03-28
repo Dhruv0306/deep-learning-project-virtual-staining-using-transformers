@@ -28,13 +28,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 from model_v2.losses import VGGPerceptualLossV2
 from config import UVCGANConfig, get_dit_config
-from model_v3.data_loader import getDataLoaderV3
+from shared.data_loader import getDataLoader
 from shared.EarlyStopping import EarlyStopping
 from model_v3.history_utils import append_history_to_csv_v3, load_history_from_csv_v3
 from shared.metrics import MetricsCalculator
 from shared.validation import save_images_with_title
 
-from model_v3.generator import ConditionTokenizer, getGeneratorV3
+from model_v3.generator import getGeneratorV3
 from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
 from model_v2.generator import init_weights_v2
 from model_v3.vae_wrapper import VAEWrapper
@@ -70,7 +70,6 @@ def _global_grad_norm(parameters) -> float:
 def _run_validation_v3(
     epoch: int,
     ema_model: torch.nn.Module,
-    cond_tokenizer: torch.nn.Module,
     vae: VAEWrapper,
     sampler: DDIMSampler,
     test_loader,
@@ -88,7 +87,6 @@ def _run_validation_v3(
     is_test: bool = False,
 ):
     ema_model.eval()
-    cond_tokenizer.eval()
     vae.eval()
 
     print(f"[{ 'Testing' if is_test else 'Validation' }] Starting run at epoch {epoch}")
@@ -109,11 +107,10 @@ def _run_validation_v3(
             real_A = batch["A"].to(device)
             real_B = batch["B"].to(device)
 
-            c = cond_tokenizer(real_A)
-            uncond = torch.zeros_like(c)
+            uncond = torch.zeros_like(real_A)
             z0 = sampler.sample(
                 ema_model,
-                c,
+                real_A,
                 shape=(real_A.size(0), 4, 32, 32),
                 device=device,
                 num_steps=num_steps,
@@ -131,9 +128,7 @@ def _run_validation_v3(
             fake_B_list.append(fake_B)
 
             if i < num_samples:
-                row = torch.cat(
-                    [real_A[:1], fake_B[:1], real_B[:1]], dim=0
-                ).cpu()
+                row = torch.cat([real_A[:1], fake_B[:1], real_B[:1]], dim=0).cpu()
                 out_path = os.path.join(save_dir, f"image_{i + 1}_A.png")
                 save_images_with_title(
                     row,
@@ -167,7 +162,6 @@ def _run_validation_v3(
     print(f"[{prefix}] Completed run at epoch {epoch}")
 
     # ema_model.train()
-    cond_tokenizer.train()
     return avg_metrics
 
 
@@ -212,7 +206,9 @@ def train_v3(
     assert tcfg.num_epochs is not None, "num_epochs must be specified"
     assert tcfg.epoch_size is not None, "epoch_size must be specified"
     assert tcfg.validation_size is not None, "validation_size must be specified"
-    assert tcfg.validation_warmup_epochs < tcfg.early_stopping_warmup, "validation_warmup_epochs must be less than early_stopping_warmup"
+    assert (
+        tcfg.validation_warmup_epochs < tcfg.early_stopping_warmup
+    ), "validation_warmup_epochs must be less than early_stopping_warmup"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
@@ -220,7 +216,7 @@ def train_v3(
     torch.backends.cudnn.allow_tf32 = True
 
     # ---- Data ----
-    train_loader, test_loader = getDataLoaderV3(
+    train_loader, test_loader = getDataLoader(
         epoch_size=tcfg.epoch_size,
         image_size=dtcfg.image_size,
         batch_size=dtcfg.batch_size,
@@ -231,13 +227,6 @@ def train_v3(
     vae = VAEWrapper(dcfg.vae_model_id).to(device)
     vae.eval()
 
-    cond_tokenizer = ConditionTokenizer(
-        hidden_dim=dcfg.dit_hidden_dim,
-        image_size=dtcfg.image_size,
-        patch_size=dcfg.cond_patch_size,
-    ).to(device)
-    init_weights_v2(cond_tokenizer)
-
     dit_model = getGeneratorV3(dcfg, device=device)
     ema_model = copy.deepcopy(dit_model).to(device)
     ema_model.requires_grad_(False)
@@ -247,7 +236,7 @@ def train_v3(
 
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(
-        list(dit_model.parameters()) + list(cond_tokenizer.parameters()),
+        list(dit_model.parameters()),
         lr=1e-4,
         betas=(0.9, 0.999),
         weight_decay=0.01,
@@ -317,12 +306,14 @@ def train_v3(
     for epoch in range(tcfg.num_epochs):
         print()
         dit_model.train()
-        cond_tokenizer.train()
 
         epoch_step = {}
         epoch_loss = 0.0
         epoch_loss_perc = 0.0
         epoch_grad_norm = 0.0
+        t_epoch_sum = 0.0
+        t_epoch_sq_sum = 0.0
+        t_epoch_count = 0
         accum_count = 0
 
         writer.add_scalar("Epoch", epoch + 1, epoch + 1)
@@ -336,31 +327,66 @@ def train_v3(
                 continue
 
             with torch.no_grad():
-                z0 = vae.encode(real_B)
+                z0_A = vae.encode(real_A)
+                z0_B = vae.encode(real_B)
 
-            t = torch.randint(0, dcfg.num_timesteps, (real_A.size(0),), device=device)
-            noise = torch.randn_like(z0)
-            z_t = scheduler.add_noise(z0, noise, t)
+            t_A = torch.randint(0, dcfg.num_timesteps, (real_A.size(0),), device=device)
+            t_B = torch.randint(0, dcfg.num_timesteps, (real_B.size(0),), device=device)
+            noise_A = torch.randn_like(z0_A)
+            noise_B = torch.randn_like(z0_B)
+            z_t_A = scheduler.add_noise(z0_A, noise_A, t_A)
+            z_t_B = scheduler.add_noise(z0_B, noise_B, t_B)
+
+            t_epoch_sum += float(t_A.float().sum().item() + t_B.float().sum().item())
+            t_epoch_sq_sum += float(
+                (t_A.float().pow(2).sum().item() + t_B.float().pow(2).sum().item())
+            )
+            t_epoch_count += int(t_A.numel() + t_B.numel())
 
             if accum_count == 0:
                 optimizer.zero_grad(set_to_none=True)
 
             with autocast("cuda", enabled=use_amp):
-                c = cond_tokenizer(real_A)
-                if dcfg.cond_dropout_prob > 0.0:
-                    drop_mask = (
-                        torch.rand((c.size(0), 1, 1), device=device)
-                        < dcfg.cond_dropout_prob
-                    ).to(c.dtype)
-                    c = c * (1.0 - drop_mask)
-                model_pred = dit_model(z_t, t, c)
+                out_A2B = dit_model(
+                    z_t_A,
+                    t_A,
+                    real_A,
+                    target_domain=1,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
+                out_B2A = dit_model(
+                    z_t_B,
+                    t_B,
+                    real_B,
+                    target_domain=0,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
 
-            loss, loss_simple, loss_perc_val = compute_diffusion_loss(
-                z0=z0,
-                z_t=z_t,
-                t=t,
-                noise=noise,
-                model_pred=model_pred,
+            loss_A2B, loss_simple_A2B, loss_perc_A2B = compute_diffusion_loss(
+                z0=z0_A,
+                z_t=z_t_A,
+                t=t_A,
+                noise=noise_A,
+                model_pred=out_A2B["v_pred"],
+                real_B=real_A,
+                scheduler=scheduler,
+                vae=vae,
+                perceptual_loss=perceptual_loss,
+                lambda_perc=dcfg.lambda_perceptual_v3,
+                prediction_type=dcfg.prediction_type,
+                min_snr_gamma=dcfg.min_snr_gamma,
+                global_step=(epoch * len(train_loader) + i),
+                perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
+                perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
+            )
+            loss_B2A, loss_simple_B2A, loss_perc_B2A = compute_diffusion_loss(
+                z0=z0_B,
+                z_t=z_t_B,
+                t=t_B,
+                noise=noise_B,
+                model_pred=out_B2A["v_pred"],
                 real_B=real_B,
                 scheduler=scheduler,
                 vae=vae,
@@ -372,6 +398,10 @@ def train_v3(
                 perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
                 perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
+
+            loss = 0.5 * (loss_A2B + loss_B2A)
+            loss_simple = 0.5 * (loss_simple_A2B + loss_simple_B2A)
+            loss_perc_val = 0.5 * (loss_perc_A2B + loss_perc_B2A)
 
             if not torch.isfinite(loss):
                 print(f"[warn] non-finite loss at epoch {epoch+1} batch {i}, skipping")
@@ -386,15 +416,18 @@ def train_v3(
             if accum_count == accumulate or (
                 i == len(train_loader) and accum_count > 0
             ):
-                if tcfg.grad_clip_norm > 0.0:
+                grad_clip = (
+                    dcfg.grad_clip_norm_g
+                    if getattr(dcfg, "grad_clip_norm_g", None) is not None
+                    else tcfg.grad_clip_norm
+                )
+                if grad_clip > 0.0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
-                        list(dit_model.parameters()) + list(cond_tokenizer.parameters()),
-                        tcfg.grad_clip_norm,
+                        list(dit_model.parameters()),
+                        grad_clip,
                     )
-                grad_norm = _global_grad_norm(
-                    list(dit_model.parameters()) + list(cond_tokenizer.parameters())
-                )
+                grad_norm = _global_grad_norm(list(dit_model.parameters()))
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -408,8 +441,11 @@ def train_v3(
 
             epoch_step[i] = {
                 "Batch": i,
+                "Loss_DiT_A2B": float(loss_simple_A2B.item()),
+                "Loss_DiT_B2A": float(loss_simple_B2A.item()),
                 "Loss_DiT": float(loss_simple.item()),
                 "Loss_Perceptual": float(loss_perc_val),
+                "Loss Total": float(loss.item()),
                 "GradNorm": float(grad_norm),
             }
             epoch_loss += float(loss_simple.item())
@@ -417,14 +453,27 @@ def train_v3(
             epoch_grad_norm += float(grad_norm)
 
             if i == 1 or i == len(train_loader) or i % 50 == 0:
-                print(
-                    f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
-                    f"Batch [{i}/{len(train_loader)}] "
-                    f"Loss DiT: {loss_simple.item():.4f} "
-                    f"Loss Perceptual: {loss_perc_val:.4f} "
-                    f"Loss Total: {loss.item():.4f} "
-                    f"GradNorm: {grad_norm:.4f}"
-                )
+                if dcfg.lambda_perceptual_v3 > 0.0:
+                    print(
+                        f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
+                        f"Batch [{i}/{len(train_loader)}] "
+                        f"Loss A2B: {loss_simple_A2B.item():.4f} "
+                        f"Loss B2A: {loss_simple_B2A.item():.4f} "
+                        f"Loss DiT: {loss_simple.item():.4f} "
+                        f"Loss Perceptual: {loss_perc_val:.4f} "
+                        f"Loss Total: {loss.item():.4f} "
+                        f"GradNorm: {grad_norm:.4f}"
+                    )
+                else:
+                    print(
+                        f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
+                        f"Batch [{i}/{len(train_loader)}] "
+                        f"Loss A2B: {loss_simple_A2B.item():.4f} "
+                        f"Loss B2A: {loss_simple_B2A.item():.4f} "
+                        f"Loss DiT: {loss_simple.item():.4f} "
+                        f"Loss Total: {loss.item():.4f} "
+                        f"GradNorm: {grad_norm:.4f}"
+                    )
 
         n_batches = max(1, len(train_loader))
         avg_loss = epoch_loss / n_batches
@@ -435,6 +484,12 @@ def train_v3(
         writer.add_scalar("Loss/DiT", avg_loss, epoch + 1)
         writer.add_scalar("Loss/Perceptual", avg_loss_perc, epoch + 1)
         writer.add_scalar("Diagnostics/GradNorm", avg_grad_norm, epoch + 1)
+        if t_epoch_count > 0:
+            t_mean = t_epoch_sum / t_epoch_count
+            t_var = max(0.0, (t_epoch_sq_sum / t_epoch_count) - (t_mean * t_mean))
+            t_std = math.sqrt(t_var)
+            writer.add_scalar("Diagnostics/TimestepMean", t_mean, epoch + 1)
+            writer.add_scalar("Diagnostics/TimestepStd", t_std, epoch + 1)
 
         lr_scheduler.step()
         current_lr = lr_scheduler.get_last_lr()[0]
@@ -456,8 +511,6 @@ def train_v3(
                 {
                     "epoch": epoch + 1,
                     "dit_state_dict": dit_model.state_dict(),
-                    "cond_tokenizer_state_dict": cond_tokenizer.state_dict(),
-                    "cond_encoder_state_dict": cond_tokenizer.state_dict(),
                     "ema_state_dict": ema_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": dcfg,
@@ -472,7 +525,6 @@ def train_v3(
             val_metrics = _run_validation_v3(
                 epoch=epoch + 1,
                 ema_model=ema_model,
-                cond_tokenizer=cond_tokenizer,
                 vae=vae,
                 sampler=sampler,
                 test_loader=test_loader,
@@ -517,8 +569,6 @@ def train_v3(
         {
             "epoch": stopped_epoch,
             "dit_state_dict": dit_model.state_dict(),
-            "cond_tokenizer_state_dict": cond_tokenizer.state_dict(),
-            "cond_encoder_state_dict": cond_tokenizer.state_dict(),
             "ema_state_dict": ema_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "config": dcfg,
@@ -533,7 +583,6 @@ def train_v3(
     _run_validation_v3(
         epoch=stopped_epoch,
         ema_model=ema_model,
-        cond_tokenizer=cond_tokenizer,
         vae=vae,
         sampler=sampler,
         test_loader=test_loader,
@@ -556,7 +605,4 @@ def train_v3(
     history = load_history_from_csv_v3(history_csv_path)
 
     writer.close()
-    return history, dit_model, ema_model, cond_tokenizer
-
-
-
+    return history, dit_model, ema_model, None
