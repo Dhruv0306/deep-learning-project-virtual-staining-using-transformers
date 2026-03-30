@@ -164,6 +164,7 @@ class DataConfig:
     image_size: int = 256
     batch_size: int = 4
     num_workers: int = 4
+    prefetch_factor: int = 2
     augment: bool = True
 
 
@@ -210,7 +211,7 @@ class DiffusionConfig:
     # ProjectionDiscriminator toggles
     disc_use_local: bool = True
     disc_use_global: bool = True
-    disc_use_fft: bool = True
+    disc_use_fft: bool = False
     disc_base_channels: int = 64
     disc_global_base_channels: int = 64
     disc_fft_base_channels: int = 32
@@ -403,8 +404,11 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
+    # Slightly higher worker count helps keep GPU fed on fast local SSDs.
+    cfg.data.num_workers = 6
+    cfg.data.prefetch_factor = 4
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.00
     cfg.training.validation_size = 20

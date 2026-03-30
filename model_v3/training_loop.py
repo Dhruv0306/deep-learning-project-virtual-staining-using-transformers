@@ -28,7 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 
 from model_v2.losses import VGGPerceptualLossV2
-from config import UVCGANConfig, get_dit_config
+from config import UVCGANConfig, get_dit_config, get_dit_8gb_config
 from shared.data_loader import getDataLoader
 from shared.EarlyStopping import EarlyStopping
 from shared.replay_buffer import ReplayBuffer
@@ -117,71 +117,65 @@ def _r1_penalty_loss(
     return 0.5 * gamma * grad_penalty
 
 
-def _sample_ddim_latent_differentiable(
+def _ddim_shortcut_from_xt(
     model: torch.nn.Module,
     scheduler: DDPMScheduler,
+    z_t_start: torch.Tensor,
+    t_start: torch.Tensor,
     condition: torch.Tensor,
     target_domain: int,
-    num_steps: int,
     prediction_type: str,
-    cfg_scale: float,
+    num_steps: int,
     eta: float,
 ) -> torch.Tensor:
     """
-    Differentiable DDIM sampler for train-time GAN supervision.
+    Deterministic short-DDIM denoising from a provided x_t start.
 
-    Unlike DDIMSampler.sample (which is no-grad by design), this path keeps
-    autograd enabled so generator adversarial gradients flow through denoising.
+    This keeps Phase-2 cycle semantics by starting from x_t built with
+    shared (epsilon, t), then denoising to t=0 in a short path controlled
+    by (num_steps, eta).
     """
-    b = condition.size(0)
-    device = condition.device
-    z_t = torch.randn((b, 4, 32, 32), device=device, dtype=condition.dtype)
+    z_t = z_t_start
+    steps = max(1, int(num_steps))
 
-    timesteps = torch.linspace(0, scheduler.num_timesteps - 1, num_steps, device=device)
-    timesteps = timesteps.long().flip(0)
+    # Build per-sample time trajectory from each sample's t_start down to 0.
+    t_start_f = t_start.float()
+    for k in range(steps):
+        frac_cur = float(steps - k) / float(steps)
+        frac_prev = float(max(steps - k - 1, 0)) / float(steps)
 
-    uncond_condition = torch.zeros_like(condition) if cfg_scale > 1.0 else None
+        t_cur = torch.round(t_start_f * frac_cur).long().clamp(
+            min=0, max=scheduler.num_timesteps - 1
+        )
+        t_prev = torch.round(t_start_f * frac_prev).long().clamp(
+            min=0, max=scheduler.num_timesteps - 1
+        )
 
-    for i, t in enumerate(timesteps):
-        t_batch = torch.full((b,), int(t.item()), device=device, dtype=torch.long)
-
-        cond_out = model(z_t, t_batch, condition, target_domain=target_domain)
-        cond_v = cond_out["v_pred"] if isinstance(cond_out, dict) else cond_out
-
-        model_out = cond_v
-        if cfg_scale > 1.0:
-            uncond_out = model(
-                z_t,
-                t_batch,
-                uncond_condition,
-                target_domain=target_domain,
-            )
-            uncond_v = (
-                uncond_out["v_pred"] if isinstance(uncond_out, dict) else uncond_out
-            )
-            model_out = uncond_v + cfg_scale * (cond_v - uncond_v)
+        out = model(
+            z_t,
+            t_cur,
+            condition,
+            target_domain=target_domain,
+            scheduler=scheduler,
+            prediction_type=prediction_type,
+        )
+        v_or_eps = out["v_pred"] if isinstance(out, dict) else out
 
         if prediction_type == "v":
-            eps_pred = scheduler.predict_eps_from_v(
-                z_t.float(), model_out.float(), t_batch
-            )
+            eps_pred = scheduler.predict_eps_from_v(z_t.float(), v_or_eps.float(), t_cur)
         elif prediction_type == "eps":
-            eps_pred = model_out.float()
+            eps_pred = v_or_eps.float()
         else:
             raise ValueError(
                 f"prediction_type must be 'v' or 'eps', got {prediction_type!r}"
             )
 
-        alpha_bar_t = scheduler.alphas_cumprod[t]
-        if i + 1 < len(timesteps):
-            t_prev = timesteps[i + 1]
-            alpha_bar_prev = scheduler.alphas_cumprod[t_prev]
-        else:
-            alpha_bar_prev = scheduler.alphas_cumprod[
-                torch.zeros(1, device=device, dtype=torch.long)
-            ].squeeze()
+        z0_pred = scheduler.predict_x0(z_t.float(), eps_pred, t_cur)
 
-        z0_pred = scheduler.predict_x0(z_t.float(), eps_pred, t_batch)
+        alpha_bar_t = scheduler._extract(scheduler.alphas_cumprod, t_cur, z_t.shape).float()
+        alpha_bar_prev = scheduler._extract(
+            scheduler.alphas_cumprod, t_prev, z_t.shape
+        ).float()
 
         sigma_arg = (
             (1.0 - alpha_bar_prev)
@@ -198,6 +192,125 @@ def _sample_ddim_latent_differentiable(
             z_t = z_t + sigma * torch.randn_like(z_t)
 
     return z_t
+
+
+def _compute_cycle_loss(
+    model: torch.nn.Module,
+    scheduler: DDPMScheduler,
+    vae: VAEWrapper,
+    z0_fake_B: torch.Tensor,
+    z0_fake_A: torch.Tensor,
+    noise_A: torch.Tensor,
+    noise_B: torch.Tensor,
+    t_A: torch.Tensor,
+    t_B: torch.Tensor,
+    fake_B_img: torch.Tensor,
+    fake_A_img: torch.Tensor,
+    real_A: torch.Tensor,
+    real_B: torch.Tensor,
+    prediction_type: str,
+    cycle_ddim_steps: int,
+    cycle_ddim_eta: float,
+) -> torch.Tensor:
+    """
+    Compute cycle consistency loss using shared (epsilon, t) from primary passes.
+
+    rec_A = G(fake_B.detach(), A, same noise_A, same t_A)
+    rec_B = G(fake_A.detach(), B, same noise_B, same t_B)
+    """
+    z_t_rec_A = scheduler.add_noise(z0_fake_B.detach(), noise_A, t_A)
+    z_t_rec_B = scheduler.add_noise(z0_fake_A.detach(), noise_B, t_B)
+
+    z0_rec_A = _ddim_shortcut_from_xt(
+        model=model,
+        scheduler=scheduler,
+        z_t_start=z_t_rec_A,
+        t_start=t_A,
+        condition=fake_B_img.detach(),
+        target_domain=0,
+        prediction_type=prediction_type,
+        num_steps=cycle_ddim_steps,
+        eta=cycle_ddim_eta,
+    )
+    z0_rec_B = _ddim_shortcut_from_xt(
+        model=model,
+        scheduler=scheduler,
+        z_t_start=z_t_rec_B,
+        t_start=t_B,
+        condition=fake_A_img.detach(),
+        target_domain=1,
+        prediction_type=prediction_type,
+        num_steps=cycle_ddim_steps,
+        eta=cycle_ddim_eta,
+    )
+
+    rec_A = vae.decode(z0_rec_A.clamp(-1.0, 1.0)).clamp(-1.0, 1.0).float()
+    rec_B = vae.decode(z0_rec_B.clamp(-1.0, 1.0)).clamp(-1.0, 1.0).float()
+
+    loss_cyc = F.l1_loss(rec_A, real_A) + F.l1_loss(rec_B, real_B)
+    return loss_cyc
+
+
+def _compute_identity_loss(
+    model: torch.nn.Module,
+    scheduler: DDPMScheduler,
+    vae: VAEWrapper,
+    z0_A: torch.Tensor,
+    z0_B: torch.Tensor,
+    real_A: torch.Tensor,
+    real_B: torch.Tensor,
+    device: torch.device,
+    prediction_type: str,
+) -> torch.Tensor:
+    """
+    Compute identity loss: L_id = ||idt_A - real_A||_1 + ||idt_B - real_B||_1.
+
+    Identity at t=0, epsilon=0: model should output minimal change in same domain.
+    """
+    b = z0_A.size(0)
+    t_idt = torch.zeros(b, device=device, dtype=torch.long)
+
+    out_idt_A = model(
+        z0_A,
+        t_idt,
+        real_A,
+        target_domain=0,
+        scheduler=scheduler,
+        prediction_type=prediction_type,
+    )
+    out_idt_B = model(
+        z0_B,
+        t_idt,
+        real_B,
+        target_domain=1,
+        scheduler=scheduler,
+        prediction_type=prediction_type,
+    )
+
+    z0_idt_A = out_idt_A["x0_pred"] if isinstance(out_idt_A, dict) else out_idt_A
+    z0_idt_B = out_idt_B["x0_pred"] if isinstance(out_idt_B, dict) else out_idt_B
+
+    idt_A = vae.decode(z0_idt_A).clamp(-1.0, 1.0)
+    idt_B = vae.decode(z0_idt_B).clamp(-1.0, 1.0)
+
+    loss_idt = F.l1_loss(idt_A, real_A) + F.l1_loss(idt_B, real_B)
+    return loss_idt
+
+
+def _compute_identity_weight(
+    epoch: int, num_epochs: int, l_start: float, l_end: float, decay_ratio: float
+) -> float:
+    """
+    Compute identity weight with linear decay.
+
+    Decays from l_start to l_end over first (decay_ratio * num_epochs) epochs,
+    then stays at l_end.
+    """
+    decay_end_epoch = int(num_epochs * decay_ratio)
+    if epoch < decay_end_epoch:
+        progress = epoch / max(1, decay_end_epoch)
+        return l_start + (l_end - l_start) * progress
+    return l_end
 
 
 def _run_validation_v3(
@@ -383,7 +496,7 @@ def train_v3(
         tuple: ``(history, dit_model, ema_model, cond_tokenizer)``.
     """
     if cfg is None:
-        cfg = get_dit_config()
+        cfg = get_dit_8gb_config()
 
     if epoch_size is not None:
         cfg.training.epoch_size = epoch_size
@@ -419,6 +532,7 @@ def train_v3(
         image_size=dtcfg.image_size,
         batch_size=dtcfg.batch_size,
         num_workers=dtcfg.num_workers,
+        prefetch_factor=dtcfg.prefetch_factor,
     )
 
     # ---- Models ----
@@ -686,34 +800,70 @@ def train_v3(
                 warm = 1.0
             lambda_adv_curr = dcfg.lambda_adv_v3 * warm
 
+            # --- Phase 2: Cycle and Identity Losses ---
+            lambda_identity_curr = _compute_identity_weight(
+                epoch=epoch,
+                num_epochs=tcfg.num_epochs,
+                l_start=dcfg.lambda_identity_v3_start,
+                l_end=dcfg.lambda_identity_v3_end,
+                decay_ratio=dcfg.identity_decay_end_ratio,
+            )
+
             with autocast("cuda", enabled=use_amp):
-                z0_fake_B = _sample_ddim_latent_differentiable(
-                    model=dit_model,
-                    scheduler=scheduler,
-                    condition=real_A,
-                    target_domain=1,
-                    num_steps=max(1, dcfg.cycle_ddim_steps),
-                    prediction_type=dcfg.prediction_type,
-                    cfg_scale=dcfg.cfg_scale,
-                    eta=dcfg.cycle_ddim_eta,
-                )
-                z0_fake_A = _sample_ddim_latent_differentiable(
-                    model=dit_model,
-                    scheduler=scheduler,
-                    condition=real_B,
-                    target_domain=0,
-                    num_steps=max(1, dcfg.cycle_ddim_steps),
-                    prediction_type=dcfg.prediction_type,
-                    cfg_scale=dcfg.cfg_scale,
-                    eta=dcfg.cycle_ddim_eta,
-                )
-                fake_B_img = vae.decode(z0_fake_B).clamp(-1.0, 1.0)
-                fake_A_img = vae.decode(z0_fake_A).clamp(-1.0, 1.0)
+                # Phase 2 rule: all non-denoising losses use x0 reconstructions.
+                z0_fake_B = out_A2B["x0_pred"].clamp(-1.0, 1.0)
+                z0_fake_A = out_B2A["x0_pred"].clamp(-1.0, 1.0)
+                # Keep discriminator inputs in fp32 to avoid dtype mismatch in conv layers.
+                fake_B_img = vae.decode(z0_fake_B).clamp(-1.0, 1.0).float()
+                fake_A_img = vae.decode(z0_fake_A).clamp(-1.0, 1.0).float()
                 loss_adv_G_B = _lsgan_gen_loss(D_B(fake_B_img))
                 loss_adv_G_A = _lsgan_gen_loss(D_A(fake_A_img))
                 loss_adv_G = 0.5 * (loss_adv_G_A + loss_adv_G_B)
 
-            loss = dcfg.lambda_denoising * denoise_loss + lambda_adv_curr * loss_adv_G
+            # Cycle consistency loss
+            with autocast("cuda", enabled=use_amp):
+                loss_cyc = _compute_cycle_loss(
+                    model=dit_model,
+                    scheduler=scheduler,
+                    vae=vae,
+                    z0_fake_B=z0_fake_B,
+                    z0_fake_A=z0_fake_A,
+                    noise_A=noise_A,
+                    noise_B=noise_B,
+                    t_A=t_A,
+                    t_B=t_B,
+                    fake_B_img=fake_B_img,
+                    fake_A_img=fake_A_img,
+                    real_A=real_A,
+                    real_B=real_B,
+                    prediction_type=dcfg.prediction_type,
+                    cycle_ddim_steps=dcfg.cycle_ddim_steps,
+                    cycle_ddim_eta=dcfg.cycle_ddim_eta,
+                )
+
+            # Identity loss (only if lambda > 0)
+            loss_id = torch.tensor(0.0, device=device, dtype=torch.float32)
+            if lambda_identity_curr > 0.0:
+                with autocast("cuda", enabled=use_amp):
+                    loss_id = _compute_identity_loss(
+                        model=dit_model,
+                        scheduler=scheduler,
+                        vae=vae,
+                        z0_A=z0_A,
+                        z0_B=z0_B,
+                        real_A=real_A,
+                        real_B=real_B,
+                        device=device,
+                        prediction_type=dcfg.prediction_type,
+                    )
+
+            # Total generator loss: denoising + adversarial + cycle + identity
+            loss = (
+                dcfg.lambda_denoising * denoise_loss
+                + lambda_adv_curr * loss_adv_G
+                + dcfg.lambda_cycle_v3 * loss_cyc
+                + lambda_identity_curr * loss_id
+            )
 
             if not torch.isfinite(loss):
                 print(f"[warn] non-finite loss at epoch {epoch+1} batch {i}, skipping")
@@ -806,9 +956,12 @@ def train_v3(
                 "Loss_DiT_B2A": float(loss_simple_B2A.item()),
                 "Loss_DiT": float(loss_simple.item()),
                 "Loss_G_Adv": float(loss_adv_G.item()),
+                "Loss_Cyc": float(loss_cyc.item()),
+                "Loss_Id": float(loss_id.item()),
                 "Loss_D_A": float(loss_D_A.item()),
                 "Loss_D_B": float(loss_D_B.item()),
                 "Lambda_Adv": float(lambda_adv_curr),
+                "Lambda_Id": float(lambda_identity_curr),
                 "Loss_Perceptual": float(loss_perc_val),
                 "Loss Total": float(loss.item()),
                 "GradNorm": float(grad_norm),
@@ -826,6 +979,8 @@ def train_v3(
                         f"Loss B2A: {loss_simple_B2A.item():.4f} "
                         f"Loss DiT: {loss_simple.item():.4f} "
                         f"Loss G_adv: {loss_adv_G.item():.4f} "
+                        f"Loss Cyc: {loss_cyc.item():.4f} "
+                        f"Loss Id: {loss_id.item():.4f} "
                         f"Loss D_A: {loss_D_A.item():.4f} "
                         f"Loss D_B: {loss_D_B.item():.4f} "
                         f"Loss Perceptual: {loss_perc_val:.4f} "
@@ -840,6 +995,8 @@ def train_v3(
                         f"Loss B2A: {loss_simple_B2A.item():.4f} "
                         f"Loss DiT: {loss_simple.item():.4f} "
                         f"Loss G_adv: {loss_adv_G.item():.4f} "
+                        f"Loss Cyc: {loss_cyc.item():.4f} "
+                        f"Loss Id: {loss_id.item():.4f} "
                         f"Loss D_A: {loss_D_A.item():.4f} "
                         f"Loss D_B: {loss_D_B.item():.4f} "
                         f"Loss Total: {loss.item():.4f} "
@@ -866,6 +1023,16 @@ def train_v3(
             writer.add_scalar(
                 "Weights/lambda_adv_current",
                 epoch_step[last_key]["Lambda_Adv"],
+                epoch + 1,
+            )
+            # Phase 2: Cycle and Identity losses
+            writer.add_scalar("Loss/Cycle", epoch_step[last_key]["Loss_Cyc"], epoch + 1)
+            writer.add_scalar(
+                "Loss/Identity", epoch_step[last_key]["Loss_Id"], epoch + 1
+            )
+            writer.add_scalar(
+                "Weights/lambda_identity_current",
+                epoch_step[last_key]["Lambda_Id"],
                 epoch + 1,
             )
         if t_epoch_count > 0:
