@@ -6,14 +6,25 @@ Component structure:
     2) CSV reload helper
     3) visualization helper
 
-CSV schema:
-    Epoch, Batch, Loss_DiT, Loss_Perceptual, GradNorm
+CSV schema (updated for Phase 2):
+    Epoch, Batch, Loss_DiT_A2B, Loss_DiT_B2A, Loss_DiT, Loss_G_Adv, Loss_Cyc, Loss_Id,
+    Loss_D_A, Loss_D_B, Lambda_Adv, Lambda_Id, Loss_Perceptual, Loss Total, GradNorm
 
 History structure in memory:
     history[epoch][batch] = {
         "Batch": int,
+        "Loss_DiT_A2B": float,
+        "Loss_DiT_B2A": float,
         "Loss_DiT": float,
+        "Loss_G_Adv": float,
+        "Loss_Cyc": float,
+        "Loss_Id": float,
+        "Loss_D_A": float,
+        "Loss_D_B": float,
+        "Lambda_Adv": float,
+        "Lambda_Id": float,
         "Loss_Perceptual": float,
+        "Loss Total": float,
         "GradNorm": float,
     }
 """
@@ -55,6 +66,8 @@ def append_history_to_csv_v3(history, filename):
 def load_history_from_csv_v3(filename):
     """
     Load v3 training history from CSV.
+
+    BUG FIX: Updated to support new Phase 2 CSV schema with all loss components.
     """
     if not os.path.exists(filename):
         return {}
@@ -68,11 +81,23 @@ def load_history_from_csv_v3(filename):
         epoch = int(row["Epoch"])
         batch = int(row["Batch"])
         history.setdefault(epoch, {})
+
+        # BUG FIX: Load all Phase 2 loss components from the new CSV schema.
         history[epoch][batch] = {
             "Batch": batch,
-            "Loss_DiT": float(row["Loss_DiT"]),
-            "Loss_Perceptual": float(row["Loss_Perceptual"]),
-            "GradNorm": float(row["GradNorm"]),
+            "Loss_DiT_A2B": float(row.get("Loss_DiT_A2B", 0.0)),
+            "Loss_DiT_B2A": float(row.get("Loss_DiT_B2A", 0.0)),
+            "Loss_DiT": float(row.get("Loss_DiT", 0.0)),
+            "Loss_G_Adv": float(row.get("Loss_G_Adv", 0.0)),
+            "Loss_Cyc": float(row.get("Loss_Cyc", 0.0)),
+            "Loss_Id": float(row.get("Loss_Id", 0.0)),
+            "Loss_D_A": float(row.get("Loss_D_A", 0.0)),
+            "Loss_D_B": float(row.get("Loss_D_B", 0.0)),
+            "Lambda_Adv": float(row.get("Lambda_Adv", 0.0)),
+            "Lambda_Id": float(row.get("Lambda_Id", 0.0)),
+            "Loss_Perceptual": float(row.get("Loss_Perceptual", 0.0)),
+            "Loss Total": float(row.get("Loss Total", 0.0)),
+            "GradNorm": float(row.get("GradNorm", 0.0)),
         }
 
     return history
@@ -82,53 +107,122 @@ def visualize_history_v3(history, model_dir=None):
     """
     Plot v3 training history charts.
 
+    BUG FIX: Updated to visualize all Phase 2 loss components.
+
     Dataflow:
-        history dict -> per-epoch means -> 3 line plots:
-        DiT loss, perceptual loss, gradient norm.
+        history dict -> per-epoch means -> line plots for:
+        DiT loss (A2B, B2A, combined), adversarial, cycle, identity, discriminator losses.
     """
     if not history:
         print("No training history to visualize.")
         return
 
     epochs = list(history.keys())
-    avg_loss = []
+    avg_loss_a2b = []
+    avg_loss_b2a = []
+    avg_loss_dit = []
+    avg_loss_adv = []
+    avg_loss_cyc = []
+    avg_loss_id = []
+    avg_loss_d_a = []
+    avg_loss_d_b = []
     avg_loss_perc = []
+    avg_loss_total = []
     avg_grad = []
 
     for epoch in epochs:
         epoch_data = history[epoch]
-        loss_vals = [b["Loss_DiT"] for b in epoch_data.values()]
-        perc_vals = [b["Loss_Perceptual"] for b in epoch_data.values()]
-        grad_vals = [b["GradNorm"] for b in epoch_data.values()]
-        avg_loss.append(np.mean(loss_vals))
-        avg_loss_perc.append(np.mean(perc_vals))
-        avg_grad.append(np.mean(grad_vals))
+        # BUG FIX: Extract all loss components from history.
+        loss_a2b_vals = [b.get("Loss_DiT_A2B", 0.0) for b in epoch_data.values()]
+        loss_b2a_vals = [b.get("Loss_DiT_B2A", 0.0) for b in epoch_data.values()]
+        loss_dit_vals = [b.get("Loss_DiT", 0.0) for b in epoch_data.values()]
+        loss_adv_vals = [b.get("Loss_G_Adv", 0.0) for b in epoch_data.values()]
+        loss_cyc_vals = [b.get("Loss_Cyc", 0.0) for b in epoch_data.values()]
+        loss_id_vals = [b.get("Loss_Id", 0.0) for b in epoch_data.values()]
+        loss_d_a_vals = [b.get("Loss_D_A", 0.0) for b in epoch_data.values()]
+        loss_d_b_vals = [b.get("Loss_D_B", 0.0) for b in epoch_data.values()]
+        perc_vals = [b.get("Loss_Perceptual", 0.0) for b in epoch_data.values()]
+        loss_total_vals = [b.get("Loss Total", 0.0) for b in epoch_data.values()]
+        grad_vals = [b.get("GradNorm", 0.0) for b in epoch_data.values()]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("DiT Training History", fontsize=16)
+        avg_loss_a2b.append(np.mean(loss_a2b_vals) if loss_a2b_vals else 0.0)
+        avg_loss_b2a.append(np.mean(loss_b2a_vals) if loss_b2a_vals else 0.0)
+        avg_loss_dit.append(np.mean(loss_dit_vals) if loss_dit_vals else 0.0)
+        avg_loss_adv.append(np.mean(loss_adv_vals) if loss_adv_vals else 0.0)
+        avg_loss_cyc.append(np.mean(loss_cyc_vals) if loss_cyc_vals else 0.0)
+        avg_loss_id.append(np.mean(loss_id_vals) if loss_id_vals else 0.0)
+        avg_loss_d_a.append(np.mean(loss_d_a_vals) if loss_d_a_vals else 0.0)
+        avg_loss_d_b.append(np.mean(loss_d_b_vals) if loss_d_b_vals else 0.0)
+        avg_loss_perc.append(np.mean(perc_vals) if perc_vals else 0.0)
+        avg_loss_total.append(np.mean(loss_total_vals) if loss_total_vals else 0.0)
+        avg_grad.append(np.mean(grad_vals) if grad_vals else 0.0)
 
-    axes[0].plot(epochs, avg_loss, label="DiT Loss", color="blue", linewidth=2)
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title("DiT Loss")
-    axes[0].grid(True, alpha=0.3)
+    fig, axes = plt.subplots(3, 3, figsize=(20, 12))
+    fig.suptitle("DiT Phase 2 Training History", fontsize=16)
 
-    axes[1].plot(epochs, avg_loss_perc, label="Perceptual Loss", color="green", linewidth=2)
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Loss")
-    axes[1].set_title("Perceptual Loss")
-    axes[1].grid(True, alpha=0.3)
+    # Row 1: Denoising losses
+    axes[0, 0].plot(epochs, avg_loss_a2b, label="A2B", color="blue", linewidth=2)
+    axes[0, 0].set_xlabel("Epoch")
+    axes[0, 0].set_ylabel("Loss")
+    axes[0, 0].set_title("Denoising Loss (A2B)")
+    axes[0, 0].grid(True, alpha=0.3)
 
-    axes[2].plot(epochs, avg_grad, label="Grad Norm", color="purple", linewidth=2)
-    axes[2].set_xlabel("Epoch")
-    axes[2].set_ylabel("Norm")
-    axes[2].set_title("Gradient Norm")
-    axes[2].grid(True, alpha=0.3)
+    axes[0, 1].plot(epochs, avg_loss_b2a, label="B2A", color="green", linewidth=2)
+    axes[0, 1].set_xlabel("Epoch")
+    axes[0, 1].set_ylabel("Loss")
+    axes[0, 1].set_title("Denoising Loss (B2A)")
+    axes[0, 1].grid(True, alpha=0.3)
+
+    axes[0, 2].plot(epochs, avg_loss_dit, label="Combined", color="purple", linewidth=2)
+    axes[0, 2].set_xlabel("Epoch")
+    axes[0, 2].set_ylabel("Loss")
+    axes[0, 2].set_title("Denoising Loss (Combined)")
+    axes[0, 2].grid(True, alpha=0.3)
+
+    # Row 2: Phase 2 losses
+    axes[1, 0].plot(epochs, avg_loss_adv, label="Adversarial", color="red", linewidth=2)
+    axes[1, 0].set_xlabel("Epoch")
+    axes[1, 0].set_ylabel("Loss")
+    axes[1, 0].set_title("Adversarial Loss (G)")
+    axes[1, 0].grid(True, alpha=0.3)
+
+    axes[1, 1].plot(epochs, avg_loss_cyc, label="Cycle", color="orange", linewidth=2)
+    axes[1, 1].set_xlabel("Epoch")
+    axes[1, 1].set_ylabel("Loss")
+    axes[1, 1].set_title("Cycle Loss")
+    axes[1, 1].grid(True, alpha=0.3)
+
+    axes[1, 2].plot(epochs, avg_loss_id, label="Identity", color="brown", linewidth=2)
+    axes[1, 2].set_xlabel("Epoch")
+    axes[1, 2].set_ylabel("Loss")
+    axes[1, 2].set_title("Identity Loss")
+    axes[1, 2].grid(True, alpha=0.3)
+
+    # Row 3: Discriminator and auxiliary losses
+    axes[2, 0].plot(epochs, avg_loss_d_a, label="D_A", color="cyan", linewidth=2)
+    axes[2, 0].set_xlabel("Epoch")
+    axes[2, 0].set_ylabel("Loss")
+    axes[2, 0].set_title("Discriminator A Loss")
+    axes[2, 0].grid(True, alpha=0.3)
+
+    axes[2, 1].plot(epochs, avg_loss_d_b, label="D_B", color="magenta", linewidth=2)
+    axes[2, 1].set_xlabel("Epoch")
+    axes[2, 1].set_ylabel("Loss")
+    axes[2, 1].set_title("Discriminator B Loss")
+    axes[2, 1].grid(True, alpha=0.3)
+
+    axes[2, 2].plot(epochs, avg_grad, label="Grad Norm", color="black", linewidth=2)
+    axes[2, 2].set_xlabel("Epoch")
+    axes[2, 2].set_ylabel("Norm")
+    axes[2, 2].set_title("Gradient Norm")
+    axes[2, 2].grid(True, alpha=0.3)
 
     plt.tight_layout()
 
     model_dir = (
-        os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models_v3")
+        os.path.join(
+            "data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models_v3"
+        )
         if model_dir is None
         else model_dir
     )

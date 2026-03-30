@@ -28,7 +28,7 @@ You will be prompted for:
 
 Model-version behavior:
     - v1/v2 run bidirectional translation using ``G_AB`` and ``G_BA``.
-    - v3 runs unstained -> stained only via diffusion sampling.
+    - v3 runs bidirectional translation (unstained <-> stained) via diffusion sampling with domain conditioning.
 
 Outputs are written to:
   - ``data/reconstructed_stained_output.png``

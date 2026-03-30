@@ -40,7 +40,16 @@ from model_v3.generator import getGeneratorV3
 from model_v3.discriminator import getDiscriminatorsV3
 from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
 from model_v3.vae_wrapper import VAEWrapper
-from model_v3.losses import compute_diffusion_loss
+from model_v3.losses import (
+    compute_diffusion_loss,
+    _lsgan_gen_loss,
+    _lsgan_disc_loss,
+    _r1_penalty_loss,
+    _ddim_shortcut_from_xt,
+    _compute_cycle_loss,
+    _compute_identity_loss,
+    _compute_identity_weight,
+)
 
 
 def _make_cosine_warmup_lambda(
@@ -74,245 +83,6 @@ def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
         p.requires_grad = flag
 
 
-def _lsgan_gen_loss(fake_outputs) -> torch.Tensor:
-    if isinstance(fake_outputs, (list, tuple)):
-        return torch.stack(
-            [F.mse_loss(o, torch.ones_like(o)) for o in fake_outputs]
-        ).mean()
-    return F.mse_loss(fake_outputs, torch.ones_like(fake_outputs))
-
-
-def _lsgan_disc_loss(real_outputs, fake_outputs) -> torch.Tensor:
-    def _single(r: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-        loss_real = F.mse_loss(r, torch.ones_like(r))
-        loss_fake = F.mse_loss(f, torch.zeros_like(f))
-        return 0.5 * (loss_real + loss_fake)
-
-    if isinstance(real_outputs, (list, tuple)):
-        return torch.stack(
-            [_single(r, f) for r, f in zip(real_outputs, fake_outputs)]
-        ).mean()
-    return _single(real_outputs, fake_outputs)
-
-
-def _r1_penalty_loss(
-    discriminator: torch.nn.Module,
-    real_images: torch.Tensor,
-    gamma: float,
-) -> torch.Tensor:
-    real_scores = discriminator(real_images)
-    if isinstance(real_scores, (list, tuple)):
-        real_score_mean = torch.stack([s.mean() for s in real_scores]).sum()
-    else:
-        real_score_mean = real_scores.mean()
-
-    grad_real = torch.autograd.grad(
-        outputs=real_score_mean,
-        inputs=real_images,
-        create_graph=True,
-        retain_graph=True,
-        only_inputs=True,
-    )[0]
-    grad_penalty = grad_real.pow(2).reshape(grad_real.size(0), -1).sum(dim=1).mean()
-    return 0.5 * gamma * grad_penalty
-
-
-def _ddim_shortcut_from_xt(
-    model: torch.nn.Module,
-    scheduler: DDPMScheduler,
-    z_t_start: torch.Tensor,
-    t_start: torch.Tensor,
-    condition: torch.Tensor,
-    target_domain: int,
-    prediction_type: str,
-    num_steps: int,
-    eta: float,
-) -> torch.Tensor:
-    """
-    Deterministic short-DDIM denoising from a provided x_t start.
-
-    This keeps Phase-2 cycle semantics by starting from x_t built with
-    shared (epsilon, t), then denoising to t=0 in a short path controlled
-    by (num_steps, eta).
-    """
-    z_t = z_t_start
-    steps = max(1, int(num_steps))
-
-    # Build per-sample time trajectory from each sample's t_start down to 0.
-    t_start_f = t_start.float()
-    for k in range(steps):
-        frac_cur = float(steps - k) / float(steps)
-        frac_prev = float(max(steps - k - 1, 0)) / float(steps)
-
-        t_cur = torch.round(t_start_f * frac_cur).long().clamp(
-            min=0, max=scheduler.num_timesteps - 1
-        )
-        t_prev = torch.round(t_start_f * frac_prev).long().clamp(
-            min=0, max=scheduler.num_timesteps - 1
-        )
-
-        out = model(
-            z_t,
-            t_cur,
-            condition,
-            target_domain=target_domain,
-            scheduler=scheduler,
-            prediction_type=prediction_type,
-        )
-        v_or_eps = out["v_pred"] if isinstance(out, dict) else out
-
-        if prediction_type == "v":
-            eps_pred = scheduler.predict_eps_from_v(z_t.float(), v_or_eps.float(), t_cur)
-        elif prediction_type == "eps":
-            eps_pred = v_or_eps.float()
-        else:
-            raise ValueError(
-                f"prediction_type must be 'v' or 'eps', got {prediction_type!r}"
-            )
-
-        z0_pred = scheduler.predict_x0(z_t.float(), eps_pred, t_cur)
-
-        alpha_bar_t = scheduler._extract(scheduler.alphas_cumprod, t_cur, z_t.shape).float()
-        alpha_bar_prev = scheduler._extract(
-            scheduler.alphas_cumprod, t_prev, z_t.shape
-        ).float()
-
-        sigma_arg = (
-            (1.0 - alpha_bar_prev)
-            / (1.0 - alpha_bar_t).clamp(min=1e-8)
-            * (1.0 - alpha_bar_t / alpha_bar_prev.clamp(min=1e-8))
-        ).clamp(min=0.0)
-        sigma = eta * torch.sqrt(sigma_arg)
-
-        dir_arg = (1.0 - alpha_bar_prev - sigma**2).clamp(min=0.0)
-        dir_xt = torch.sqrt(dir_arg) * eps_pred
-
-        z_t = torch.sqrt(alpha_bar_prev) * z0_pred + dir_xt
-        if eta > 0.0:
-            z_t = z_t + sigma * torch.randn_like(z_t)
-
-    return z_t
-
-
-def _compute_cycle_loss(
-    model: torch.nn.Module,
-    scheduler: DDPMScheduler,
-    vae: VAEWrapper,
-    z0_fake_B: torch.Tensor,
-    z0_fake_A: torch.Tensor,
-    noise_A: torch.Tensor,
-    noise_B: torch.Tensor,
-    t_A: torch.Tensor,
-    t_B: torch.Tensor,
-    fake_B_img: torch.Tensor,
-    fake_A_img: torch.Tensor,
-    real_A: torch.Tensor,
-    real_B: torch.Tensor,
-    prediction_type: str,
-    cycle_ddim_steps: int,
-    cycle_ddim_eta: float,
-) -> torch.Tensor:
-    """
-    Compute cycle consistency loss using shared (epsilon, t) from primary passes.
-
-    rec_A = G(fake_B.detach(), A, same noise_A, same t_A)
-    rec_B = G(fake_A.detach(), B, same noise_B, same t_B)
-    """
-    z_t_rec_A = scheduler.add_noise(z0_fake_B.detach(), noise_A, t_A)
-    z_t_rec_B = scheduler.add_noise(z0_fake_A.detach(), noise_B, t_B)
-
-    z0_rec_A = _ddim_shortcut_from_xt(
-        model=model,
-        scheduler=scheduler,
-        z_t_start=z_t_rec_A,
-        t_start=t_A,
-        condition=fake_B_img.detach(),
-        target_domain=0,
-        prediction_type=prediction_type,
-        num_steps=cycle_ddim_steps,
-        eta=cycle_ddim_eta,
-    )
-    z0_rec_B = _ddim_shortcut_from_xt(
-        model=model,
-        scheduler=scheduler,
-        z_t_start=z_t_rec_B,
-        t_start=t_B,
-        condition=fake_A_img.detach(),
-        target_domain=1,
-        prediction_type=prediction_type,
-        num_steps=cycle_ddim_steps,
-        eta=cycle_ddim_eta,
-    )
-
-    rec_A = vae.decode(z0_rec_A.clamp(-1.0, 1.0)).clamp(-1.0, 1.0).float()
-    rec_B = vae.decode(z0_rec_B.clamp(-1.0, 1.0)).clamp(-1.0, 1.0).float()
-
-    loss_cyc = F.l1_loss(rec_A, real_A) + F.l1_loss(rec_B, real_B)
-    return loss_cyc
-
-
-def _compute_identity_loss(
-    model: torch.nn.Module,
-    scheduler: DDPMScheduler,
-    vae: VAEWrapper,
-    z0_A: torch.Tensor,
-    z0_B: torch.Tensor,
-    real_A: torch.Tensor,
-    real_B: torch.Tensor,
-    device: torch.device,
-    prediction_type: str,
-) -> torch.Tensor:
-    """
-    Compute identity loss: L_id = ||idt_A - real_A||_1 + ||idt_B - real_B||_1.
-
-    Identity at t=0, epsilon=0: model should output minimal change in same domain.
-    """
-    b = z0_A.size(0)
-    t_idt = torch.zeros(b, device=device, dtype=torch.long)
-
-    out_idt_A = model(
-        z0_A,
-        t_idt,
-        real_A,
-        target_domain=0,
-        scheduler=scheduler,
-        prediction_type=prediction_type,
-    )
-    out_idt_B = model(
-        z0_B,
-        t_idt,
-        real_B,
-        target_domain=1,
-        scheduler=scheduler,
-        prediction_type=prediction_type,
-    )
-
-    z0_idt_A = out_idt_A["x0_pred"] if isinstance(out_idt_A, dict) else out_idt_A
-    z0_idt_B = out_idt_B["x0_pred"] if isinstance(out_idt_B, dict) else out_idt_B
-
-    idt_A = vae.decode(z0_idt_A).clamp(-1.0, 1.0)
-    idt_B = vae.decode(z0_idt_B).clamp(-1.0, 1.0)
-
-    loss_idt = F.l1_loss(idt_A, real_A) + F.l1_loss(idt_B, real_B)
-    return loss_idt
-
-
-def _compute_identity_weight(
-    epoch: int, num_epochs: int, l_start: float, l_end: float, decay_ratio: float
-) -> float:
-    """
-    Compute identity weight with linear decay.
-
-    Decays from l_start to l_end over first (decay_ratio * num_epochs) epochs,
-    then stays at l_end.
-    """
-    decay_end_epoch = int(num_epochs * decay_ratio)
-    if epoch < decay_end_epoch:
-        progress = epoch / max(1, decay_end_epoch)
-        return l_start + (l_end - l_start) * progress
-    return l_end
-
-
 def _run_validation_v3(
     epoch: int,
     ema_model: torch.nn.Module,
@@ -337,7 +107,11 @@ def _run_validation_v3(
 
     print(f"[{ 'Testing' if is_test else 'Validation' }] Starting run at epoch {epoch}")
 
-    metrics = {"ssim_B": [], "psnr_B": []}
+    # BUG FIX: Track both domain metrics as specified in Phase 2 spec.
+    # Previously only tracked Domain B, now tracks both A and B.
+    metrics = {"ssim_A": [], "psnr_A": [], "ssim_B": [], "psnr_B": []}
+    real_A_list = []
+    fake_A_list = []
     real_B_list = []
     fake_B_list = []
 
@@ -366,8 +140,9 @@ def _run_validation_v3(
                 uncond_condition=uncond,
                 target_domain=1,
             )
-            fake_B = vae.decode(z0)
+            fake_B = vae.decode(z0).clamp(-1.0, 1.0)
 
+            # BUG FIX: Compute metrics for both domains (B and A).
             metrics["ssim_B"].append(calculator.calculate_ssim(real_B, fake_B))
             metrics["psnr_B"].append(calculator.calculate_psnr(real_B, fake_B))
 
@@ -389,7 +164,14 @@ def _run_validation_v3(
                     uncond_condition=uncond_B,
                     target_domain=0,
                 )
-                fake_A = vae.decode(z0_A)
+                fake_A = vae.decode(z0_A).clamp(-1.0, 1.0)
+
+                # BUG FIX: Compute domain A metrics (ssim_A, psnr_A) to track both domains.
+                metrics["ssim_A"].append(calculator.calculate_ssim(real_A, fake_A))
+                metrics["psnr_A"].append(calculator.calculate_psnr(real_A, fake_A))
+
+                real_A_list.append(real_A)
+                fake_A_list.append(fake_A)
 
                 uncond_fake_B = torch.zeros_like(fake_B)
                 z0_rec_A = sampler.sample(
@@ -404,7 +186,7 @@ def _run_validation_v3(
                     uncond_condition=uncond_fake_B,
                     target_domain=0,
                 )
-                rec_A = vae.decode(z0_rec_A)
+                rec_A = vae.decode(z0_rec_A).clamp(-1.0, 1.0)
 
                 uncond_fake_A = torch.zeros_like(fake_A)
                 z0_rec_B = sampler.sample(
@@ -419,7 +201,7 @@ def _run_validation_v3(
                     uncond_condition=uncond_fake_A,
                     target_domain=1,
                 )
-                rec_B = vae.decode(z0_rec_B)
+                rec_B = vae.decode(z0_rec_B).clamp(-1.0, 1.0)
 
                 row_A = torch.cat(
                     [real_A[:1], fake_B[:1], rec_A[:1], real_B[:1]], dim=0
@@ -445,10 +227,16 @@ def _run_validation_v3(
             if (i + 1) % 10 == 0:
                 print(f"[{prefix}] Processed {i + 1} batches")
 
+    # BUG FIX: Compute average metrics for both domains per Phase 2 spec.
     avg_metrics = {
+        "ssim_A": float(sum(metrics["ssim_A"]) / max(1, len(metrics["ssim_A"]))),
+        "psnr_A": float(sum(metrics["psnr_A"]) / max(1, len(metrics["psnr_A"]))),
         "ssim_B": float(sum(metrics["ssim_B"]) / max(1, len(metrics["ssim_B"]))),
         "psnr_B": float(sum(metrics["psnr_B"]) / max(1, len(metrics["psnr_B"]))),
     }
+
+    # BUG FIX: Early stopping score now uses mean of both domains per spec.
+    early_stopping_score = 0.5 * (avg_metrics["ssim_A"] + avg_metrics["ssim_B"])
 
     fid_count = min(fid_max_samples, len(real_B_list))
     if (
@@ -458,17 +246,32 @@ def _run_validation_v3(
     ):
         real_B_tensor = torch.cat(real_B_list[:fid_count])
         fake_B_tensor = torch.cat(fake_B_list[:fid_count])
-        avg_metrics["fid"] = calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
+        avg_metrics["fid_B"] = calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
+
+    # BUG FIX: Compute FID for domain A as well per Phase 2 spec.
+    fid_count_A = min(fid_max_samples, len(real_A_list))
+    if (
+        fid_count_A >= fid_min_samples
+        or is_test
+        or (fid_count_A < fid_min_samples and len(real_A_list) > 0 and epoch % 5 == 0)
+    ):
+        real_A_tensor = torch.cat(real_A_list[:fid_count_A])
+        fake_A_tensor = torch.cat(fake_A_list[:fid_count_A])
+        avg_metrics["fid_A"] = calculator.evaluate_fid(real_A_tensor, fake_A_tensor)
 
     for metric_name, value in avg_metrics.items():
         writer.add_scalar(f"{prefix}/{metric_name}", value, epoch)
 
     print(
-        f"{prefix} Metrics - SSIM_B: {avg_metrics['ssim_B']:.4f}, "
+        f"{prefix} Metrics - SSIM_A: {avg_metrics['ssim_A']:.4f}, "
+        f"SSIM_B: {avg_metrics['ssim_B']:.4f}, "
+        f"PSNR_A: {avg_metrics['psnr_A']:.2f}, "
         f"PSNR_B: {avg_metrics['psnr_B']:.2f}"
     )
-    if "fid" in avg_metrics:
-        print(f"{prefix} FID Score: {avg_metrics['fid']:.2f}")
+    if "fid_A" in avg_metrics:
+        print(f"{prefix} FID_A Score: {avg_metrics['fid_A']:.2f}")
+    if "fid_B" in avg_metrics:
+        print(f"{prefix} FID_B Score: {avg_metrics['fid_B']:.2f}")
     print(f"[{prefix}] Completed run at epoch {epoch}")
 
     # ema_model.train()
@@ -734,6 +537,8 @@ def train_v3(
             if accum_count == 0:
                 optimizer_G.zero_grad(set_to_none=True)
 
+            # SPEC COMPLIANCE: Per Phase 2 spec, generator step comes before discriminator steps.
+            # Step order: Generator → Discriminator A → Discriminator B
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
             with autocast("cuda", enabled=use_amp):
@@ -811,8 +616,9 @@ def train_v3(
 
             with autocast("cuda", enabled=use_amp):
                 # Phase 2 rule: all non-denoising losses use x0 reconstructions.
-                z0_fake_B = out_A2B["x0_pred"].clamp(-1.0, 1.0)
-                z0_fake_A = out_B2A["x0_pred"].clamp(-1.0, 1.0)
+                z0_fake_B = out_A2B["x0_pred"]
+                z0_fake_A = out_B2A["x0_pred"]
+                # Spec compliance: clamp decoded images before discriminator inputs.
                 # Keep discriminator inputs in fp32 to avoid dtype mismatch in conv layers.
                 fake_B_img = vae.decode(z0_fake_B).clamp(-1.0, 1.0).float()
                 fake_A_img = vae.decode(z0_fake_A).clamp(-1.0, 1.0).float()
@@ -904,6 +710,8 @@ def train_v3(
             _set_requires_grad(D_A, True)
             _set_requires_grad(D_B, True)
 
+            # Spec compliance: replay buffers are applied to discriminator inputs
+            # (not raw current-batch generator outputs) from epoch 1 onward.
             fake_A_detached = replay_A.push_and_pop(fake_A_img.detach())
             fake_B_detached = replay_B.push_and_pop(fake_B_img.detach())
 
@@ -1015,6 +823,13 @@ def train_v3(
         # Epoch-level GAN diagnostics from last batch snapshot.
         if epoch_step:
             last_key = max(epoch_step.keys())
+            # Usability improvement: log epoch-average lambdas in addition to last-batch values.
+            lambda_adv_epoch_avg = float(
+                sum(v["Lambda_Adv"] for v in epoch_step.values()) / len(epoch_step)
+            )
+            lambda_id_epoch_avg = float(
+                sum(v["Lambda_Id"] for v in epoch_step.values()) / len(epoch_step)
+            )
             writer.add_scalar(
                 "Loss/G_adv", epoch_step[last_key]["Loss_G_Adv"], epoch + 1
             )
@@ -1025,6 +840,11 @@ def train_v3(
                 epoch_step[last_key]["Lambda_Adv"],
                 epoch + 1,
             )
+            writer.add_scalar(
+                "Weights/lambda_adv_epoch_avg",
+                lambda_adv_epoch_avg,
+                epoch + 1,
+            )
             # Phase 2: Cycle and Identity losses
             writer.add_scalar("Loss/Cycle", epoch_step[last_key]["Loss_Cyc"], epoch + 1)
             writer.add_scalar(
@@ -1033,6 +853,11 @@ def train_v3(
             writer.add_scalar(
                 "Weights/lambda_identity_current",
                 epoch_step[last_key]["Lambda_Id"],
+                epoch + 1,
+            )
+            writer.add_scalar(
+                "Weights/lambda_identity_epoch_avg",
+                lambda_id_epoch_avg,
                 epoch + 1,
             )
         if t_epoch_count > 0:
@@ -1112,7 +937,10 @@ def train_v3(
             and epoch + 1 >= tcfg.early_stopping_warmup
             and val_metrics is not None
         ):
-            avg_ssim = val_metrics.get("ssim_B", 0.0)
+            # BUG FIX: Early stopping score now uses mean(SSIM_A, SSIM_B) per spec.
+            avg_ssim = 0.5 * (
+                val_metrics.get("ssim_A", 0.0) + val_metrics.get("ssim_B", 0.0)
+            )
             should_stop = early_stopping(ssim=avg_ssim, losses={"DiT": avg_loss})
             writer.add_scalar("EarlyStopping/ssim", avg_ssim, epoch + 1)
             writer.add_scalar(
