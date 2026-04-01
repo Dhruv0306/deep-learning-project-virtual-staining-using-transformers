@@ -9,6 +9,8 @@ Supported model versions:
     1 -> Hybrid CycleGAN/UVCGAN baseline (model_v1)
     2 -> True UVCGAN v2 (model_v2)
     3 -> DiT diffusion pipeline (model_v3)
+    4 -> v4 Phase 1 GAN baseline (model_v4)
+    4 -> Phase 1 GAN baseline (model_v4)
 """
 
 import os
@@ -16,8 +18,9 @@ from datetime import datetime
 
 from shared.history_utils import save_history_to_csv, visualize_history
 from model_v1.training_loop import train_v1
-from config import get_8gb_config
+from config import get_8gb_config, get_v4_8gb_config
 from model_v2.training_loop import train_v2
+from model_v4.training_loop import train_v4_phase1
 
 
 def main():
@@ -49,7 +52,8 @@ def main():
     test_size = int(input("Enter Test Size: "))
     model_version = int(
         input(
-            "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, 3 for DiT diffusion: "
+            "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, "
+            "3 for DiT diffusion, 4 for v4 Phase 1 GAN: "
         )
     )
 
@@ -108,6 +112,27 @@ def main():
         G_BA = ema_model
         D_A = cond_encoder
         D_B = None
+    elif model_version == 4:
+        model_dir = os.path.join(
+            dataset_root,
+            f"models_v4_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}",
+        )
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"Model directory: {model_dir}")
+        val_dir = os.path.join(model_dir, "validation_images")
+        os.makedirs(val_dir, exist_ok=True)
+        print(f"Validation image directory: {val_dir}")
+        cfg = get_v4_8gb_config()
+        cfg.training.test_size = test_size
+        cfg.training.validation_samples = test_size
+        cfg.training.validation_max_batches = test_size
+        history, G_AB, G_BA, D_A, D_B = train_v4_phase1(
+            epoch_size=epoch_size,
+            num_epochs=num_epochs,
+            model_dir=model_dir,
+            val_dir=val_dir,
+            cfg=cfg,
+        )
     else:
         # Create a timestamped model directory so each run is isolated.
         model_dir = os.path.join(

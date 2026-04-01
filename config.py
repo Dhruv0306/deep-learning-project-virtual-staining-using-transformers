@@ -6,6 +6,7 @@ diffusion hyperparameters. The top-level ``model_version`` switch supports:
     - v1: Hybrid CycleGAN/UVCGAN baseline
     - v2: True UVCGAN v2
     - v3: DiT diffusion pipeline
+    - v4: CUT baseline (Phase 1 GAN)
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - GAN objective  : LSGAN, NOT Wasserstein
@@ -430,3 +431,90 @@ def get_dit_8gb_config() -> UVCGANConfig:
     )
 
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# v4 Phase 1 config (baseline GAN)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class V4ModelConfig:
+    """
+    Hyperparameters for the v4 Phase 1 generator/discriminator.
+
+    Notes:
+        - ``num_res_blocks`` controls generator depth.
+        - ``disc_n_layers`` controls PatchGAN depth.
+    """
+    input_nc: int = 3
+    output_nc: int = 3
+    base_channels: int = 64
+    num_res_blocks: int = 6
+    disc_base_channels: int = 64
+    disc_n_layers: int = 3
+
+
+@dataclass
+class V4TrainingConfig:
+    """
+    Training loop hyperparameters for the v4 Phase 1 GAN baseline.
+    """
+    num_epochs: int = 200
+    epoch_size: int = 3000
+    lr: float = 2e-4
+    beta1: float = 0.5
+    beta2: float = 0.999
+    grad_clip_norm: float = 1.0
+    use_amp: bool = True
+    accumulate_grads: int = 1
+    log_every: int = 50
+    save_every: int = 20
+    validation_after: int = 5
+    validation_samples: int = 6
+    validation_max_batches: int = 50
+    test_size: int = 200
+
+
+@dataclass
+class V4DataConfig:
+    """
+    Data loading configuration for v4 Phase 1.
+    """
+    image_size: int = 256
+    batch_size: int = 4
+    num_workers: int = 4
+    prefetch_factor: int = 2
+
+
+@dataclass
+class V4Config:
+    """
+    Top-level configuration container for v4 Phase 1 training.
+    """
+    model_version: int = 4
+    model: V4ModelConfig = field(default_factory=V4ModelConfig)
+    training: V4TrainingConfig = field(default_factory=V4TrainingConfig)
+    data: V4DataConfig = field(default_factory=V4DataConfig)
+    model_dir: Optional[str] = None
+    val_dir: Optional[str] = None
+
+    def __post_init__(self):
+        if self.model_version != 4:
+            raise ValueError(
+                f"model_version must be 4 for V4Config, got {self.model_version!r}."
+            )
+
+
+def get_v4_config() -> V4Config:
+    """
+    Return a default config for the v4 Phase 1 GAN baseline.
+    """
+    return V4Config()
+
+
+def get_v4_8gb_config() -> V4Config:
+    """
+    Return a VRAM-lean v4 Phase 1 config. Currently matches get_v4_config().
+    """
+    return V4Config()
