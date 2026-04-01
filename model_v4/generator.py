@@ -371,7 +371,7 @@ def getGeneratorV4(
     use_gradient_checkpointing: bool = False,
     device: torch.device | None = None,
     run_smoke_test: bool = True,
-) -> nn.Module:
+) -> ResnetGenerator | TransformerGeneratorV4:
     """
     Build, initialise, and optionally smoke-test a Phase 1 ResnetGenerator.
 

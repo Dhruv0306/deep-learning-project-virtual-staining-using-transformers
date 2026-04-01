@@ -60,9 +60,7 @@ def _lsgan_gen_loss(pred_fake: torch.Tensor) -> torch.Tensor:
     return torch.mean((pred_fake - 1.0) ** 2)
 
 
-def _lsgan_disc_loss(
-    pred_real: torch.Tensor, pred_fake: torch.Tensor
-) -> torch.Tensor:
+def _lsgan_disc_loss(pred_real: torch.Tensor, pred_fake: torch.Tensor) -> torch.Tensor:
     """
     LSGAN discriminator loss: E[(D(real) − 1)²] + E[D(fake)²].
 
@@ -114,7 +112,9 @@ def _run_validation_phase1(
     G_AB.eval()
     G_BA.eval()
     os.makedirs(save_dir, exist_ok=True)
-    print(f"{'Testing' if is_test else 'Validation'}: Running on {min(len(test_loader), max_batches)} batches, saving {num_samples} sample grids to {save_dir}")  # noqa: E501
+    print(
+        f"{'Testing' if is_test else 'Validation'}: Running on {min(len(test_loader), max_batches)} batches, saving {num_samples} sample grids to {save_dir}"
+    )  # noqa: E501
 
     metrics = {"ssim_A": [], "psnr_A": [], "ssim_B": [], "psnr_B": []}
 
@@ -134,7 +134,9 @@ def _run_validation_phase1(
                 metrics[key].append(float(value))
 
             if i < num_samples:
-                row_A = torch.cat([real_A[:1], fake_B[:1], rec_A[:1], real_B[:1]], dim=0).cpu()
+                row_A = torch.cat(
+                    [real_A[:1], fake_B[:1], rec_A[:1], real_B[:1]], dim=0
+                ).cpu()
                 out_path_A = os.path.join(save_dir, f"image_{i + 1}_A.png")
                 save_images_with_title(
                     row_A,
@@ -143,7 +145,9 @@ def _run_validation_phase1(
                     value_range=(-1, 1),
                 )
 
-                row_B = torch.cat([real_B[:1], fake_A[:1], rec_B[:1], real_A[:1]], dim=0).cpu()
+                row_B = torch.cat(
+                    [real_B[:1], fake_A[:1], rec_B[:1], real_A[:1]], dim=0
+                ).cpu()
                 out_path_B = os.path.join(save_dir, f"image_{i + 1}_B.png")
                 save_images_with_title(
                     row_B,
@@ -451,7 +455,9 @@ def train_v4(
             _set_requires_grad(G_BA, True)
 
             if accum_count == 0:
-                optimizer_G.zero_grad(set_to_none=True)  # reset at start of accumulation window
+                optimizer_G.zero_grad(
+                    set_to_none=True
+                )  # reset at start of accumulation window
 
             with autocast("cuda", enabled=use_amp):
                 fake_B, feats_real_A = G_AB(
@@ -470,8 +476,8 @@ def train_v4(
                 loss_nce_AB = torch.tensor(0.0, device=device)
                 loss_nce_BA = torch.tensor(0.0, device=device)
                 if use_nce:
-                    feats_fake_B, _ = G_AB(fake_B, return_features=True, nce_layers=nce_layers)
-                    feats_fake_A, _ = G_BA(fake_A, return_features=True, nce_layers=nce_layers)
+                    feats_fake_B = G_AB.encode_features(fake_B, nce_layers=nce_layers)
+                    feats_fake_A = G_BA.encode_features(fake_A, nce_layers=nce_layers)
 
                     patches_real_A, patch_ids_A = patch_sampler.sample(
                         feats_real_A, num_patches=tcfg.nce_num_patches
@@ -494,7 +500,9 @@ def train_v4(
                     loss_nce = 0.5 * (loss_nce_AB + loss_nce_BA)
 
                 loss_G = tcfg.lambda_gan * loss_G_gan + tcfg.lambda_nce * loss_nce
-                loss_G_scaled = loss_G / accumulate  # scale before backward for correct gradient magnitude
+                loss_G_scaled = (
+                    loss_G / accumulate
+                )  # scale before backward for correct gradient magnitude
 
             if not torch.isfinite(loss_G):
                 print(
@@ -512,7 +520,9 @@ def train_v4(
 
             # Step optimizer once the accumulation window is full or the
             # loader is exhausted (handles non-divisible dataset sizes).
-            if accum_count == accumulate or (i == len(train_loader) and accum_count > 0):
+            if accum_count == accumulate or (
+                i == len(train_loader) and accum_count > 0
+            ):
                 if tcfg.grad_clip_norm > 0.0:
                     if use_amp:
                         scaler.unscale_(optimizer_G)
@@ -561,6 +571,7 @@ def train_v4(
                     f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
                     f"Batch [{i}/{len(train_loader)}] "
                     f"Loss_G: {loss_G.item():.4f} "
+                    f"Loss_G_GAN: {loss_G_gan.item():.4f} "
                     f"Loss_NCE: {loss_nce.item():.4f} "
                     f"Loss_D_A: {loss_D_A.item():.4f} "
                     f"Loss_D_B: {loss_D_B.item():.4f} "
