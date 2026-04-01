@@ -441,7 +441,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
 @dataclass
 class V4ModelConfig:
     """
-    Hyperparameters for the v4 Phase 1 generator/discriminator.
+    Hyperparameters for the v4 generator/discriminator.
 
     Notes:
         - ``num_res_blocks`` controls generator depth.
@@ -453,6 +453,15 @@ class V4ModelConfig:
     num_res_blocks: int = 6
     disc_base_channels: int = 64
     disc_n_layers: int = 3
+    use_transformer_encoder: bool = True
+    image_size: int = 256
+    patch_size: int = 8
+    encoder_dim: int = 224
+    encoder_depth: int = 4
+    encoder_heads: int = 4
+    encoder_mlp_ratio: float = 3.0
+    encoder_dropout: float = 0.0
+    use_gradient_checkpointing: bool = False
 
 
 @dataclass
@@ -523,6 +532,8 @@ def get_v4_config() -> V4Config:
 
 def get_v4_8gb_config() -> V4Config:
     """
-    Return a VRAM-lean v4 Phase 1 config. Currently matches get_v4_config().
+    Return a VRAM-lean v4 Phase 3 config.
     """
-    return V4Config()
+    cfg = V4Config()
+    cfg.model.use_gradient_checkpointing = True
+    return cfg

@@ -1,8 +1,8 @@
 """
-model_v4/training_loop.py — Phase 2 training loop for CUT + Transformer (v4).
+model_v4/training_loop.py — Phase 3 training loop for CUT + Transformer (v4).
 
-Adds PatchNCE contrastive loss on top of the Phase 1 GAN baseline (still no
-Transformer). PatchNCE is computed on encoder features sampled at shared
+Adds a Transformer encoder and PatchNCE contrastive loss on top of the Phase 1
+GAN baseline. PatchNCE is computed on encoder features sampled at shared
 spatial locations between real and generated images.
 
 Data flow:
@@ -151,7 +151,7 @@ def _run_validation_phase1(
                     out_path=out_path_B,
                     value_range=(-1, 1),
                 )
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 20 == 0:
                     print(f"Saved sample grid {i + 1}.")
 
     avg_metrics = {
@@ -180,7 +180,7 @@ def _run_validation_phase1(
     return avg_metrics
 
 
-def train_v4_phase1(
+def train_v4(
     epoch_size=None,
     num_epochs=None,
     model_dir=None,
@@ -188,7 +188,7 @@ def train_v4_phase1(
     cfg: Optional[V4Config] = None,
 ):
     """
-    Train the Phase 2 GAN baseline (A ↔ B, LSGAN + PatchNCE).
+    Train the Phase 3 GAN baseline (A ↔ B, Transformer encoder + PatchNCE).
 
     Any argument that is not None overrides the corresponding field in *cfg*
     before training begins, allowing the caller to pass a pre-built config and
@@ -242,11 +242,25 @@ def train_v4_phase1(
     # ---- Models ----
     # G_AB: unstained → stained;  G_BA: stained → unstained.
     # D_A discriminates real/fake unstained; D_B discriminates real/fake stained.
+    if mcfg.image_size != dcfg.image_size:
+        print(
+            f"[warn] V4 model image_size ({mcfg.image_size}) does not match "
+            f"data image_size ({dcfg.image_size}); using data image_size."
+        )
     G_AB = getGeneratorV4(
         input_nc=mcfg.input_nc,
         output_nc=mcfg.output_nc,
         base_channels=mcfg.base_channels,
         num_res_blocks=mcfg.num_res_blocks,
+        use_transformer_encoder=mcfg.use_transformer_encoder,
+        image_size=dcfg.image_size,
+        patch_size=mcfg.patch_size,
+        encoder_dim=mcfg.encoder_dim,
+        encoder_depth=mcfg.encoder_depth,
+        encoder_heads=mcfg.encoder_heads,
+        encoder_mlp_ratio=mcfg.encoder_mlp_ratio,
+        encoder_dropout=mcfg.encoder_dropout,
+        use_gradient_checkpointing=mcfg.use_gradient_checkpointing,
         device=device,
         run_smoke_test=False,
     )
@@ -255,6 +269,15 @@ def train_v4_phase1(
         output_nc=mcfg.input_nc,
         base_channels=mcfg.base_channels,
         num_res_blocks=mcfg.num_res_blocks,
+        use_transformer_encoder=mcfg.use_transformer_encoder,
+        image_size=dcfg.image_size,
+        patch_size=mcfg.patch_size,
+        encoder_dim=mcfg.encoder_dim,
+        encoder_depth=mcfg.encoder_depth,
+        encoder_heads=mcfg.encoder_heads,
+        encoder_mlp_ratio=mcfg.encoder_mlp_ratio,
+        encoder_dropout=mcfg.encoder_dropout,
+        use_gradient_checkpointing=mcfg.use_gradient_checkpointing,
         device=device,
         run_smoke_test=False,
     )
@@ -294,6 +317,13 @@ def train_v4_phase1(
     # Shared SSIM/PSNR calculator reused across validation calls.
     metrics_calculator = MetricsCalculator(device=device)
     nce_layers = list(tcfg.nce_layers)
+    max_layers = mcfg.encoder_depth if mcfg.use_transformer_encoder else 4
+    nce_layers = [idx for idx in nce_layers if idx < max_layers]
+    if not nce_layers:
+        nce_layers = list(range(max_layers))
+        print(
+            f"[warn] nce_layers was empty after filtering; using all layers 0..{max_layers-1}"
+        )
     patch_sampler = PatchSampler(num_patches=tcfg.nce_num_patches)
     nce_criterion = PatchNCELoss(
         temperature=tcfg.nce_temperature, proj_dim=tcfg.nce_proj_dim
@@ -322,7 +352,7 @@ def train_v4_phase1(
 
     if accumulate > 1:
         print(
-            f"[train_v4_phase1] Gradient accumulation: {accumulate} "
+            f"[train_v4] Gradient accumulation: {accumulate} "
             f"(effective batch {accumulate * dcfg.batch_size})"
         )
 
@@ -440,8 +470,8 @@ def train_v4_phase1(
                 loss_nce_AB = torch.tensor(0.0, device=device)
                 loss_nce_BA = torch.tensor(0.0, device=device)
                 if use_nce:
-                    feats_fake_B = G_AB.encode_features(fake_B, nce_layers=nce_layers)
-                    feats_fake_A = G_BA.encode_features(fake_A, nce_layers=nce_layers)
+                    feats_fake_B, _ = G_AB(fake_B, return_features=True, nce_layers=nce_layers)
+                    feats_fake_A, _ = G_BA(fake_A, return_features=True, nce_layers=nce_layers)
 
                     patches_real_A, patch_ids_A = patch_sampler.sample(
                         feats_real_A, num_patches=tcfg.nce_num_patches
@@ -561,6 +591,8 @@ def train_v4_phase1(
         print(
             f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
             f"Avg Loss_G: {avg_loss_G:.4f} "
+            f"Avg Loss_G_GAN: {avg_loss_G_gan:.4f} "
+            f"Avg Loss_NCE: {avg_loss_NCE:.4f} "
             f"Avg Loss_D_A: {avg_loss_D_A:.4f} "
             f"Avg Loss_D_B: {avg_loss_D_B:.4f}"
         )
@@ -637,4 +669,4 @@ def train_v4_phase1(
 
 
 if __name__ == "__main__":
-    train_v4_phase1()
+    train_v4()
