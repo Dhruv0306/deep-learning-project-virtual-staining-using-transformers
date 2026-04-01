@@ -331,9 +331,9 @@ def get_8gb_config() -> UVCGANConfig:
     # Kept at 3 (full multi-scale) for stability/quality.
     cfg.discriminator.num_scales = 3
 
-    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
-    # batch_size=2 halves activation memory. accumulate_grads=2 means the
-    # optimiser steps every 2 batches, so the effective gradient batch is
+    # --- Batch size: 4 -> 1, with gradient accumulation to compensate ---
+    # batch_size=1 quarters activation memory. accumulate_grads=4 means the
+    # optimiser steps every 4 batches, so the effective gradient batch is
     # still 4. Loss scaling is handled in model_v2/training_loop.
     cfg.data.batch_size = 1
     cfg.training.accumulate_grads = 4
