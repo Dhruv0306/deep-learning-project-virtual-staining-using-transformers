@@ -3,6 +3,10 @@ Preprocessing script for building CycleGAN training/test datasets.
 
 Splits whole-slide images into fixed-size patches and writes them into
 trainA/trainB/testA/testB folders.
+
+Patch retention is tissue-aware: tiles with sufficient tissue are always kept,
+while mostly background tiles are randomly sub-sampled to reduce dataset
+imbalance.
 """
 
 import os
@@ -78,6 +82,10 @@ def split_filenames(file_list, train_ratio=0.8, seed=42):
 
     Returns:
         tuple: (train_files, test_files)
+
+    Notes:
+        ``file_list`` is sorted before shuffling so the split remains
+        reproducible for a fixed seed.
     """
     file_list = sorted(file_list)
     np.random.seed(seed)
@@ -107,6 +115,10 @@ def save_patches(
         background_keep_ratio (float): Probability of keeping a background patch.
         white_thresh (int): RGB threshold for near-white background.
         sat_thresh (float): Saturation threshold for low-color background.
+
+    Notes:
+        Patches are saved as 8-bit RGB PNG images. Normalization is deferred
+        to the training dataloader/transform pipeline.
     """
     # Convert to RGB to guarantee 3-channel patches for CycleGAN-style datasets.
     img = Image.open(image_path).convert("RGB")
@@ -140,6 +152,15 @@ def save_patches(
 def main():
     """
     Entry point for preprocessing and dataset split generation.
+
+    Workflow:
+        1. Read source images from ``Un_Stained`` and ``C_Stained``.
+        2. Split each domain into train/test filename lists.
+        3. Extract, filter, and save patches into ``trainA``, ``trainB``,
+           ``testA``, and ``testB``.
+
+    The sample image plot is a quick visual sanity check and does not affect
+    saved patch outputs.
     """
     # Dataset root directory.
     DATASET_DIR = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")

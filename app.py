@@ -9,6 +9,7 @@ patches back into a seamless full-resolution output image.
 Both model versions are supported:
   - v1 (``ViTUNetGenerator``)   — loaded when ``model_version=1``
   - v2 (``ViTUNetGeneratorV2``) — loaded when ``model_version=2``
+  - v3 (``DiTGenerator``)       — loaded when ``model_version=3``
 
 For v2 the architecture hyperparameters (``vit_depth``, ``use_cross_domain``)
 are auto-detected from the checkpoint state dict, so the loaded model always
@@ -21,9 +22,13 @@ CLI usage::
 
 You will be prompted for:
   - Path to the trained checkpoint (``.pth`` file)
-  - Model version (1 or 2)
-  - Path to an unstained image  (A → B translation via G_AB)
-  - Path to a stained image     (B → A translation via G_BA)
+    - Model version (1, 2, or 3)
+    - Path to an unstained image  (A -> B translation)
+    - Path to a stained image     (B -> A translation, v1/v2 only)
+
+Model-version behavior:
+    - v1/v2 run bidirectional translation using ``G_AB`` and ``G_BA``.
+    - v3 runs bidirectional translation (unstained <-> stained) via diffusion sampling with domain conditioning.
 
 Outputs are written to:
   - ``data/reconstructed_stained_output.png``
@@ -41,6 +46,57 @@ from PIL import ImageFile
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def is_v3_checkpoint(ckpt: dict) -> bool:
+    """
+    Return True when a checkpoint dictionary appears to follow v3 schema.
+
+    The current heuristic checks for ``dit_state_dict``.
+    """
+    return "dit_state_dict" in ckpt
+
+
+def load_v3_components(checkpoint_path: str, device: str):
+    """
+    Load v3 DiT + VAE + sampler components.
+
+    The function prefers a serialized diffusion config stored in the
+    checkpoint under ``config`` and falls back to ``get_dit_config()`` when
+    not present.
+
+    Returns:
+        tuple: ``(dit_model, cond_encoder, vae, sampler, diff_cfg)``.
+        ``cond_encoder`` is kept as ``None`` for backward compatibility,
+        since v3 now tokenizes conditions inside the generator.
+    """
+    from config import get_dit_config
+    from model_v3.generator import getGeneratorV3
+    from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
+    from model_v3.vae_wrapper import VAEWrapper
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    diff_cfg = checkpoint.get("config")
+    if diff_cfg is None:
+        diff_cfg = get_dit_config().diffusion
+
+    dit_model = getGeneratorV3(diff_cfg, device=torch.device(device))
+    if "ema_state_dict" in checkpoint:
+        dit_model.load_state_dict(checkpoint["ema_state_dict"])
+    elif "dit_state_dict" in checkpoint:
+        dit_model.load_state_dict(checkpoint["dit_state_dict"])
+    else:
+        raise KeyError("Checkpoint missing both 'ema_state_dict' and 'dit_state_dict'.")
+    dit_model.eval()
+
+    vae = VAEWrapper(diff_cfg.vae_model_id).to(device)
+    vae.eval()
+
+    scheduler = DDPMScheduler(diff_cfg.num_timesteps, diff_cfg.beta_schedule).to(device)
+    sampler = DDIMSampler(scheduler)
+
+    cond_encoder = None
+    return dit_model, cond_encoder, vae, sampler, diff_cfg
 
 
 def _infer_v2_kwargs(state_dict: dict) -> dict:
@@ -80,11 +136,11 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
 
     Args:
         checkpoint_path (str): Path to a ``.pth`` checkpoint file produced by
-            ``training_loop.train()`` or ``training_loop_v2.train_v2()``.
+            ``model_v1.training_loop.train()`` or ``model_v2.training_loop.train_v2()``.
         device (str): Device to load the model onto, e.g. ``"cpu"`` or
             ``"cuda"``.
-        model_version (int): ``1`` loads :class:`~generator.ViTUNetGenerator`;
-            ``2`` loads :class:`~uvcgan_v2_generator.ViTUNetGeneratorV2`.
+        model_version (int): ``1`` loads :class:`~model_v1.generator.ViTUNetGenerator`;
+            ``2`` loads :class:`~model_v2.generator.ViTUNetGeneratorV2`.
 
     Returns:
         tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` — both in ``eval()``
@@ -100,13 +156,13 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     if model_version == 1:
-        from generator import ViTUNetGenerator
+        from model_v1.generator import ViTUNetGenerator
 
         G_AB = ViTUNetGenerator().to(device)
         G_BA = ViTUNetGenerator().to(device)
 
     elif model_version == 2:
-        from uvcgan_v2_generator import ViTUNetGeneratorV2
+        from model_v2.generator import ViTUNetGeneratorV2
 
         # Infer the exact architecture that was used when this checkpoint was saved.
         kwargs = _infer_v2_kwargs(checkpoint["G_AB"])
@@ -393,7 +449,110 @@ def translate_image_from_patches(
             translated_patches.append(translated_patch)
 
             if translated_patches.__len__() % 10 == 0:
-                print(f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches")
+                print(
+                    f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches"
+                )
+
+    reconstructed_padded = reconstruct_tensor_from_patches(
+        translated_patches,
+        positions,
+        padded_image.size,
+        patch_size=patch_size,
+        stride=stride,
+    )
+    reconstructed = reconstructed_padded[:, : original_size[1], : original_size[0]]
+
+    save_image(
+        reconstructed.unsqueeze(0),
+        output_path,
+        normalize=True,
+        value_range=(-1, 1),
+    )
+
+    return original_size, padded_image.size, len(input_patches), output_path
+
+
+def translate_image_from_patches_v3(
+    input_image_path,
+    dit_model,
+    cond_encoder,
+    vae,
+    sampler,
+    transform,
+    output_path,
+    patch_size=256,
+    stride=256,
+    device="cpu",
+    batch_size=1,
+    num_steps=50,
+    prediction_type="v",
+    cfg_scale=1.0,
+):
+    """
+    Translate a whole-slide image using the v3 diffusion pipeline.
+
+    This path supports A -> B translation only (unstained -> stained).
+    Patches are processed in mini-batches, denoised with DDIM sampling, then
+    decoded by the VAE and blended back into a full-resolution image.
+
+    Args:
+        input_image_path (str): Path to the source image.
+        dit_model (nn.Module): DiT denoiser network.
+        cond_encoder (nn.Module | None): Deprecated placeholder for backward
+            compatibility. The generator handles condition tokenization.
+        vae (nn.Module): VAE decoder wrapper used to decode latent samples.
+        sampler: DDIM sampler instance.
+        transform (callable): Preprocessing transform returning normalized tensors.
+        output_path (str): Output image path.
+        patch_size (int): Patch side length.
+        stride (int): Patch stride; use ``patch_size // 2`` for overlap.
+        device (str): Inference device.
+        batch_size (int): Number of patches per diffusion batch.
+        num_steps (int): DDIM inference steps.
+
+    Returns:
+        tuple[tuple[int, int], tuple[int, int], int, str]:
+            ``(original_size, padded_size, num_patches, output_path)``.
+    """
+    from torch.amp.autocast_mode import autocast
+
+    input_image = Image.open(input_image_path).convert("RGB")
+    original_size = input_image.size
+    padded_image, _ = pad_to_patch_multiple(input_image, patch_size=patch_size)
+
+    input_patches, positions = extract_patches_with_coords(
+        padded_image, patch_size=patch_size, stride=stride
+    )
+
+    translated_patches = []
+    use_amp = device == "cuda"
+
+    with torch.inference_mode():
+        for start in range(0, len(input_patches), batch_size):
+            batch = input_patches[start : start + batch_size]
+            batch_tensor = torch.stack([transform(p) for p in batch]).to(device)
+
+            with autocast("cuda", enabled=use_amp):
+                z0 = sampler.sample(
+                    dit_model,
+                    batch_tensor,
+                    shape=(batch_tensor.size(0), 4, 32, 32),
+                    device=torch.device(device),
+                    num_steps=num_steps,
+                    eta=0.0,
+                    prediction_type=prediction_type,
+                    cfg_scale=cfg_scale,
+                    target_domain=1,
+                )
+                fake_B = vae.decode(z0)
+
+            for j in range(fake_B.size(0)):
+                translated_patches.append(fake_B[j].cpu())
+
+            if len(translated_patches) % 10 == 0:
+                print(
+                    f"Processed {len(translated_patches)} / {len(input_patches)} patches"
+                )
 
     reconstructed_padded = reconstruct_tensor_from_patches(
         translated_patches,
@@ -420,16 +579,10 @@ if __name__ == "__main__":
     model_path = input("Enter model path: ")
     model_version = int(
         input(
-            "Enter 1 for Hybrid UVCGAN based or 2 for True-UVCGAN based generator model: "
+            "Enter 1 for Hybrid UVCGAN based, 2 for True-UVCGAN based, 3 for DiT diffusion: "
         )
     )
 
-    # Load the model
-    G_AB, G_BA = load_model(
-        checkpoint_path=model_path, device=device, model_version=model_version
-    )
-
-    # Create transform
     patch_size = 256
     stride = patch_size // 2
     transform = transforms.Compose(
@@ -440,67 +593,120 @@ if __name__ == "__main__":
         ]
     )
 
-    # Image paths
-    unstained_image_path = input("Provide Path to Unstained Image: ")
-    stained_image_path = input("Provide Path to Stained Image: ")
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
-    unstained_image_path = (
-        os.path.join(
-            dataset_root,
-            "Un_Stained",
-            "HC21-01338(A3-1).10X unstained.jpg",
-        )
-        if not unstained_image_path
-        else os.path.normpath(unstained_image_path)
-    )
-    stained_image_path = (
-        os.path.join(
-            dataset_root,
-            "C_Stained",
-            "HC21-01338(A3-2).10X unstained.jpg",
-        )
-        if not stained_image_path
-        else os.path.normpath(stained_image_path)
-    )
 
-    print(f"Unstained Image Path: {unstained_image_path}")
-    print(f"Stained Image Path: {stained_image_path}")
-
-    # A -> B (unstained -> stained)
-    original_size, padded_size, num_patches, stained_output_path = (
-        translate_image_from_patches(
-            input_image_path=unstained_image_path,
-            model=G_AB,
-            transform=transform,
-            output_path=os.path.join("data", "reconstructed_stained_output.png"),
-            patch_size=patch_size,
-            stride=stride,
-            device=device,
+    if model_version == 3:
+        if not model_path or not model_path.strip():
+            raise ValueError("Checkpoint_path is required")
+        dit_model, cond_encoder, vae, sampler, diff_cfg = load_v3_components(
+            model_path, device=device
         )
-    )
 
-    print(f"[Stain] Original Image size: {original_size}")
-    print(f"[Stain] Padded Image size: {padded_size}")
-    print(f"[Stain] Num patches: {num_patches}")
-    print(f"[Stain] Saved reconstructed stained image at: {stained_output_path}")
-    print(f"[Stain] Patch stride: {stride}")
-
-    # B -> A (stained -> unstained)
-    original_size, padded_size, num_patches, unstained_output_path = (
-        translate_image_from_patches(
-            input_image_path=stained_image_path,
-            model=G_BA,
-            transform=transform,
-            output_path=os.path.join("data", "reconstructed_unstained_output.png"),
-            patch_size=patch_size,
-            stride=stride,
-            device=device,
+        unstained_image_path = input("Provide Path to Unstained Image: ")
+        unstained_image_path = (
+            os.path.join(
+                dataset_root,
+                "Un_Stained",
+                "HC21-01338(A3-1).10X unstained.jpg",
+            )
+            if not unstained_image_path
+            else os.path.normpath(unstained_image_path)
         )
-    )
-    print(f"[Unstain] Original Image size: {original_size}")
-    print(f"[Unstain] Padded Image size: {padded_size}")
-    print(f"[Unstain] Num patches: {num_patches}")
-    print(f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}")
-    print(f"[Unstain] Patch stride: {stride}")
+        print(f"Unstained Image Path: {unstained_image_path}")
+
+        batch_size = 4 if device == "cuda" else 1
+        original_size, padded_size, num_patches, stained_output_path = (
+            translate_image_from_patches_v3(
+                input_image_path=unstained_image_path,
+                dit_model=dit_model,
+                cond_encoder=cond_encoder,
+                vae=vae,
+                sampler=sampler,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+                batch_size=batch_size,
+                num_steps=diff_cfg.num_inference_steps,
+                prediction_type=diff_cfg.prediction_type,
+                cfg_scale=diff_cfg.cfg_scale,
+            )
+        )
+
+        print(f"[Stain/v3] Original Image size: {original_size}")
+        print(f"[Stain/v3] Padded Image size: {padded_size}")
+        print(f"[Stain/v3] Num patches: {num_patches}")
+        print(f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}")
+        print(f"[Stain/v3] Patch stride: {stride}")
+    else:
+        # Load the model
+        G_AB, G_BA = load_model(
+            checkpoint_path=model_path, device=device, model_version=model_version
+        )
+
+        # Image paths
+        unstained_image_path = input("Provide Path to Unstained Image: ")
+        stained_image_path = input("Provide Path to Stained Image: ")
+        unstained_image_path = (
+            os.path.join(
+                dataset_root,
+                "Un_Stained",
+                "HC21-01338(A3-1).10X unstained.jpg",
+            )
+            if not unstained_image_path
+            else os.path.normpath(unstained_image_path)
+        )
+        stained_image_path = (
+            os.path.join(
+                dataset_root,
+                "C_Stained",
+                "HC21-01338(A3-2).10X unstained.jpg",
+            )
+            if not stained_image_path
+            else os.path.normpath(stained_image_path)
+        )
+
+        print(f"Unstained Image Path: {unstained_image_path}")
+        print(f"Stained Image Path: {stained_image_path}")
+
+        # A -> B (unstained -> stained)
+        original_size, padded_size, num_patches, stained_output_path = (
+            translate_image_from_patches(
+                input_image_path=unstained_image_path,
+                model=G_AB,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+
+        print(f"[Stain] Original Image size: {original_size}")
+        print(f"[Stain] Padded Image size: {padded_size}")
+        print(f"[Stain] Num patches: {num_patches}")
+        print(f"[Stain] Saved reconstructed stained image at: {stained_output_path}")
+        print(f"[Stain] Patch stride: {stride}")
+
+        # B -> A (stained -> unstained)
+        original_size, padded_size, num_patches, unstained_output_path = (
+            translate_image_from_patches(
+                input_image_path=stained_image_path,
+                model=G_BA,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_unstained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+        print(f"[Unstain] Original Image size: {original_size}")
+        print(f"[Unstain] Padded Image size: {padded_size}")
+        print(f"[Unstain] Num patches: {num_patches}")
+        print(
+            f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}"
+        )
+        print(f"[Unstain] Patch stride: {stride}")
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True

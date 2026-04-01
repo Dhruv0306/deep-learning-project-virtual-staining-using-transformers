@@ -1,69 +1,60 @@
-# `trainModel.py` — Training Entry Point
+# trainModel.py Training Entry Point
 
-Source of truth: `../trainModel.py`
+Source of truth: ../trainModel.py
 
-**Role:** Interactive command-line entry point for launching a training run. Prompts the user for key parameters, creates timestamped output directories, dispatches to the appropriate training loop (v1 or v2), and saves training history on completion.
+This script is the interactive launcher for all training variants in this repository.
 
----
+## What It Does
 
-## Function: `main()`
+1. Prompts for runtime parameters:
+   - epoch size
+   - number of epochs
+   - test size
+   - model version (1, 2, or 3)
+2. Creates a timestamped model output directory under:
+   - data/E_Staining_DermaRepo/H_E-Staining_dataset/
+3. Creates a validation_images subfolder.
+4. Dispatches to the selected training loop.
+5. Saves training history as both plot and CSV.
 
-### Interactive Prompts
+## Model Version Dispatch
 
-| Prompt | Type | Description |
-|---|---|---|
-| `Enter Epoch Size:` | `int` | Number of training samples per epoch. Passed directly to `getDataLoader` via the training loop |
-| `Enter Number of Epochs:` | `int` | Total number of training epochs |
-| `Enter Test Size:` | `float` | Number of test samples to export during final evaluation |
-| `Enter model version you want 1 for Hybrid and 2 for true UVCGAN:` | `int` | `1` launches `training_loop.train()`, `2` launches `training_loop_v2.train_v2()` |
+- model_version = 1
+  - Calls model_v1.training_loop.train_v1
+  - Model directory prefix: models_
 
-### Dispatching
+- model_version = 2
+  - Calls model_v2.training_loop.train_v2
+  - Uses config.get_8gb_config()
+  - Model directory prefix: models_v2_
 
-**Model version 2 (True UVCGAN v2):**
-- Creates a timestamped directory: `models_v2_{YYYY_MM_DD_HH_MM_SS}/`
-- Loads config via `get_8gb_config()` (VRAM-optimised for 8 GB GPUs)
-- Calls `train_v2(epoch_size, num_epochs, model_dir, val_dir, test_size, cfg)`
+- model_version = 3
+  - Calls model_v3.training_loop.train_v3
+  - Uses config.get_dit_8gb_config()
+  - Model directory prefix: models_v3_
 
-**Model version 1 (Hybrid UVCGAN + CycleGAN):**
-- Creates a timestamped directory: `models_{YYYY_MM_DD_HH_MM_SS}/`
-- Calls `train(epoch_size, num_epochs, model_dir, val_dir, test_size)` with hyperparameters hardcoded inside `training_loop.py`
+## Return Signature
 
-Both versions create a `validation_images/` subdirectory inside the model directory before launching.
+main() returns a consistent tuple:
 
-### Post-training
+(history, G_AB, G_BA, D_A, D_B)
 
-After training completes:
-1. `visualize_history(history, model_dir)` — saves a 2×2 loss plot as `training_history.png`
-2. `save_history_to_csv(history, ...)` — saves the full per-batch history as `training_history.csv`
+For model version 3, values are mapped to preserve compatibility with tooling that expects CycleGAN-style outputs:
 
-### Returns
+- G_AB <- dit_model
+- G_BA <- ema_model
+- D_A <- cond_encoder
+- D_B <- None
 
-`(history, G_AB, G_BA, D_A, D_B)` — the trained models and complete training history dict.
+## Saved Artifacts
 
----
+Each run directory contains at least:
 
-## Example Usage
+- validation_images/
+- training_history.csv
+- training_history.png
+- model checkpoints created by the selected training loop
 
-```
-$ python trainModel.py
-Enter Epoch Size: 3000
-Enter Number of Epochs: 200
-Enter Test Size: 200
-Enter model version you want 1 for Hybrid and 2 for true UVCGAN: 2
-Model directory: data\...\models_v2_2024_01_15_10_30_00
-Validation image directory: data\...\models_v2_...\validation_images
-```
+## Example
 
----
-
-## Output Directory Structure
-
-```
-models_v2_{timestamp}/
-    ├── validation_images/
-    │       └── image_*_A.png, image_*_B.png    ← per-epoch visual checks
-    ├── checkpoint_epoch_*.pth                   ← periodic checkpoints
-    ├── final_checkpoint_epoch_*.pth             ← final trained weights
-    ├── training_history.csv                     ← per-batch loss log
-    └── training_history.png                     ← loss curve plot
-```
+python trainModel.py

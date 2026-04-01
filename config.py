@@ -1,9 +1,11 @@
 """
-Centralized configuration manager for UVCGAN training.
+Centralized configuration manager for training and inference presets.
 
-Provides dataclasses for generator, discriminator, loss, training, and data
-hyperparameters.  Supports switching between the original v1 (CycleGAN/
-UVCGAN-style) and the new v2 (true UVCGAN) architecture via model_version.
+Provides dataclasses for generator, discriminator, loss, training, data, and
+diffusion hyperparameters. The top-level ``model_version`` switch supports:
+    - v1: Hybrid CycleGAN/UVCGAN baseline
+    - v2: True UVCGAN v2
+    - v3: DiT diffusion pipeline
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - GAN objective  : LSGAN, NOT Wasserstein
@@ -12,7 +14,8 @@ v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - Adam betas      : (0.5, 0.999), lr=2e-4  (standard LSGAN/CycleGAN values)
   - lambda_contrastive / lambda_spectral: 0.0 initially; enable once stable
 
-For 8 GB VRAM use get_8gb_config() instead of get_default_config().
+For 8 GB VRAM, prefer ``get_8gb_config()`` for v2 and
+``get_dit_8gb_config()`` for v3.
 """
 
 import os
@@ -132,6 +135,9 @@ class TrainingConfig:
     # Set to 2 when batch_size=2 to keep effective batch = 4.
     accumulate_grads: int = 1
     validation_warmup_epochs: int = 10
+    validation_size: int = 100
+    validation_fid_samples: int = 200
+    validation_fid_min_samples: int = 50
 
 
 @dataclass
@@ -152,11 +158,66 @@ class DataConfig:
             Currently unused.
     """
 
-    data_root: str = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
+    data_root: str = os.path.join(
+        "data", "E_Staining_DermaRepo", "H_E-Staining_dataset"
+    )
     image_size: int = 256
     batch_size: int = 4
     num_workers: int = 4
+    prefetch_factor: int = 2
     augment: bool = True
+
+
+@dataclass
+class DiffusionConfig:
+    """
+    Hyperparameters for the v3 diffusion model.
+    """
+
+    num_timesteps: int = 1000
+    beta_schedule: str = "cosine"
+    dit_hidden_dim: int = 512
+    dit_depth: int = 8
+    dit_heads: int = 8
+    dit_patch_size: int = 2
+    dit_mlp_ratio: float = 4.0
+    lambda_perceptual_v3: float = 0.0
+    num_inference_steps: int = 50
+    use_gradient_checkpointing: bool = False
+    vae_model_id: str = "stabilityai/sd-vae-ft-mse"
+    prediction_type: str = "v"
+    cond_dropout_prob: float = 0.1
+    cfg_scale: float = 2.0
+    cond_patch_size: int = 16
+    cond_token_pool_stride: int = 1
+    use_cross_attention: bool = True
+    min_snr_gamma: float = 5.0
+    perceptual_every_n_steps: int = 4
+    perceptual_batch_fraction: float = 0.5
+    # --- CycleDiT v3 (phase-0/phase-1/phase-2) controls ---
+    lambda_denoising: float = 1.0
+    lambda_adv_v3: float = 0.5
+    lambda_adv_warmup_steps: int = 3000
+    lambda_cycle_v3: float = 5.0
+    lambda_identity_v3_start: float = 1.0
+    lambda_identity_v3_end: float = 0.0
+    identity_decay_end_ratio: float = 0.3
+    cycle_ddim_steps: int = 10
+    cycle_ddim_eta: float = 0.0
+    use_r1_penalty: bool = True
+    r1_gamma: float = 10.0
+    r1_interval: int = 16
+    adaptive_d_update: bool = True
+    adaptive_d_loss_threshold: float = 0.1
+    grad_clip_norm_g: float = 1.0
+    # ProjectionDiscriminator toggles
+    disc_use_local: bool = True
+    disc_use_global: bool = True
+    disc_use_fft: bool = True
+    disc_base_channels: int = 64
+    disc_global_base_channels: int = 64
+    disc_fft_base_channels: int = 32
+    disc_n_layers: int = 3
 
 
 @dataclass
@@ -171,7 +232,7 @@ class UVCGANConfig:
 
     Fields:
         model_version (int): ``1`` for the hybrid UVCGAN + CycleGAN model;
-            ``2`` for the true UVCGAN v2 model.
+            ``2`` for the true UVCGAN v2 model; ``3`` for DiT diffusion.
         generator (GeneratorConfig): Generator architecture settings.
         discriminator (DiscriminatorConfig): Discriminator settings.
         loss (LossConfig): Loss function weights and options.
@@ -190,6 +251,7 @@ class UVCGANConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     model_dir: Optional[str] = None
     val_dir: Optional[str] = None
 
@@ -198,14 +260,14 @@ class UVCGANConfig:
         Validate inter-field constraints after dataclass initialisation.
 
         Raises:
-            ValueError: If ``model_version`` is not 1 or 2, or if
+            ValueError: If ``model_version`` is not 1, 2, or 3, or if
                 ``decay_start_epoch`` is too close to ``num_epochs`` to
                 allow a meaningful linear decay phase (fewer than 2 epochs
                 of decay would remain).
         """
-        if self.model_version not in (1, 2):
+        if self.model_version not in (1, 2, 3):
             raise ValueError(
-                f"model_version must be 1 or 2, got {self.model_version!r}."
+                f"model_version must be 1, 2, or 3, got {self.model_version!r}."
             )
         if self.training.decay_start_epoch >= self.training.num_epochs - 1:
             raise ValueError(
@@ -216,10 +278,15 @@ class UVCGANConfig:
 def get_default_config(model_version: int = 2) -> UVCGANConfig:
     """
     Return a default UVCGANConfig for the requested model version.
-    Assumes sufficient VRAM (12+ GB).
+    Assumes sufficient VRAM (roughly 12+ GB).
 
     Args:
-        model_version: 1 (original CycleGAN/UVCGAN) or 2 (true UVCGAN v2).
+        model_version: ``1`` (hybrid baseline), ``2`` (true UVCGAN v2),
+            or ``3`` (DiT diffusion).
+
+    Notes:
+        Explicit architecture overrides are applied only for ``model_version=1``
+        to keep legacy behavior aligned with the v1 training loop.
     """
     cfg = UVCGANConfig(model_version=model_version)
 
@@ -237,7 +304,7 @@ def get_default_config(model_version: int = 2) -> UVCGANConfig:
         cfg.training.lr = 2e-4
         cfg.training.beta1 = 0.5
         cfg.training.beta2 = 0.999
-        cfg.data.batch_size = 2
+        cfg.data.batch_size = 1
 
     return cfg
 
@@ -264,12 +331,12 @@ def get_8gb_config() -> UVCGANConfig:
     # Kept at 3 (full multi-scale) for stability/quality.
     cfg.discriminator.num_scales = 3
 
-    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
-    # batch_size=2 halves activation memory. accumulate_grads=2 means the
-    # optimiser steps every 2 batches, so the effective gradient batch is
-    # still 4. Loss scaling is handled in training_loop_v2.
-    cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
+    # --- Batch size: 4 -> 1, with gradient accumulation to compensate ---
+    # batch_size=1 quarters activation memory. accumulate_grads=4 means the
+    # optimiser steps every 4 batches, so the effective gradient batch is
+    # still 4. Loss scaling is handled in model_v2/training_loop.
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
 
     # --- Perceptual loss resize ---
     # Set to 180 based on current memory/quality trade-offs.
@@ -282,5 +349,84 @@ def get_8gb_config() -> UVCGANConfig:
     cfg.loss.lambda_gp = 0.1
     cfg.training.use_amp = True  # critical - do not disable
     cfg.training.n_critic = 1
+
+    return cfg
+
+
+def get_dit_config() -> UVCGANConfig:
+    """
+    Return a default config for v3 diffusion training.
+
+    The returned profile enables gradient checkpointing and uses the
+    standard v3 architecture settings defined in :class:`DiffusionConfig`.
+    """
+    cfg = UVCGANConfig(model_version=3)
+    cfg.diffusion.dit_hidden_dim = 256
+    cfg.diffusion.dit_depth = 4
+    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_patch_size = 8
+    cfg.diffusion.dit_mlp_ratio = 2.0
+    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.prediction_type = "v"
+    cfg.diffusion.cond_dropout_prob = 0.1
+    cfg.diffusion.cfg_scale = 2.5
+    cfg.diffusion.cond_patch_size = 8
+    cfg.diffusion.num_inference_steps = 20
+    cfg.diffusion.min_snr_gamma = 5.0
+    cfg.diffusion.lambda_perceptual_v3 = 0.0
+    cfg.diffusion.perceptual_every_n_steps = 4
+    cfg.diffusion.perceptual_batch_fraction = 0.5
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
+    cfg.training.validation_size = 100
+    cfg.training.validation_fid_samples = 600
+    cfg.training.validation_fid_min_samples = 50
+    return cfg
+
+
+def get_dit_8gb_config() -> UVCGANConfig:
+    """
+    Return a VRAM-optimised config for v3 diffusion training.
+
+    Relative to :func:`get_dit_config`, this profile enables gradient
+    checkpointing for DiT blocks and uses a lighter validation setup.
+    """
+    cfg = UVCGANConfig(model_version=3)
+    cfg.diffusion.dit_hidden_dim = 256
+    cfg.diffusion.dit_depth = 4
+    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_patch_size = 8
+    cfg.diffusion.dit_mlp_ratio = 2.0
+    cfg.diffusion.use_gradient_checkpointing = True
+    cfg.diffusion.prediction_type = "v"
+    cfg.diffusion.cond_dropout_prob = 0.1
+    cfg.diffusion.cfg_scale = 1.0
+    cfg.diffusion.cond_patch_size = 32
+    cfg.diffusion.cond_token_pool_stride = 4
+    cfg.diffusion.use_cross_attention = False
+    cfg.diffusion.num_inference_steps = 20
+    cfg.diffusion.min_snr_gamma = 5.0
+    cfg.diffusion.perceptual_every_n_steps = 1
+    cfg.diffusion.perceptual_batch_fraction = 0.5
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
+    # Slightly higher worker count helps keep GPU fed on fast local SSDs.
+    cfg.data.num_workers = 2
+    cfg.data.prefetch_factor = 2
+    cfg.loss.perceptual_resize = 256
+    cfg.diffusion.lambda_perceptual_v3 = 0.00
+    cfg.training.validation_size = 20
+    cfg.training.validation_fid_samples = 600
+    cfg.training.validation_fid_min_samples = 50
+    cfg.diffusion.disc_use_fft = (
+        False  # FFT discriminator is memory-intensive; disable for 8 GB
+    )
+    cfg.diffusion.disc_use_global = False  # Disable global branch to save memory
+    cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
+    cfg.diffusion.disc_base_channels = 16  # Reduce base channels further to save memory
+    cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)
+    cfg.diffusion.disc_n_layers = (
+        2  # Reduce layers in each discriminator to save memory
+    )
 
     return cfg

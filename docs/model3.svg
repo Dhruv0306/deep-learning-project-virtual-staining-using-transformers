@@ -1,0 +1,365 @@
+<svg width="100%" viewBox="0 0 960 1520" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="1520" fill="rgb(18,18,18)"/>
+
+  <!-- ═══ TITLE ══════════════════════════════════════════════════════════ -->
+  <text x="480" y="28" text-anchor="middle"
+    font-family="'Anthropic Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+    font-size="14" font-weight="500" fill="rgb(250,249,245)">
+    Conditional Latent Diffusion Transformer  —  Model 3 (DiT)
+  </text>
+
+  <!-- ═══ LEGEND ═════════════════════════════════════════════════════════ -->
+  <line x1="120" y1="50" x2="148" y2="50" stroke="rgb(239,159,39)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="154" y="54" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(194,192,182)">DDIM denoising path</text>
+  <line x1="350" y1="50" x2="378" y2="50" stroke="rgb(93,202,165)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="384" y="54" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(194,192,182)">EMA weights (inference only)</text>
+  <line x1="620" y1="50" x2="648" y2="50" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="654" y="54" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(194,192,182)">main forward flow</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 1  —  DOMAIN INPUTS  (y=80..130)
+  ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Domain A  x=60..280 -->
+  <rect x="60" y="80" width="220" height="50" rx="10" fill="rgb(8,80,65)" stroke="rgb(93,202,165)" stroke-width="0.5"/>
+  <text x="170" y="97" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(159,225,203)">Domain A  (unstained)</text>
+  <text x="170" y="115" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(93,202,165)">N × 3 × 256 × 256</text>
+
+  <!-- Domain B  x=680..900 -->
+  <rect x="680" y="80" width="220" height="50" rx="10" fill="rgb(113,43,19)" stroke="rgb(240,153,123)" stroke-width="0.5"/>
+  <text x="790" y="97" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(245,196,179)">Domain B  (stained)</text>
+  <text x="790" y="115" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(240,153,123)">N × 3 × 256 × 256</text>
+
+  <!-- down arrows from inputs -->
+  <line x1="170" y1="130" x2="170" y2="148" stroke="rgb(156,154,146)" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="790" y1="130" x2="790" y2="148" stroke="rgb(156,154,146)" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 2  —  CONDITION ENCODER (left)  +  VAE ENCODER (right)
+       Condition Encoder outer: x=60..280  y=150..560
+       VAE Encoder outer:       x=680..900 y=150..400
+  ══════════════════════════════════════════════════════════════════════ -->
+
+  <!-- ── Condition Encoder outer box ── -->
+  <rect x="60" y="150" width="220" height="410" rx="15" fill="rgb(8,80,65)" stroke="rgb(93,202,165)" stroke-width="0.5"/>
+  <text x="170" y="170" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(159,225,203)">Condition Encoder</text>
+  <text x="170" y="187" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(93,202,165)">ConditionEncoder  →  c_emb</text>
+
+  <!-- conv1 -->
+  <rect x="80" y="200" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="214" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">conv1  stride-2 + IN + ReLU</text>
+  <text x="170" y="228" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">3 → 64 ch  ·  128×128</text>
+  <line x1="170" y1="236" x2="170" y2="250" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- conv2 -->
+  <rect x="80" y="252" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="266" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">conv2  stride-2 + IN + ReLU</text>
+  <text x="170" y="280" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">64 → 128 ch  ·  64×64</text>
+  <line x1="170" y1="288" x2="170" y2="302" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- conv3 -->
+  <rect x="80" y="304" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="318" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">conv3  stride-2 + IN + ReLU</text>
+  <text x="170" y="332" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">128 → 256 ch  ·  32×32</text>
+  <line x1="170" y1="340" x2="170" y2="354" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- conv4 -->
+  <rect x="80" y="356" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="370" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">conv4  stride-2 + IN + ReLU</text>
+  <text x="170" y="384" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">256 → 512 ch  ·  16×16</text>
+  <line x1="170" y1="392" x2="170" y2="406" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- GAP -->
+  <rect x="80" y="408" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="422" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">Global Avg Pool</text>
+  <text x="170" y="436" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">512 → (N, 512)</text>
+  <line x1="170" y1="444" x2="170" y2="458" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Linear proj -->
+  <rect x="80" y="460" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="474" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">Linear projection</text>
+  <text x="170" y="488" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">512 → hidden_dim  →  c_emb</text>
+
+  <!-- arrow out of ConditionEncoder bottom -->
+  <line x1="170" y1="560" x2="170" y2="578" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ── VAE Encoder outer box  x=680..900  y=150..390 ── -->
+  <rect x="680" y="150" width="220" height="240" rx="15" fill="rgb(113,43,19)" stroke="rgb(240,153,123)" stroke-width="0.5"/>
+  <text x="790" y="170" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(245,196,179)">VAE Encoder  (frozen)</text>
+  <text x="790" y="187" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(240,153,123)">stabilityai/sd-vae-ft-mse</text>
+
+  <!-- KL encoder -->
+  <rect x="700" y="200" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="790" y="214" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">KL encoder</text>
+  <text x="790" y="228" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">3×256×256  →  4×32×32</text>
+  <line x1="790" y1="236" x2="790" y2="250" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- z0 -->
+  <rect x="700" y="252" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="790" y="266" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">latent sample  z0</text>
+  <text x="790" y="280" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">× 0.18215  ·  N×4×32×32</text>
+  <line x1="790" y1="288" x2="790" y2="302" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- add_noise -->
+  <rect x="700" y="304" width="180" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="790" y="318" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">DDPMScheduler.add_noise</text>
+  <text x="790" y="332" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">add_noise(z0, eps, t)  →  z_t</text>
+
+  <!-- arrow from VAE encoder down toward DiT input -->
+  <line x1="790" y1="390" x2="790" y2="578" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ── eps ~ N(0,I)  floating right of VAE  x=680..900  y=408..456 ── -->
+  <rect x="680" y="408" width="220" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="790" y="422" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">eps ~ N(0, I)</text>
+  <text x="790" y="436" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">sampled Gaussian noise  N×4×32×32</text>
+  <!-- eps feeds into add_noise (upward) -->
+  <line x1="790" y1="408" x2="790" y2="340" stroke="rgb(194,192,182)" stroke-width="0.8" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <!-- eps target line feeds right then down — we draw it later near DiT -->
+
+  <!-- ── Timestep Embedding  x=330..630  y=150..240 ── -->
+  <rect x="330" y="150" width="300" height="86" rx="10" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="480" y="172" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(206,203,246)">Timestep Embedding</text>
+  <text x="480" y="193" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(175,169,236)">sinusoidal(t)  →  MLP(SiLU)  →  t_emb</text>
+  <text x="480" y="212" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">t ∈ [0, T-1]  →  t_emb  (N, hidden_dim)</text>
+  <line x1="480" y1="236" x2="480" y2="254" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ── cond  =  t_emb + c_emb  x=330..630  y=256..316 ── -->
+  <rect x="330" y="256" width="300" height="56" rx="8" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="480" y="277" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(206,203,246)">cond  =  t_emb + c_emb</text>
+  <text x="480" y="297" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(175,169,236)">(N, hidden_dim)  — injected into every DiTBlock</text>
+
+  <!-- c_emb arrow from ConditionEncoder right side into cond box -->
+  <line x1="280" y1="284" x2="328" y2="284" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- cond arrow down into DiT backbone -->
+  <line x1="480" y1="312" x2="480" y2="578" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 3  —  DiT BACKBONE
+       Outer: x=300..660  y=580..940
+  ══════════════════════════════════════════════════════════════════════ -->
+  <rect x="300" y="580" width="360" height="360" rx="15" fill="rgb(39,33,92)" stroke="rgb(127,119,221)" stroke-width="0.5"/>
+  <text x="480" y="602" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(206,203,246)">DiTGenerator  —  DiT Backbone</text>
+  <text x="480" y="620" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(175,169,236)">N × DiTBlock  (adaLN-Zero)</text>
+
+  <!-- adaLN cond label on the incoming arrow -->
+  <text x="494" y="560" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(239,159,39)">cond = t_emb + c_emb</text>
+
+  <!-- PatchEmbed -->
+  <rect x="318" y="630" width="324" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="480" y="644" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">PatchEmbed  (patch_size=2)</text>
+  <text x="480" y="658" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">N×4×32×32  →  tokens (N, 256, hidden_dim) + 2D sincos pos_emb</text>
+  <line x1="480" y1="666" x2="480" y2="680" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DiTBlock -->
+  <rect x="318" y="682" width="324" height="84" rx="8" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="480" y="700" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(206,203,246)">DiTBlock × N  (adaLN-Zero)</text>
+  <text x="480" y="718" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">cond MLP(SiLU) → (γ₁,β₁,α₁,γ₂,β₂,α₂)  ·  zero-init gate α</text>
+  <text x="480" y="734" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">LayerNorm(γ,β) → Multi-Head Self-Attn → gate(α)  +  residual</text>
+  <text x="480" y="750" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">MLP (×4 expand, SiLU) → gate(α)  +  residual</text>
+  <line x1="480" y1="766" x2="480" y2="780" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Linear head + Unpatchify -->
+  <rect x="318" y="782" width="324" height="36" rx="5" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="480" y="796" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">Linear head  +  Unpatchify</text>
+  <text x="480" y="810" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">(N, 256, hidden_dim)  →  eps_pred  (N, 4, 32, 32)</text>
+  <line x1="480" y1="818" x2="480" y2="832" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- MSE loss box -->
+  <rect x="318" y="834" width="324" height="52" rx="8" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="480" y="852" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(206,203,246)">L_simple  =  MSE(eps_pred, eps)</text>
+  <text x="480" y="872" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">+ lambda_perc · VGG19(dec(z0_pred), real_B)  [default lambda=0]</text>
+
+  <!-- ── eps target dashed line: from eps box right edge → across → down to MSE ── -->
+  <!-- right of eps box: x=900, y=426. Go right to x=920, down to y=858, left to MSE right edge x=642 -->
+  <path d="M 900 426 L 920 426 L 920 856 L 644 856"
+    fill="none" stroke="rgb(194,192,182)" stroke-width="0.8" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="924" y="648" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(194,192,182)">eps target</text>
+
+  <!-- z_t arrow: from VAE right col (x=790 y=390) travels left into DiT left edge (x=300, y=710) -->
+  <!-- path: down from 790,390 to 790,578, then left into DiT top (already handled by straight line above) -->
+  <!-- Actually VAE bottom arrow goes to x=790,y=578 then we need to route into DiT left side at y=710 -->
+  <!-- Reroute: from 790,578 go left to 660 at y=710 -->
+  <path d="M 790 578 L 790 710 L 644 710"
+    fill="none" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="710" y="703" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(211,209,199)">z_t</text>
+
+  <!-- ── EMA model  x=60..280  y=580..660 ── -->
+  <rect x="60" y="580" width="220" height="80" rx="10" fill="rgb(20,50,40)" stroke="rgb(93,202,165)" stroke-width="0.5" stroke-dasharray="5 3"/>
+  <text x="170" y="600" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(159,225,203)">EMA  DiTGenerator</text>
+  <text x="170" y="619" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(93,202,165)">decay = 0.9999</text>
+  <text x="170" y="637" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(93,202,165)">used at inference / validation only</text>
+  <!-- EMA update label -->
+  <text x="170" y="676" text-anchor="middle" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(93,202,165)">ema_p ← 0.9999·ema_p + 0.0001·p</text>
+  <!-- EMA arrow connects to DiT backbone left edge -->
+  <line x1="280" y1="620" x2="298" y2="620" stroke="rgb(93,202,165)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+
+  <!-- ── Optional perceptual path note — sits just below the MSE loss box, well inside the DiT area ── -->
+  <text x="480" y="906" text-anchor="middle"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(194,192,182)">
+    training only: predict_x0(z_t, eps_pred, t)  →  VAE decode  →  VGG perceptual term (optional)
+  </text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 4  —  INFERENCE PATH  y=1008..1110
+       Gap from DiT bottom (y=940): note at 906, exit arrow 940→968, label at 982, boxes at 1008
+  ══════════════════════════════════════════════════════════════════════ -->
+  <line x1="480" y1="940" x2="480" y2="970" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="480" y="984" text-anchor="middle" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" font-weight="500" fill="rgb(194,192,182)">Inference  (DDIM reverse  T → 0)</text>
+
+  <!-- Gaussian noise start  x=60..280  y=1008..1054 -->
+  <rect x="60" y="1008" width="220" height="46" rx="8" fill="rgb(68,68,65)" stroke="rgb(180,178,169)" stroke-width="0.5"/>
+  <text x="170" y="1025" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">z_t ~ N(0, I)</text>
+  <text x="170" y="1042" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">Gaussian start  (N, 4, 32, 32)</text>
+  <line x1="280" y1="1031" x2="358" y2="1031" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- DDIM sampler  x=360..620  y=1008..1054 -->
+  <rect x="360" y="1008" width="260" height="46" rx="8" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="490" y="1025" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(206,203,246)">DDIMSampler  (50 steps)</text>
+  <text x="490" y="1042" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">EMA DiT + cond  ·  eta=0  →  z0</text>
+  <line x1="620" y1="1031" x2="678" y2="1031" stroke="rgb(239,159,39)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+
+  <!-- c_emb into DDIM: from ConditionEncoder bottom left, route down and right -->
+  <path d="M 170 660 L 170 1031 L 358 1031"
+    fill="none" stroke="rgb(93,202,165)" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+
+  <!-- VAE Decoder  x=680..900  y=1008..1054 -->
+  <rect x="680" y="1008" width="220" height="46" rx="8" fill="rgb(113,43,19)" stroke="rgb(240,153,123)" stroke-width="0.5"/>
+  <text x="790" y="1025" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(245,196,179)">VAE Decoder  (frozen)</text>
+  <text x="790" y="1042" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(240,153,123)">z0 ÷ 0.18215  ·  4×32×32 → 3×256×256</text>
+  <line x1="790" y1="1054" x2="790" y2="1072" stroke="rgb(156,154,146)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- fake_B output  x=680..900  y=1074..1122 -->
+  <rect x="680" y="1074" width="220" height="48" rx="10" fill="rgb(113,43,19)" stroke="rgb(240,153,123)" stroke-width="0.5"/>
+  <text x="790" y="1092" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(245,196,179)">fake_B  (stained output)</text>
+  <text x="790" y="1110" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(240,153,123)">N × 3 × 256 × 256</text>
+
+  <!-- ── Checkpoint format  x=60..280  y=700..830 ── -->
+  <rect x="60" y="700" width="220" height="180" rx="10" fill="rgb(44,44,42)" stroke="rgb(136,135,128)" stroke-width="0.5"/>
+  <text x="170" y="720" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">Checkpoint keys</text>
+  <text x="80" y="742" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">dit_state_dict</text>
+  <text x="80" y="760" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">ema_state_dict</text>
+  <text x="80" y="778" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">cond_encoder_state_dict</text>
+  <text x="80" y="796" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">optimizer_state_dict</text>
+  <text x="80" y="814" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">config  (DiffusionConfig)</text>
+  <text x="170" y="858" text-anchor="middle" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(136,135,128)">saved every 20 epochs</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 5  —  OPTIMISER + LR SCHEDULE  y=1148..1208
+  ══════════════════════════════════════════════════════════════════════ -->
+  <rect x="60" y="1148" width="400" height="58" rx="10" fill="rgb(44,44,42)" stroke="rgb(136,135,128)" stroke-width="0.5"/>
+  <text x="260" y="1168" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(211,209,199)">AdamW  Optimiser</text>
+  <text x="260" y="1188" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(180,178,169)">lr=1e-4  ·  beta=(0.9,0.999)  ·  weight_decay=0.01  ·  grad_clip=1.0  ·  AMP</text>
+
+  <rect x="500" y="1148" width="400" height="58" rx="10" fill="rgb(44,44,42)" stroke="rgb(136,135,128)" stroke-width="0.5"/>
+  <text x="700" y="1168" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="14" font-weight="500" fill="rgb(211,209,199)">LR Schedule</text>
+  <text x="700" y="1188" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" fill="rgb(180,178,169)">linear warm-up  →  cosine decay  →  lr_min=1e-6  ·  accumulate_grads=2</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 6  —  VRAM BUDGET TABLE  y=1232..1360
+  ══════════════════════════════════════════════════════════════════════ -->
+  <rect x="60" y="1232" width="840" height="128" rx="10" fill="rgb(30,30,28)" stroke="rgb(88,87,80)" stroke-width="0.5"/>
+  <text x="480" y="1252" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" font-weight="500" fill="rgb(211,209,199)">VRAM Budget  (8 GB config)</text>
+
+  <!-- table rows -->
+  <text x="80"  y="1274" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(175,169,236)">DiTGenerator  (depth=6, hidden=384, grad-ckpt)</text>
+  <text x="440" y="1274" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~1.4 GB</text>
+  <text x="540" y="1274" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(240,153,123)">ConditionEncoder (shallow CNN)</text>
+  <text x="820" y="1274" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~0.1 GB</text>
+
+  <text x="80"  y="1294" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(159,225,203)">VAEWrapper  (frozen)</text>
+  <text x="440" y="1294" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~0.3 GB</text>
+  <text x="540" y="1294" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(206,203,246)">EMA model  (no gradients)</text>
+  <text x="820" y="1294" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~0.7 GB</text>
+
+  <text x="80"  y="1314" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">Activations  (batch=2)</text>
+  <text x="440" y="1314" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~2.5 GB</text>
+  <text x="540" y="1314" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">Optimiser states  (AdamW m,v)</text>
+  <text x="820" y="1314" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">~1.4 GB</text>
+
+  <line x1="80" y1="1326" x2="880" y2="1326" stroke="rgb(88,87,80)" stroke-width="0.5"/>
+  <text x="80"  y="1344" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="12" font-weight="500" fill="rgb(211,209,199)">Total  ~6.4 GB  (1.6 GB headroom)</text>
+  <text x="540" y="1344" font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="11" fill="rgb(180,178,169)">VGG perceptual disabled (lambda=0)  ·  batch=2  ·  accumulate=2</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ROW 7  —  LOSS SUMMARY FOOTER  y=1390..1494
+  ══════════════════════════════════════════════════════════════════════ -->
+  <rect x="60" y="1390" width="840" height="104" rx="10" fill="rgb(60,52,137)" stroke="rgb(175,169,236)" stroke-width="0.5"/>
+  <text x="480" y="1413" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="15" font-weight="500" fill="rgb(206,203,246)">DiffusionLoss</text>
+  <text x="480" y="1437" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" fill="rgb(175,169,236)">L_simple = MSE(eps_pred, eps)  ·  no discriminator  ·  no cycle loss  ·  no adversarial training</text>
+  <text x="480" y="1458" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" fill="rgb(175,169,236)">optional: VGG19 perceptual on decoded z0_pred vs real_B  (lambda_perc=0.0 default)</text>
+  <text x="480" y="1478" text-anchor="middle" dominant-baseline="central"
+    font-family="'Anthropic Sans',-apple-system,sans-serif" font-size="13" fill="rgb(175,169,236)">cosine beta-schedule  T=1000  ·  DDIM 50-step inference  ·  EMA 0.9999  ·  VAE frozen  ·  ConditionEncoder separate</text>
+
+</svg>

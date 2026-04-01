@@ -3,7 +3,7 @@
 This project implements a **true UVCGAN v2** pipeline (Prokopenko et al., 2023) for unpaired image-to-image translation between unstained and H&E-stained histology tissue images. It includes:
 
 - Dataset preprocessing to create 256×256 patches with tissue/background filtering
-- Two model variants: a v1 hybrid (UVCGAN + CycleGAN) and a v2 true UVCGAN
+- Three model variants: a v1 hybrid (UVCGAN + CycleGAN), a v2 true UVCGAN, and a v3 DiT diffusion model
 - Paper-aligned training with LSGAN + one-sided gradient penalty, cross-domain feature sharing, and ViT bottleneck with LayerScale
 - VRAM-optimised configuration for 8 GB GPUs
 - Validation every N epochs with SSIM/PSNR/FID metrics, TensorBoard logging, and early stopping
@@ -21,7 +21,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 
 | File | Purpose |
 |---|---|
-| `trainModel.py` | Training entry point — prompts for epoch size, epochs, test size, and model version |
+| `trainModel.py` | Training entry point � prompts for epoch size, epochs, test size, and model version |
 | `app.py` | Inference script — translates whole-slide images via patch-based staining/unstaining |
 | `preprocess_data.py` | Patch extraction, tissue/background filtering, and train/test split |
 | `unzip.py` | Helper to extract the dataset ZIP archive into the expected directory layout |
@@ -30,42 +30,49 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 
 | File | Purpose |
 |---|---|
-| `config.py` | Centralised configuration via `UVCGANConfig` dataclasses. Provides `get_default_config(model_version=1\|2)` for standard hardware and `get_8gb_config()` for 8 GB GPUs |
+| `config.py` | Centralised configuration via `UVCGANConfig` dataclasses. Provides `get_default_config(model_version=1\|2)` and `get_8gb_config()` for v1/v2 plus `get_dit_config()` and `get_dit_8gb_config()` for v3 |
 
 ### Training Loops
 
 | File | Purpose |
 |---|---|
-| `training_loop.py` | v1 training loop — CycleGAN-style with LSGAN, single PatchGAN discriminator, gradient clipping, AMP |
-| `training_loop_v2.py` | v2 training loop — paper-aligned LSGAN + one-sided GP, multi-scale spectral-norm discriminators, warm-up + linear LR decay, gradient accumulation, and per-interval validation |
+| `model_v1/training_loop.py` | v1 training loop — CycleGAN-style with LSGAN, single PatchGAN discriminator, gradient clipping, AMP |
+| `model_v2/training_loop.py` | v2 training loop — paper-aligned LSGAN + one-sided GP, multi-scale spectral-norm discriminators, warm-up + linear LR decay, gradient accumulation, and per-interval validation |
+| `model_v3/training_loop.py` | v3 training loop — DiT diffusion + adversarial training (Phase 1), cycle consistency + identity losses (Phase 2), dual discriminators, EMA, R1 penalty, ReplayBuffer, and validation |
 
 ### Models
 
 | File | Purpose |
 |---|---|
-| `generator.py` | v1 generator — U-Net + ViT bottleneck with ReZero Transformer blocks |
-| `uvcgan_v2_generator.py` | v2 generator — U-Net + ViT with LayerScale, cross-domain skip fusion, Kaiming/Xavier weight init, and optional gradient checkpointing |
-| `discriminator.py` | v1 discriminator — standard PatchGAN |
-| `spectral_norm_discriminator.py` | v2 discriminator — spectral-norm multi-scale PatchGAN |
+| `model_v1/generator.py` | v1 generator — U-Net + ViT bottleneck with ReZero Transformer blocks |
+| `model_v2/generator.py` | v2 generator — U-Net + ViT with LayerScale, cross-domain skip fusion, Kaiming/Xavier weight init, and optional gradient checkpointing |
+| `model_v3/generator.py` | v3 generator — DiT backbone with conditional encoder for latent diffusion |
+| `model_v1/discriminator.py` | v1 discriminator — standard PatchGAN |
+| `model_v2/discriminator.py` | v2 discriminator — spectral-norm multi-scale PatchGAN |
+| `model_v3/discriminator.py` | v3 discriminator — three-branch ProjectionDiscriminator (local PatchGAN + global + spectral FFT) |
+| `model_v3/noise_scheduler.py` | v3 scheduler — DDPM scheduler + DDIM sampler |
+| `model_v3/vae_wrapper.py` | v3 VAE wrapper — SD VAE encode/decode for latents |
 
 ### Losses
 
 | File | Purpose |
 |---|---|
-| `losses.py` | v1 composite loss — LSGAN, cycle-consistency, identity, VGG19 perceptual, gradient penalty |
-| `advanced_losses.py` | v2 composite loss (`UVCGANLoss`) — LSGAN + one-sided GP (γ=100, λ=0.1), cycle, identity, multi-level VGG19 perceptual, optional NT-Xent contrastive, optional spectral frequency loss |
+| `model_v1/losses.py` | v1 composite loss — LSGAN, cycle-consistency, identity, VGG19 perceptual, gradient penalty |
+| `model_v2/losses.py` | v2 composite loss (`UVCGANLoss`) — LSGAN + one-sided GP (γ=100, λ=0.1), cycle, identity, multi-level VGG19 perceptual, optional NT-Xent contrastive, optional spectral frequency loss |
+| `model_v3/losses.py` | v3 diffusion loss — LSGAN generators/discriminators, R1 penalty, cycle consistency, identity constraints, Min-SNR weighting, optional perceptual terms |
 
 ### Data & Utilities
 
 | File | Purpose |
 |---|---|
-| `data_loader.py` | Unpaired dataset loader and augmentation transforms |
-| `EarlyStopping.py` | Early stopping on SSIM improvement and loss-divergence detection |
-| `replay_buffer.py` | Fixed-size replay buffer mixing old and new fake samples to stabilise discriminator training |
-| `metrics.py` | SSIM, PSNR, and FID metrics via InceptionV3 |
-| `validation.py` | Per-interval validation — runs generators, computes metrics, saves comparison images |
-| `testing.py` | End-of-training test inference and comparison image export |
-| `history_utils.py` | Training history visualisation and CSV persistence |
+| `shared/data_loader.py` | Unpaired dataset loader and augmentation transforms |
+| `shared/EarlyStopping.py` | Early stopping on SSIM improvement and loss-divergence detection |
+| `shared/replay_buffer.py` | Fixed-size replay buffer mixing old and new fake samples to stabilise discriminator training |
+| `shared/metrics.py` | SSIM, PSNR, and FID metrics via InceptionV3 |
+| `shared/validation.py` | Per-interval validation — runs generators, computes metrics, saves comparison images |
+| `shared/testing.py` | End-of-training test inference and comparison image export |
+| `shared/history_utils.py` | Training history visualisation and CSV persistence |
+| `model_v3/history_utils.py` | v3 training history CSV/plots (no discriminator terms) |
 
 ---
 
@@ -128,10 +135,10 @@ Filtering defaults (configurable inside `preprocess_data.py`):
 ---
 
 ## Train the Model
-
 ```bash
 python trainModel.py
 ```
+
 
 You will be prompted for:
 
@@ -140,9 +147,9 @@ You will be prompted for:
 | `Epoch Size` | Number of samples drawn per epoch |
 | `Number of Epochs` | Total training epochs |
 | `Test Size` | Number of test samples to export at the end |
-| `Model Version` | `1` for v1 Hybrid (UVCGAN + CycleGAN), `2` for true UVCGAN v2 |
+| `Model Version` | `1` for v1 Hybrid (UVCGAN + CycleGAN), `2` for true UVCGAN v2, `3` for DiT diffusion v3 |
 
-Model v2 automatically uses `get_8gb_config()` which is optimised for 8 GB VRAM (see **Configuration** below).
+Model v2 automatically uses `get_8gb_config()` and v3 uses `get_dit_8gb_config()` for 8 GB VRAM (see **Configuration** below).
 
 ### Training artifacts
 
@@ -162,13 +169,19 @@ data\E_Staining_DermaRepo\H_E-Staining_dataset\
 
 ---
 
-## Model Versions
 
-### v1 — Hybrid UVCGAN + CycleGAN (`training_loop.py`)
+
+| Version | Generator | Training | Notes |
+|---|---|---|---|
+| v1 | U-Net + ViT (ReZero) | CycleGAN + LSGAN | `model_v1/training_loop.py` |
+| v2 | U-Net + ViT (LayerScale, cross-domain) | UVCGAN v2 + one-sided GP | `model_v2/training_loop.py` |
+| v3 | DiT (full Transformer, adaLN-Zero) | Latent diffusion (DDPM/DDIM) | `model_v3/training_loop.py` |
+
+### v1 — Hybrid UVCGAN + CycleGAN (`model_v1/training_loop.py`)
 
 A hybrid model that uses the UVCGAN generator architecture inside a standard CycleGAN training framework.
 
-**Generator (`generator.py` → `ViTUNetGenerator`)**
+**Generator (`model_v1/generator.py` → `ViTUNetGenerator`)**
 
 U-Net backbone with 4 encoder levels (64 → 128 → 256 → 512 channels) and a PixelwiseViT bottleneck:
 
@@ -182,7 +195,7 @@ The PixelwiseViT flattens spatial positions into tokens `(N, H×W, C)`, adds 2D 
 
 Weight initialisation: Normal `N(0, 0.02)` for convolutions, Xavier uniform for linear layers, `N(1, 0.02)` for InstanceNorm scale parameters.
 
-**Discriminator (`discriminator.py` → `PatchDiscriminator`)**
+**Discriminator (`model_v1/discriminator.py` → `PatchDiscriminator`)**
 
 Standard single-scale PatchGAN with 5 convolutional layers:
 
@@ -192,7 +205,7 @@ Conv(stride=2) → Conv(stride=2, IN) → Conv(stride=2, IN) → Conv(stride=1, 
 
 Each output element covers a 70×70 receptive field of the 256×256 input. One discriminator per domain (D_A for unstained, D_B for stained).
 
-**Loss (`losses.py` → `CycleGANLoss`)**
+**Loss (`model_v1/losses.py` → `CycleGANLoss`)**
 
 | Term | Formula | Weight |
 |---|---|---|
@@ -205,7 +218,7 @@ Each output element covers a 70×70 receptive field of the 256×256 input. One d
 
 Label smoothing: real targets use 0.97 instead of 1.0. Discriminator fakes are drawn from a replay buffer (size 50) to reduce oscillation.
 
-**Training (`training_loop.py`)**
+**Training (`model_v1/training_loop.py`)**
 - Adam `lr=2e-4`, betas `(0.5, 0.999)` for all optimisers
 - Linear LR decay from epoch 100 to 200 (constant before epoch 100)
 - Mixed precision (AMP) when CUDA is available
@@ -214,11 +227,13 @@ Label smoothing: real targets use 0.97 instead of 1.0. Discriminator fakes are d
 
 ---
 
-### v2 — True UVCGAN (`training_loop_v2.py`)
+### v2 — True UVCGAN (`model_v2/training_loop.py`)
+| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 
 Paper-aligned implementation of Prokopenko et al., *UVCGAN v2*, 2023.
 
-**Generator (`uvcgan_v2_generator.py` → `ViTUNetGeneratorV2`)**
+**Generator (`model_v2/generator.py` → `ViTUNetGeneratorV2`)**
+| `model_v3/generator.py` | v3 generator � DiT backbone with conditional encoder for latent diffusion |
 
 Revised U-Net + ViT architecture with several structural improvements over v1:
 
@@ -247,7 +262,9 @@ fake_B = G_AB.forward_with_cross_domain(real_A, skips_from_G_BA(real_B))
 fake_A = G_BA.forward_with_cross_domain(real_B, skips_from_G_AB(real_A))
 ```
 
-**Discriminator (`spectral_norm_discriminator.py` → `MultiScaleDiscriminator`)**
+**Discriminator (`model_v2/discriminator.py` → `MultiScaleDiscriminator`)**
+| `model_v3/noise_scheduler.py` | v3 scheduler � DDPM scheduler + DDIM sampler |
+| `model_v3/vae_wrapper.py` | v3 VAE wrapper � SD VAE encode/decode for latents |
 
 Wraps N independent `SpectralNormDiscriminator` instances, each operating on a progressively downsampled version of the input (2× average-pool between scales):
 
@@ -257,7 +274,8 @@ Wraps N independent `SpectralNormDiscriminator` instances, each operating on a p
 
 **Spectral normalisation** divides each conv weight matrix by its largest singular value, bounding the discriminator's Lipschitz constant and preventing it from becoming too strong relative to the generator.
 
-**Loss (`advanced_losses.py` → `UVCGANLoss`)**
+**Loss (`model_v2/losses.py` → `UVCGANLoss`)**
+| `model_v3/losses.py` | v3 diffusion loss helpers (noise prediction + perceptual terms) |
 
 | Term | Formula | Weight |
 |---|---|---|
@@ -272,7 +290,8 @@ Wraps N independent `SpectralNormDiscriminator` instances, each operating on a p
 
 The one-sided GP is softer than WGAN-GP — it only penalises gradients that exceed γ=100, leaving D free to have small-norm gradients near real data. This is appropriate because the GAN objective is LSGAN (not Wasserstein). The GP is always computed in float32 regardless of AMP state to avoid NaN gradients.
 
-**Training (`training_loop_v2.py`)**
+**Training (`model_v2/training_loop.py`)**
+| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 - Adam `lr=2e-4`, betas `(0.5, 0.999)`, `n_critic=1`
 - Warm-up LR ramp for `warmup_epochs` epochs, then constant, then linear decay from `decay_start_epoch`
 - Gradient clipping (max norm 1.0)
@@ -284,6 +303,21 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 
 ---
 
+### v3 — DiT Diffusion (`model_v3/training_loop.py`)
+
+v3 training uses the shared unpaired loader in `shared/data_loader.py` (trainA/trainB and testA/testB are still expected).
+
+Conditional latent diffusion with a full Transformer backbone:
+
+- VAE latent space (4 channels, 32x32 for 256x256 inputs)
+- Conditioning via external `ConditionEncoder` and adaLN-Zero
+- Noise prediction objective (MSE), optional VGG perceptual term
+- DDIM sampling for inference (default 50 steps)
+
+Note: the VAE checkpoint downloads ~335 MB on first run.
+
+---
+
 ## Configuration
 
 All hyperparameters live in `config.py` as typed dataclasses. There are two main presets:
@@ -292,7 +326,7 @@ All hyperparameters live in `config.py` as typed dataclasses. There are two main
 
 Full paper-aligned settings: `batch_size=4`, `vit_depth=4`, `num_scales=3`, no gradient checkpointing.
 
-### `get_8gb_config()` — 8 GB VRAM *(used by default in `trainModel.py`)*
+
 
 | Change from default | VRAM saving | Quality impact |
 |---|---|---|
@@ -391,7 +425,7 @@ All metrics are logged to TensorBoard and printed to the console. Early stopping
 
 ## Notes
 
-- Paths are Windows-style (`\`). On Linux/macOS replace `\` with `/` throughout `data_loader.py`, `trainModel.py`, and `app.py`.
+
 - Patch size is fixed at 256×256. If you change it, update `preprocess_data.py` and `app.py` together.
 - To enable the optional contrastive or spectral losses once training is stable, set `cfg.loss.lambda_contrastive = 0.1` and/or `cfg.loss.lambda_spectral = 0.05`.
 - The gradient penalty (`lambda_gp`) and its target (`LSGANGradientPenalty.GAMMA = 100`) are paper-aligned. Do not change `GAMMA` without re-tuning `lambda_gp`.
@@ -403,3 +437,7 @@ All metrics are logged to TensorBoard and printed to the console. Early stopping
 - Prokopenko et al., *UVCGAN v2: An Improved Cycle-Consistent GAN for Unpaired Image-to-Image Translation*, 2023
 - Zhu et al., *Unpaired Image-to-Image Translation using Cycle-Consistent Adversarial Networks*, ICCV 2017
 - Gulrajani et al., *Improved Training of Wasserstein GANs*, NeurIPS 2017
+
+
+
+
