@@ -25,6 +25,20 @@ class PatchSampler:
         self.num_patches = num_patches
 
     def _sample_ids(self, b: int, hw: int, num_patches: int, device) -> torch.Tensor:
+        """
+        Sample random spatial indices for one feature map.
+
+        If *num_patches* >= *hw*, all positions are returned in order.
+
+        Args:
+            b:           Batch size.
+            hw:          Total number of spatial positions (H * W).
+            num_patches: Number of positions to sample.
+            device:      Device for the output index tensor.
+
+        Returns:
+            LongTensor of shape (B, num_patches) with sampled indices.
+        """
         if num_patches <= 0 or num_patches >= hw:
             ids = torch.arange(hw, device=device)
             ids = ids.unsqueeze(0).repeat(b, 1)

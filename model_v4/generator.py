@@ -1,8 +1,8 @@
 """
-model_v4/generator.py — Phase 1 CNN generator for CUT + Transformer (v4).
+model_v4/generator.py — CNN + Transformer generator for CUT + Transformer (v4).
 
 Provides a lightweight ResNet-style generator (ResnetGenerator) used as the
-baseline GAN backbone before the Transformer encoder is introduced in Phase 3.
+baseline GAN backbone. A Transformer encoder variant is also provided.
 
 Architecture summary:
     Input → 7×7 reflect-pad conv → 2× stride-2 downsampling
@@ -62,7 +62,7 @@ class ResnetBlock(nn.Module):
 
 class ResnetGenerator(nn.Module):
     """
-    ResNet-based generator for the Phase 1 GAN baseline.
+    ResNet-based generator for the v4 baseline.
 
     Encoder–residual–decoder structure:
         Input  → 7×7 reflect-pad conv (c1 channels)
@@ -182,11 +182,25 @@ class ResnetGenerator(nn.Module):
 
 class TransformerGeneratorV4(nn.Module):
     """
-    Phase 3 transformer-encoder + CNN-decoder generator.
+    Transformer-encoder + CNN-decoder generator.
 
     Flow:
         Input → PatchEmbed → Transformer blocks → tokens
              → reshape to spatial map → CNN upsampling decoder → output
+
+    Args:
+        input_nc:   Number of input image channels.
+        output_nc:  Number of output image channels.
+        image_size: Spatial size of the (square) input image.
+        patch_size: Size of each non-overlapping patch (power of 2).
+        embed_dim:  Transformer token embedding dimension.
+        depth:      Number of Transformer blocks.
+        num_heads:  Attention heads per Transformer block.
+        mlp_ratio:  MLP hidden-dim multiplier inside each Transformer block.
+        dropout:    Dropout probability in Transformer blocks.
+        base_channels: Base channel width for the CNN decoder.
+        use_gradient_checkpointing: Recompute Transformer block activations
+            during backward to reduce peak VRAM usage.
     """
 
     def __init__(
@@ -267,6 +281,7 @@ class TransformerGeneratorV4(nn.Module):
         )
 
     def _tokens_to_map(self, tokens: torch.Tensor, grid: tuple[int, int]) -> torch.Tensor:
+        """Reshape flat token sequence (B, N, C) back to a spatial map (B, C, H, W)."""
         b, n, c = tokens.shape
         h, w = grid
         if n != h * w:
@@ -279,6 +294,19 @@ class TransformerGeneratorV4(nn.Module):
         return_features: bool = False,
         nce_layers: list[int] | tuple[int, ...] | None = None,
     ) -> tuple[torch.Tensor, tuple[int, int], list[torch.Tensor]]:
+        """
+        Embed patches, add positional encoding, and run Transformer blocks.
+
+        Args:
+            x:               Input image tensor (B, C, H, W).
+            return_features: If True, collect intermediate block outputs.
+            nce_layers:      Block indices to collect; None collects all.
+
+        Returns:
+            tuple: (tokens, grid, features) where tokens is the final
+            normalised sequence (B, N, embed_dim), grid is (H', W'), and
+            features is a list of intermediate token tensors.
+        """
         tokens, grid = self.patch_embed(x)
         pos = _get_2d_sincos_pos_embed(
             self.embed_dim, grid[0], grid[1], tokens.device, tokens.dtype
@@ -287,15 +315,19 @@ class TransformerGeneratorV4(nn.Module):
 
         features: list[torch.Tensor] = []
         for idx, block in enumerate(self.blocks):
-            if (
+            use_ckpt = (
                 self.use_gradient_checkpointing
                 and self.training
+                and tokens is not None
                 and tokens.requires_grad
-            ):
+            )
+            if use_ckpt:
                 tokens = grad_checkpoint(block, tokens, use_reentrant=False)
             else:
                 tokens = block(tokens)
             if return_features and (nce_layers is None or idx in nce_layers):
+                if tokens is None:
+                    raise RuntimeError("Transformer block returned None tokens.")
                 features.append(tokens)
 
         tokens = self.norm(tokens)
@@ -315,6 +347,18 @@ class TransformerGeneratorV4(nn.Module):
         return_features: bool = False,
         nce_layers: list[int] | tuple[int, ...] | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """
+        Translate an image through the Transformer encoder and CNN decoder.
+
+        Args:
+            x:               Input image tensor (B, C, H, W) in [-1, 1].
+            return_features: If True, also return intermediate encoder maps.
+            nce_layers:      Block indices to collect for NCE; None = all.
+
+        Returns:
+            Output image tensor (B, output_nc, H, W), or a tuple
+            (output, feature_maps) when return_features is True.
+        """
         tokens, grid, feats = self._encode_tokens(
             x, return_features=return_features, nce_layers=nce_layers
         )
@@ -373,7 +417,7 @@ def getGeneratorV4(
     run_smoke_test: bool = True,
 ) -> ResnetGenerator | TransformerGeneratorV4:
     """
-    Build, initialise, and optionally smoke-test a Phase 1 ResnetGenerator.
+    Build, initialise, and optionally smoke-test a ResnetGenerator.
 
     Args:
         input_nc:       Input image channels.
@@ -381,7 +425,7 @@ def getGeneratorV4(
         base_channels:  Base feature-map width (default 64).
         num_res_blocks: Residual blocks in the bottleneck (default 6).
         dropout:        Dropout inside residual blocks (default 0 = off).
-        use_transformer_encoder: If True, builds the Phase 3 transformer encoder.
+        use_transformer_encoder: If True, builds the transformer encoder.
         image_size:     Input image size (square, used for patch embedding).
         patch_size:     Transformer patch size (power of 2 recommended).
         encoder_dim:    Transformer token dimension.

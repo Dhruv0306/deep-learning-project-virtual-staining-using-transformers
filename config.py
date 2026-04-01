@@ -6,7 +6,7 @@ diffusion hyperparameters. The top-level ``model_version`` switch supports:
     - v1: Hybrid CycleGAN/UVCGAN baseline
     - v2: True UVCGAN v2
     - v3: DiT diffusion pipeline
-    - v4: CUT baseline (Phase 1 GAN)
+    - v4: CUT baseline (GAN + PatchNCE + Transformer)
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - GAN objective  : LSGAN, NOT Wasserstein
@@ -172,7 +172,34 @@ class DataConfig:
 @dataclass
 class DiffusionConfig:
     """
-    Hyperparameters for the v3 diffusion model.
+    Hyperparameters for the v3 DiT diffusion model.
+
+    Key fields:
+        num_timesteps:          DDPM diffusion steps during training.
+        beta_schedule:          Noise schedule type (``"cosine"`` or ``"linear"``).
+        dit_hidden_dim:         Token embedding dimension for the DiT backbone.
+        dit_depth:              Number of DiT Transformer blocks.
+        dit_heads:              Attention heads per DiT block.
+        dit_patch_size:         Latent patch size fed into the DiT.
+        prediction_type:        Noise prediction target — ``"v"`` (v-prediction)
+                                or ``"epsilon"``.
+        num_inference_steps:    DDIM sampling steps at inference time.
+        cfg_scale:              Classifier-free guidance scale (1.0 = no guidance).
+        min_snr_gamma:          Min-SNR loss weighting gamma (5.0 per paper).
+        use_gradient_checkpointing: Recompute DiT activations during backward
+                                to reduce peak VRAM.
+        vae_model_id:           HuggingFace model ID for the SD VAE encoder/decoder.
+        lambda_denoising:       Weight for the diffusion noise-prediction loss.
+        lambda_adv_v3:          Adversarial loss weight (ramped up over
+                                ``lambda_adv_warmup_steps`` steps).
+        lambda_cycle_v3:        Cycle-consistency loss weight.
+        lambda_identity_v3_start/end: Identity loss weight, linearly decayed
+                                from start to end over the first
+                                ``identity_decay_end_ratio`` of training.
+        use_r1_penalty:         Enable R1 gradient penalty on the discriminator.
+        r1_gamma:               R1 penalty coefficient.
+        r1_interval:            Apply R1 every N discriminator steps.
+        disc_use_local/global/fft: Toggle the three ProjectionDiscriminator branches.
     """
 
     num_timesteps: int = 1000
@@ -434,18 +461,34 @@ def get_dit_8gb_config() -> UVCGANConfig:
 
 
 # ---------------------------------------------------------------------------
-# v4 Phase 1 config (baseline GAN)
+# v4 config (GAN + PatchNCE + Transformer)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class V4ModelConfig:
     """
-    Hyperparameters for the v4 generator/discriminator.
+    Architecture hyperparameters for the v4 generator and discriminator.
 
-    Notes:
-        - ``num_res_blocks`` controls generator depth.
-        - ``disc_n_layers`` controls PatchGAN depth.
+    Generator fields:
+        input_nc / output_nc:   Input and output image channels.
+        base_channels:          Base feature-map width for the CNN decoder.
+        num_res_blocks:         ResNet bottleneck depth (ResnetGenerator only).
+        use_transformer_encoder: If True, use TransformerGeneratorV4;
+                                 otherwise use ResnetGenerator.
+        image_size:             Square input image size.
+        patch_size:             Transformer patch size (power of 2).
+        encoder_dim:            Transformer token embedding dimension.
+        encoder_depth:          Number of Transformer blocks.
+        encoder_heads:          Attention heads per Transformer block.
+        encoder_mlp_ratio:      MLP hidden-dim multiplier in Transformer blocks.
+        encoder_dropout:        Dropout inside Transformer blocks.
+        use_gradient_checkpointing: Recompute Transformer activations during
+                                backward to reduce peak VRAM.
+
+    Discriminator fields:
+        disc_base_channels:     Base feature-map width for PatchGAN.
+        disc_n_layers:          Number of strided downsampling layers.
     """
 
     input_nc: int = 3
@@ -468,7 +511,25 @@ class V4ModelConfig:
 @dataclass
 class V4TrainingConfig:
     """
-    Training loop hyperparameters for the v4 Phase 1/2 GAN baseline.
+    Training loop hyperparameters for the v4 GAN + PatchNCE baseline.
+
+    Key fields:
+        lambda_gan:         Weight for the LSGAN adversarial loss.
+        lambda_nce:         Weight for the PatchNCE contrastive loss.
+        lambda_identity:    Weight for the identity (self-reconstruction) loss.
+        nce_layers:         Encoder block indices used for NCE feature extraction.
+        nce_num_patches:    Spatial patches sampled per feature map per step.
+        nce_temperature:    InfoNCE softmax temperature.
+        nce_proj_dim:       Output dimension of the per-layer MLP projectors.
+        use_replay_buffer:  Stabilise discriminator with a history of fake samples.
+        use_ema:            Maintain an EMA copy of both generators.
+        ema_decay:          EMA decay factor (higher = slower update).
+        use_lr_schedule:    Enable linear warmup + linear decay LR schedule.
+        lr_warmup_epochs:   Epochs over which LR ramps from 0 to ``lr``.
+        lr_decay_start_epoch: Epoch at which linear LR decay begins.
+        accumulate_grads:   Gradient accumulation steps before an optimiser step.
+        validation_every:   Run validation after this many epochs.
+        save_every:         Save a checkpoint every N epochs.
     """
 
     num_epochs: int = 200
@@ -506,7 +567,13 @@ class V4TrainingConfig:
 @dataclass
 class V4DataConfig:
     """
-    Data loading configuration for v4 Phase 1.
+    Data loading configuration for v4 training.
+
+    Fields:
+        image_size:      Spatial size to which patches are resized (square).
+        batch_size:      Samples per mini-batch.
+        num_workers:     DataLoader worker processes (0 = main process only).
+        prefetch_factor: Batches prefetched per worker.
     """
 
     image_size: int = 256
@@ -518,7 +585,20 @@ class V4DataConfig:
 @dataclass
 class V4Config:
     """
-    Top-level configuration container for v4 Phase 1 training.
+    Top-level configuration container for v4 training.
+
+    Groups all sub-configurations into typed fields and validates that
+    ``model_version`` is exactly 4.  Pass an instance to ``train_v4()``.
+
+    Fields:
+        model_version: Must be ``4``.
+        model:         Generator and discriminator architecture settings.
+        training:      Optimiser, scheduler, NCE, and loop settings.
+        data:          Dataset path, batch size, and worker settings.
+        model_dir:     Root output directory for checkpoints and logs.
+                       Auto-generated when ``None``.
+        val_dir:       Directory for per-epoch validation images.
+                       Defaults to ``model_dir/validation_images`` when ``None``.
     """
 
     model_version: int = 4
@@ -537,14 +617,21 @@ class V4Config:
 
 def get_v4_config() -> V4Config:
     """
-    Return a default config for the v4
+    Return a default V4Config with full-capacity settings.
+
+    Suitable for GPUs with 12+ GB VRAM.  Gradient checkpointing is disabled
+    for maximum training speed.
     """
     return V4Config()
 
 
 def get_v4_8gb_config() -> V4Config:
     """
-    Return a VRAM-lean v4
+    Return a VRAM-optimised V4Config for 8 GB GPUs.
+
+    Enables gradient checkpointing in the Transformer encoder to reduce
+    peak activation memory at the cost of a slightly slower backward pass.
+    All other settings are identical to :func:`get_v4_config`.
     """
     cfg = V4Config()
     cfg.model.use_gradient_checkpointing = True

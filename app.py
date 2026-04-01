@@ -188,6 +188,19 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
 def _infer_v4_kwargs(state_dict: dict, fallback_cfg) -> dict:
     """
     Infer v4 generator architecture parameters from a checkpoint state dict.
+
+    Detects whether the checkpoint contains a Transformer encoder or a ResNet
+    generator by checking for ``patch_embed.proj`` keys, then reads
+    ``patch_size``, ``encoder_dim``, ``encoder_depth``, ``mlp_ratio``, and
+    ``base_channels`` directly from weight shapes.  Falls back to
+    ``fallback_cfg`` values for any parameter that cannot be inferred.
+
+    Args:
+        state_dict:   Generator state dict from the checkpoint.
+        fallback_cfg: V4ModelConfig instance used as fallback for missing params.
+
+    Returns:
+        dict of keyword arguments suitable for passing to ``getGeneratorV4``.
     """
     if any(k.startswith("patch_embed.proj") for k in state_dict):
         patch_w = state_dict["patch_embed.proj.weight"].shape[2]
@@ -247,7 +260,22 @@ def _infer_v4_kwargs(state_dict: dict, fallback_cfg) -> dict:
 
 def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     """
-    Load v4 generators (Transformer + PatchNCE) from checkpoint.
+    Load v4 generators from a checkpoint, auto-detecting the architecture.
+
+    Prefers EMA weights (``ema_G_AB_state_dict`` / ``ema_G_BA_state_dict``) and
+    falls back to the raw generator weights when EMA is not present.  Architecture
+    hyperparameters are inferred from the state dict via :func:`_infer_v4_kwargs`.
+
+    Args:
+        checkpoint_path: Path to a ``.pth`` checkpoint saved by ``train_v4``.
+        device:          Device string, e.g. ``"cpu"`` or ``"cuda"``.
+        image_size:      Square input image size used to configure patch embedding.
+
+    Returns:
+        tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` in ``eval()`` mode.
+
+    Raises:
+        KeyError: If neither EMA nor raw generator state dicts are found.
     """
     from config import get_v4_8gb_config
     from model_v4.generator import getGeneratorV4
@@ -646,6 +674,8 @@ def translate_image_from_patches_v3(
         device (str): Inference device.
         batch_size (int): Number of patches per diffusion batch.
         num_steps (int): DDIM inference steps.
+        prediction_type (str): Noise prediction target -- ``"v"`` or ``"epsilon"``.
+        cfg_scale (float): Classifier-free guidance scale (1.0 = no guidance).
 
     Returns:
         tuple[tuple[int, int], tuple[int, int], int, str]:

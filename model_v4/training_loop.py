@@ -1,8 +1,8 @@
 """
-model_v4/training_loop.py — Phase 3 training loop for CUT + Transformer (v4).
+model_v4/training_loop.py — v4 training loop for CUT + Transformer.
 
-Adds a Transformer encoder and PatchNCE contrastive loss on top of the Phase 1
-GAN baseline. PatchNCE is computed on encoder features sampled at shared
+Adds a Transformer encoder and PatchNCE contrastive loss on top of the
+baseline GAN. PatchNCE is computed on encoder features sampled at shared
 spatial locations between real and generated images.
 
 Data flow:
@@ -58,7 +58,17 @@ def _global_grad_norm(parameters) -> float:
 
 def _make_lr_lambda(warmup: int, decay_start: int, total: int):
     """
-    Linear warmup then linear decay LR schedule.
+    Return a LambdaLR multiplier function with linear warmup then linear decay.
+
+    Schedule:
+        [0, warmup)          — ramp from ~0 to 1
+        [warmup, decay_start) — constant 1
+        [decay_start, total)  — linear decay from 1 to 0
+
+    Args:
+        warmup:      Number of warmup epochs.
+        decay_start: Epoch at which linear decay begins.
+        total:       Total number of training epochs.
     """
 
     def lr_lambda(epoch: int) -> float:
@@ -90,7 +100,7 @@ def _lsgan_disc_loss(pred_real: torch.Tensor, pred_fake: torch.Tensor) -> torch.
     return loss_real + loss_fake
 
 
-def _run_validation_phase1(
+def _run_validation_v4(
     epoch: int,
     G_AB: torch.nn.Module,
     G_BA: torch.nn.Module,
@@ -255,7 +265,7 @@ def train_v4(
     cfg: Optional[V4Config] = None,
 ):
     """
-    Train the Phase 3 GAN baseline (A ↔ B, Transformer encoder + PatchNCE).
+    Train the v4 GAN baseline (A ↔ B, Transformer encoder + PatchNCE).
 
     Any argument that is not None overrides the corresponding field in *cfg*
     before training begins, allowing the caller to pass a pre-built config and
@@ -788,7 +798,7 @@ def train_v4(
             save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
             val_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
             val_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
-            _run_validation_phase1(
+            _run_validation_v4(
                 epoch=epoch + 1,
                 G_AB=val_G_AB,
                 G_BA=val_G_BA,
@@ -840,7 +850,7 @@ def train_v4(
     writer.add_scalar("Testing Started", tcfg.num_epochs, tcfg.num_epochs)
     test_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
     test_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
-    _run_validation_phase1(
+    _run_validation_v4(
         epoch=tcfg.num_epochs,
         G_AB=test_G_AB,
         G_BA=test_G_BA,

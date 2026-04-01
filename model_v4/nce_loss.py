@@ -31,6 +31,21 @@ class PatchNCELoss(nn.Module):
     def _get_projector(
         self, key: str, in_dim: int, device: torch.device, dtype: torch.dtype
     ) -> nn.Module:
+        """
+        Lazily create and cache a 2-layer MLP projection head.
+
+        A separate projector is maintained for each feature layer (keyed by
+        *key*) so that different layers can learn independent projections.
+
+        Args:
+            key:    String identifier for the layer (e.g. "0", "1").
+            in_dim: Input feature dimension.
+            device: Device on which to place the projector.
+            dtype:  Dtype for the projector parameters.
+
+        Returns:
+            nn.Sequential MLP projector.
+        """
         if key not in self.projections:
             proj = nn.Sequential(
                 nn.Linear(in_dim, self.proj_dim),
@@ -42,6 +57,21 @@ class PatchNCELoss(nn.Module):
         return self.projections[key]
 
     def _layer_loss(self, feat_q: torch.Tensor, feat_k: torch.Tensor, key: str):
+        """
+        Compute InfoNCE loss for a single feature layer.
+
+        Queries and keys are projected, L2-normalised, and compared via a
+        cross-entropy objective where each query's positive is the key at the
+        same spatial position.
+
+        Args:
+            feat_q: Query features of shape (B, N, C).
+            feat_k: Key features of shape (B, N, C).
+            key:    Layer identifier used to look up the projector.
+
+        Returns:
+            Scalar cross-entropy loss.
+        """
         b, n, c = feat_q.shape
         proj = self._get_projector(key, c, feat_q.device, feat_q.dtype)
 

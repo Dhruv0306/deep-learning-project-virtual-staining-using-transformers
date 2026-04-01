@@ -1,5 +1,5 @@
 """
-Transformer blocks for the v4 Phase 3 generator.
+Transformer blocks for the v4 generator.
 
 Provides PatchEmbed and basic TransformerBlock utilities for a lightweight
 ViT-style encoder used in unpaired translation.
@@ -15,6 +15,16 @@ import torch.nn as nn
 
 
 def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
+    """
+    Compute 1-D sine-cosine positional embeddings.
+
+    Args:
+        embed_dim: Embedding dimension (must be even).
+        pos:       1-D tensor of position indices, shape (N,).
+
+    Returns:
+        Tensor of shape (N, embed_dim) with interleaved sin/cos values.
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for sin/cos positional embedding.")
     omega = torch.arange(embed_dim // 2, device=pos.device, dtype=pos.dtype)
@@ -26,6 +36,22 @@ def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
 def _get_2d_sincos_pos_embed(
     embed_dim: int, height: int, width: int, device, dtype
 ) -> torch.Tensor:
+    """
+    Compute 2-D sine-cosine positional embeddings for a spatial grid.
+
+    The first half of each embedding encodes the row position; the second
+    half encodes the column position.
+
+    Args:
+        embed_dim: Total embedding dimension (must be even).
+        height:    Number of grid rows.
+        width:     Number of grid columns.
+        device:    Target device for the output tensor.
+        dtype:     Target dtype for the output tensor.
+
+    Returns:
+        Tensor of shape (height * width, embed_dim).
+    """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for 2D sin/cos positional embedding.")
     grid_h = torch.arange(height, device=device, dtype=dtype)
@@ -66,6 +92,14 @@ class PatchEmbed(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
+        """
+        Args:
+            x: Input image tensor of shape (B, C, H, W).
+
+        Returns:
+            tuple: (tokens, grid) where tokens has shape (B, N, embed_dim)
+            and grid is (H', W') with H' = H // patch_size.
+        """
         x = self.proj(x)
         b, c, h, w = x.shape
         tokens = x.flatten(2).transpose(1, 2).contiguous()
@@ -75,6 +109,15 @@ class PatchEmbed(nn.Module):
 class TransformerBlock(nn.Module):
     """
     Lightweight Transformer block with pre-norm attention and MLP.
+
+    Applies layer normalisation before both the multi-head self-attention
+    and the feed-forward MLP, with residual connections after each.
+
+    Args:
+        dim:       Token embedding dimension.
+        num_heads: Number of attention heads.
+        mlp_ratio: MLP hidden-dim multiplier relative to *dim*.
+        dropout:   Dropout probability applied inside attention and MLP.
     """
 
     def __init__(

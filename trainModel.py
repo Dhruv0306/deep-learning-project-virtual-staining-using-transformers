@@ -9,8 +9,7 @@ Supported model versions:
     1 -> Hybrid CycleGAN/UVCGAN baseline (model_v1)
     2 -> True UVCGAN v2 (model_v2)
     3 -> DiT diffusion pipeline (model_v3)
-    4 -> v4 Phase 3 Transformer + PatchNCE (model_v4)
-    4 -> Phase 1 GAN baseline (model_v4)
+    4 -> Transformer + PatchNCE (model_v4)
 """
 
 import os
@@ -30,7 +29,7 @@ def main():
     Returns:
         tuple: ``(history, G_AB, G_BA, D_A, D_B)``.
 
-        For model versions 1 and 2, these are the CycleGAN-style generators
+        For model versions 1, 2, and 4, these are the CycleGAN-style generators
         and discriminators returned by the corresponding training loop.
 
         For model version 3, this return shape is preserved for compatibility
@@ -44,6 +43,7 @@ def main():
         model_version=1 launches ``train_v1``.
         model_version=2 launches ``train_v2`` with ``get_8gb_config()``.
         model_version=3 launches ``train_v3`` with ``get_dit_8gb_config()``.
+        model_version=4 launches ``train_v4`` with ``get_v4_8gb_config()``.
     """
 
     # User-controlled training parameters.
@@ -53,7 +53,7 @@ def main():
     model_version = int(
         input(
             "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, "
-            "3 for DiT diffusion, 4 for v4 Phase 3 (Transformer + NCE): "
+            "3 for DiT diffusion, 4 for v4 (Transformer + NCE): "
         )
     )
 
@@ -156,6 +156,7 @@ def main():
     history_saver = save_history_to_csv
     if model_version == 3:
         from model_v3.history_utils import visualize_history_v3, save_history_to_csv_v3
+
         history_visualizer = visualize_history_v3
         history_saver = save_history_to_csv_v3
     history_visualizer(history, model_dir=model_dir)
@@ -166,5 +167,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

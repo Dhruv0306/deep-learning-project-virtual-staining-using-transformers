@@ -1,8 +1,8 @@
 """
-model_v4/discriminator.py — Phase 1 PatchGAN discriminator for CUT + Transformer (v4).
+model_v4/discriminator.py — PatchGAN discriminator for CUT + Transformer (v4).
 
 Provides a standard N-layer 70×70 PatchGAN discriminator (PatchGANDiscriminator)
-used alongside the Phase 1 baseline GAN.  Each output element of the final
+used alongside the baseline GAN.  Each output element of the final
 conv layer covers a 70×70 receptive field of the 256×256 input.
 """
 
@@ -116,7 +116,7 @@ def getDiscriminatorV4(
     run_smoke_test: bool = True,
 ) -> PatchGANDiscriminator:
     """
-    Build, initialise, and optionally smoke-test a Phase 1 PatchGANDiscriminator.
+    Build, initialise, and optionally smoke-test a PatchGANDiscriminator.
 
     Args:
         input_nc:      Input image channels.
