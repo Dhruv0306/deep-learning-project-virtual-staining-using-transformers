@@ -34,11 +34,12 @@ def _cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> Tensor:
 
 class DDPMScheduler(nn.Module):
     """
-        DDPM forward-process scheduler with precomputed buffers.
+    DDPM forward-process scheduler with precomputed buffers.
 
-    Key buffer shapes:
+    Key buffers:
         betas, alphas, alphas_cumprod: (T,)
     """
+
 
     betas: Tensor
     alphas: Tensor
@@ -147,35 +148,10 @@ class DDIMSampler:
     """
     Deterministic DDIM sampler.
 
-    Sample output shape equals requested ``shape`` argument.
-
-    The timestep sequence runs from high noise (t ≈ T-1) down to the
-    lowest scheduled timestep (t = 0).  At the final denoising step there
-    is no "previous" timestep in the subsequence, so ``alpha_bar_prev``
-    must be set to ``alphas_cumprod[0]`` — the actual cumulative noise
-    level at t=0.  The previous implementation used the value 1.0 as a
-    fallback, which is incorrect:
-
-      * With eta=0 (default):
-          dir_xt = sqrt(1 - alpha_bar_prev) * eps_pred
-          When alpha_bar_prev = 1.0, this term collapses to zero, and the
-          update reduces to z_t = sqrt(1.0) * z0_pred = z0_pred, silently
-          discarding the directional component.  For the cosine schedule
-          alphas_cumprod[0] ≈ 0.9999, so the directional term is tiny but
-          non-zero and formally correct.
-
-      * With eta > 0 (stochastic):
-          sigma = eta * sqrt((1-alpha_bar_prev)/(1-alpha_bar_t))
-                      * sqrt(1 - alpha_bar_t / alpha_bar_prev)
-          When alpha_bar_prev = 1.0, the first factor becomes
-          sqrt(0 / ...) = 0, zeroing out sigma entirely on the last step.
-          This silently suppresses the intended stochastic noise injection
-          and makes the final step deterministic regardless of eta.
-
-    Both effects are silent — no NaN, no error — which is why the bug
-    survived testing.  Using alphas_cumprod[0] as the terminal boundary
-    restores the correct DDIM update at every step.
+    Uses alphas_cumprod[0] as the terminal alpha_bar_prev when the
+    subsequence reaches t=0 to keep the final update well-defined.
     """
+
 
     def __init__(self, scheduler: DDPMScheduler):
         self.scheduler = scheduler
@@ -198,7 +174,7 @@ class DDIMSampler:
         Sample a denoised latent z0 from pure noise using DDIM.
 
         Args:
-            model:     DiTGenerator — accepts (z_t, t_batch, condition).
+            model:     DiTGenerator -- accepts (z_t, t_batch, condition).
             condition: Pre-computed condition vector (N, hidden_dim).
             shape:     Output shape (N, 4, 32, 32).
             device:    Target device.

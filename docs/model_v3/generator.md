@@ -2,7 +2,7 @@
 
 Source of truth: ../../model_v3/generator.py
 
-Role: Defines latent-space DiT backbone and conditioning path for v3 diffusion.
+Role: Defines the CycleDiT generator stack for v3 diffusion with image-token conditioning and domain embedding.
 
 ---
 
@@ -10,10 +10,12 @@ Role: Defines latent-space DiT backbone and conditioning path for v3 diffusion.
 
 1. PatchEmbed
 2. TimestepEmbedding
-3. ConditionEncoder
+3. ConditionTokenizer
 4. DiTBlock
-5. DiTGenerator
-6. getGeneratorV3
+5. DiTGenerator (backbone)
+6. DomainEmbedding
+7. CycleDiTGenerator
+8. getGeneratorV3
 
 ---
 
@@ -59,26 +61,19 @@ Output:
 
 ---
 
-## 3) ConditionEncoder
+## 3) ConditionTokenizer
 
 Input:
 - x: (N,3,256,256)
 
 Dataflow:
-1. Conv stack:
-   - 3->64, stride2  : (N,64,128,128)
-   - 64->128, stride2: (N,128,64,64)
-   - 128->256,stride2: (N,256,32,32)
-   - 256->512,stride2: (N,512,16,16)
-2. adaptive avg pool
-   - (N,512,1,1)
-3. flatten
-   - (N,512)
-4. linear projection
-   - (N,hidden_dim)
+1. patch projection Conv2d with kernel=stride=cond_patch_size
+2. optional token-grid pooling via cond_token_pool_stride
+3. flatten to token sequence
+4. add 2D sin/cos positional embeddings
 
 Output:
-- c: (N,hidden_dim)
+- c_tokens: (N,Lc,hidden_dim)
 
 ---
 
@@ -105,12 +100,12 @@ Output:
 
 ---
 
-## 5) DiTGenerator
+## 5) DiTGenerator (Backbone)
 
 Inputs to forward:
 - z_t: (N,4,32,32)
 - t: (N,)
-- c: (N,hidden_dim)
+- c: (N,Lc,hidden_dim)
 
 ### Forward dataflow
 
@@ -122,7 +117,8 @@ Inputs to forward:
 3. timestep embedding:
    - t -> t_emb: (N,Hd)
 4. condition combine:
-   - cond = t_emb + c: (N,Hd)
+   - cond_global = mean(c, dim=1): (N,Hd)
+   - cond = t_emb + cond_global: (N,Hd)
 5. transformer stack:
    - each block keeps shape (N,256,Hd)
 6. output head linear:
@@ -132,7 +128,7 @@ Inputs to forward:
    - (N,256,16) -> (N,4,32,32)
 
 Output:
-- eps_pred: (N,4,32,32)
+- v_pred/eps_pred tensor: (N,4,32,32)
 
 ### unpatchify dataflow
 
@@ -149,20 +145,58 @@ Output:
 
 ---
 
-## 6) getGeneratorV3
+## 6) DomainEmbedding
 
 Purpose:
-- factory that reads config and returns initialized DiTGenerator
+- learned domain token for target domain conditioning
+
+Input:
+- target_domain ids (0 for A, 1 for B)
+
+Output:
+- domain embedding: (N,hidden_dim)
+
+---
+
+## 7) CycleDiTGenerator
+
+Purpose:
+- wrapper around DiT backbone with:
+   - ConditionTokenizer
+   - DomainEmbedding
+   - optional x0 reconstruction via scheduler
+
+Forward input:
+- z_t: (N,4,32,32)
+- t: (N,)
+- condition: image (N,3,256,256) or tokens (N,Lc,Hd)
+- target_domain: int or tensor in {0,1}
+- scheduler: optional DDPMScheduler
+- prediction_type: v or eps
+
+Forward output:
+- dict with:
+   - v_pred: (N,4,32,32)
+   - x0_pred: (N,4,32,32) or None
+
+---
+
+## 8) getGeneratorV3
+
+Purpose:
+- factory that builds and initializes CycleDiTGenerator
 
 Dataflow:
-1. build model from diffusion config
-2. apply init_weights_v2
-3. zero-initialize output head
-4. smoke test:
+1. build DiT backbone from diffusion config
+2. build ConditionTokenizer and DomainEmbedding
+3. compose CycleDiTGenerator
+4. apply init_weights_v2
+5. zero-initialize DiT output head
+6. smoke test:
    - z_t: (1,4,32,32)
    - t:   (1,)
-   - c:   (1,hidden_dim)
-   - output: (1,4,32,32)
+    - x:   (1,3,256,256)
+    - output["v_pred"]: (1,4,32,32)
 
 Return:
-- DiTGenerator instance
+- CycleDiTGenerator instance

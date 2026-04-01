@@ -188,7 +188,7 @@ def _compute_cycle_loss(
     rec_A = G(fake_B.detach(), A, same noise_A, same t_A)
     rec_B = G(fake_A.detach(), B, same noise_B, same t_B)
 
-    BUG FIX: Clamp applied to decoded images, not latents.
+    Note: clamp is applied to decoded images, not latents.
     """
     z_t_rec_A = scheduler.add_noise(z0_fake_B.detach(), noise_A, t_A)
     z_t_rec_B = scheduler.add_noise(z0_fake_A.detach(), noise_B, t_B)
@@ -216,7 +216,7 @@ def _compute_cycle_loss(
         eta=cycle_ddim_eta,
     )
 
-    # BUG FIX: Clamp should be applied to decoded images, not latents.
+    # Clamp should be applied to decoded images, not latents.
     # VAE latents typically range [-4, 4], not [-1, 1].
     # Clamping latents before decode corrupts the signal.
     rec_A = vae.decode(z0_rec_A).clamp(-1.0, 1.0).float()
@@ -306,21 +306,22 @@ def compute_diffusion_loss(
     perceptual_batch_fraction: float = 1.0,
 ) -> Tuple[Tensor, Tensor, float]:
     """
-     Compute diffusion training loss with optional perceptual term.
+    Compute diffusion training loss with an optional perceptual term.
 
-     Dataflow:
-          1) MSE prediction loss (optionally Min-SNR weighted):
-              - eps mode: mse(eps_pred, noise)
-              - v mode:   mse(v_pred, v_target)
-          2) optional perceptual branch:
-              predict x0 -> decode to fake_B_pred -> perceptual(fake_B_pred, real_B)
-          3) total = mse + lambda_perc * perceptual
+    Dataflow:
+        1) MSE prediction loss (optionally Min-SNR weighted):
+            - eps mode: mse(eps_pred, noise)
+            - v mode:   mse(v_pred, v_target)
+        2) Optional perceptual branch:
+            predict x0 -> decode to fake_B_pred -> perceptual(fake_B_pred, real_B)
+        3) total = mse + lambda_perc * perceptual
 
     Returns:
         loss: total scalar tensor
         loss_simple: scalar tensor (MSE term)
         loss_perc_val: perceptual scalar as float (0.0 when disabled)
     """
+
     noise = noise.to(dtype=model_pred.dtype)
 
     def _mse_per_sample(pred: Tensor, target: Tensor) -> Tensor:

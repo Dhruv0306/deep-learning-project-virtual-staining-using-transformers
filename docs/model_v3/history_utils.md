@@ -2,7 +2,7 @@
 
 Source of truth: ../../model_v3/history_utils.py
 
-Role: Persist and visualize v3 training history.
+Role: Save, append, reload, and visualize Phase 2 v3 training history.
 
 ---
 
@@ -21,12 +21,23 @@ Role: Persist and visualize v3 training history.
 In-memory history:
 - history[epoch][batch] -> dict with keys:
   - Batch
-  - Loss_DiT
+   - Loss_DiT_A2B
+   - Loss_DiT_B2A
+   - Loss_DiT
+   - Loss_G_Adv
+   - Loss_Cyc
+   - Loss_Id
+   - Loss_D_A
+   - Loss_D_B
+   - Lambda_Adv
+   - Lambda_Id
   - Loss_Perceptual
+   - Loss Total
   - GradNorm
 
 Flattened row schema:
-- Epoch, Batch, Loss_DiT, Loss_Perceptual, GradNorm
+- Epoch, Batch, Loss_DiT_A2B, Loss_DiT_B2A, Loss_DiT, Loss_G_Adv, Loss_Cyc, Loss_Id,
+   Loss_D_A, Loss_D_B, Lambda_Adv, Lambda_Id, Loss_Perceptual, Loss Total, GradNorm
 
 ---
 
@@ -38,11 +49,11 @@ Input:
 
 Dataflow:
 1. _flatten_history(history) -> list of row dicts length M
-2. pandas DataFrame from rows -> shape (M,5)
+2. pandas DataFrame from rows -> shape (M,15)
 3. write CSV
 
 Output:
-- CSV file with 5 columns
+- CSV file with Phase 2 columns
 
 ---
 
@@ -55,7 +66,7 @@ Input:
 Dataflow:
 1. if history empty -> return
 2. flatten to rows length K
-3. DataFrame shape (K,5)
+3. DataFrame shape (K,15)
 4. append mode write, with header only when file missing/empty
 
 Output:
@@ -69,9 +80,9 @@ Input:
 - filename
 
 Dataflow:
-1. read CSV to DataFrame shape (R,5)
+1. read CSV to DataFrame shape (R,15)
 2. iterate each row
-3. rebuild nested structure history[epoch][batch]
+3. rebuild nested structure history[epoch][batch] with all Phase 2 fields
 
 Output:
 - reconstructed history dict
@@ -86,16 +97,14 @@ Input:
 
 Dataflow:
 1. collect sorted epoch list, length E
-2. per epoch, aggregate batch values:
-   - Loss_DiT list length Be
-   - Loss_Perceptual list length Be
-   - GradNorm list length Be
-3. compute per-epoch means:
-   - avg_loss: (E,)
-   - avg_loss_perc: (E,)
-   - avg_grad: (E,)
-4. plot 3 subplots (1x3)
-5. save figure training_history.png
+2. per epoch, aggregate batch values for all key losses and grad norm
+3. compute per-epoch means for:
+   - denoising A2B/B2A/combined
+   - generator adversarial, cycle, identity
+   - discriminator A/B
+   - perceptual, total, grad norm
+4. plot 3x3 grid (9 subplots)
+5. save figure as training_history.png
 
 Output:
 - PNG figure saved to model directory

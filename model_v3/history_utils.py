@@ -1,32 +1,14 @@
 """
-V3-specific training history utilities.
+Utilities for saving, loading, and plotting v3 training history.
 
 Component structure:
     1) save/append CSV helpers
     2) CSV reload helper
     3) visualization helper
 
-CSV schema (updated for Phase 2):
+CSV schema (Phase 2):
     Epoch, Batch, Loss_DiT_A2B, Loss_DiT_B2A, Loss_DiT, Loss_G_Adv, Loss_Cyc, Loss_Id,
     Loss_D_A, Loss_D_B, Lambda_Adv, Lambda_Id, Loss_Perceptual, Loss Total, GradNorm
-
-History structure in memory:
-    history[epoch][batch] = {
-        "Batch": int,
-        "Loss_DiT_A2B": float,
-        "Loss_DiT_B2A": float,
-        "Loss_DiT": float,
-        "Loss_G_Adv": float,
-        "Loss_Cyc": float,
-        "Loss_Id": float,
-        "Loss_D_A": float,
-        "Loss_D_B": float,
-        "Lambda_Adv": float,
-        "Lambda_Id": float,
-        "Loss_Perceptual": float,
-        "Loss Total": float,
-        "GradNorm": float,
-    }
 """
 
 import os
@@ -37,9 +19,7 @@ import pandas as pd
 
 
 def save_history_to_csv_v3(history, filename):
-    """
-    Save v3 training history to CSV.
-    """
+    """Save v3 training history to a CSV file."""
     flattened = _flatten_history(history)
     df = pd.DataFrame(flattened)
     df.to_csv(filename, index=False)
@@ -47,9 +27,7 @@ def save_history_to_csv_v3(history, filename):
 
 
 def append_history_to_csv_v3(history, filename):
-    """
-    Append v3 training history to CSV in chunks.
-    """
+    """Append v3 training history to a CSV file."""
     if not history:
         return
 
@@ -64,11 +42,7 @@ def append_history_to_csv_v3(history, filename):
 
 
 def load_history_from_csv_v3(filename):
-    """
-    Load v3 training history from CSV.
-
-    BUG FIX: Updated to support new Phase 2 CSV schema with all loss components.
-    """
+    """Load v3 training history from CSV (Phase 2 schema)."""
     if not os.path.exists(filename):
         return {}
 
@@ -82,7 +56,7 @@ def load_history_from_csv_v3(filename):
         batch = int(row["Batch"])
         history.setdefault(epoch, {})
 
-        # BUG FIX: Load all Phase 2 loss components from the new CSV schema.
+        # Phase 2: load all loss components from the CSV schema.
         history[epoch][batch] = {
             "Batch": batch,
             "Loss_DiT_A2B": float(row.get("Loss_DiT_A2B", 0.0)),
@@ -104,15 +78,7 @@ def load_history_from_csv_v3(filename):
 
 
 def visualize_history_v3(history, model_dir=None):
-    """
-    Plot v3 training history charts.
-
-    BUG FIX: Updated to visualize all Phase 2 loss components.
-
-    Dataflow:
-        history dict -> per-epoch means -> line plots for:
-        DiT loss (A2B, B2A, combined), adversarial, cycle, identity, discriminator losses.
-    """
+    """Plot v3 training history charts and save a PNG."""
     if not history:
         print("No training history to visualize.")
         return
@@ -132,7 +98,7 @@ def visualize_history_v3(history, model_dir=None):
 
     for epoch in epochs:
         epoch_data = history[epoch]
-        # BUG FIX: Extract all loss components from history.
+        # Phase 2: extract all loss components from history.
         loss_a2b_vals = [b.get("Loss_DiT_A2B", 0.0) for b in epoch_data.values()]
         loss_b2a_vals = [b.get("Loss_DiT_B2A", 0.0) for b in epoch_data.values()]
         loss_dit_vals = [b.get("Loss_DiT", 0.0) for b in epoch_data.values()]

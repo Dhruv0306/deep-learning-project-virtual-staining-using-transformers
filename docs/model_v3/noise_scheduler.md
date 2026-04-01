@@ -96,6 +96,33 @@ Dataflow:
 Output:
 - x0_pred: (N,C,H,W)
 
+### get_v_target(x0, noise, t)
+
+Purpose:
+- compute v-parameterization training target
+
+Formula:
+- v = sqrt(alpha_bar_t) * noise - sqrt(1 - alpha_bar_t) * x0
+
+Output:
+- v_target: (N,C,H,W)
+
+### predict_eps_from_v(x_t, v_pred, t)
+
+Purpose:
+- convert v-prediction to epsilon prediction
+
+Output:
+- eps_pred: (N,C,H,W)
+
+### predict_x0_from_v(x_t, v_pred, t)
+
+Purpose:
+- convert v-prediction to x0 reconstruction
+
+Output:
+- x0_pred: (N,C,H,W)
+
 ### get_alpha_bar(t)
 
 Input:
@@ -109,11 +136,15 @@ Output:
 ## 4) DDIMSampler
 
 Inputs to sample:
-- model: predicts eps
-- condition: (N,Hd)
+- model: predicts v or eps (tensor or dict with key v_pred)
+- condition: image/tokens expected by CycleDiTGenerator
 - shape: (N,4,32,32)
 - num_steps
 - eta
+- prediction_type (v or eps)
+- cfg_scale
+- uncond_condition
+- target_domain
 
 ### Dataflow per sampling run
 
@@ -122,13 +153,16 @@ Inputs to sample:
 2. build timestep sequence length num_steps
 3. for each timestep:
    - t_batch: (N,)
-   - eps_pred = model(z_t, t_batch, condition): (N,4,32,32)
+   - model_out = model(z_t, t_batch, condition, target_domain=...)
+   - optional CFG blend with uncond_condition when cfg_scale > 1
+   - convert to eps_pred based on prediction_type
    - z0_pred = predict_x0(...): (N,4,32,32)
    - compute alpha_bar_t and alpha_bar_prev scalars
    - compute sigma scalar (depends on eta)
    - compute direction term dir_xt: (N,4,32,32)
    - update z_t: (N,4,32,32)
    - optional noise add when eta>0
+   - final boundary uses alpha_bar_prev = alphas_cumprod[0]
 4. return final z_t
 
 Output:

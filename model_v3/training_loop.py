@@ -107,7 +107,7 @@ def _run_validation_v3(
 
     print(f"[{ 'Testing' if is_test else 'Validation' }] Starting run at epoch {epoch}")
 
-    # BUG FIX: Track both domain metrics as specified in Phase 2 spec.
+    # Phase 2: track both domain metrics.
     # Previously only tracked Domain B, now tracks both A and B.
     metrics = {"ssim_A": [], "psnr_A": [], "ssim_B": [], "psnr_B": []}
     real_A_list = []
@@ -142,7 +142,7 @@ def _run_validation_v3(
             )
             fake_B = vae.decode(z0).clamp(-1.0, 1.0)
 
-            # BUG FIX: Compute metrics for both domains (B and A).
+            # Phase 2: compute metrics for both domains (B and A).
             metrics["ssim_B"].append(calculator.calculate_ssim(real_B, fake_B))
             metrics["psnr_B"].append(calculator.calculate_psnr(real_B, fake_B))
 
@@ -166,7 +166,7 @@ def _run_validation_v3(
                 )
                 fake_A = vae.decode(z0_A).clamp(-1.0, 1.0)
 
-                # BUG FIX: Compute domain A metrics (ssim_A, psnr_A) to track both domains.
+                # Phase 2: compute domain A metrics (ssim_A, psnr_A).
                 metrics["ssim_A"].append(calculator.calculate_ssim(real_A, fake_A))
                 metrics["psnr_A"].append(calculator.calculate_psnr(real_A, fake_A))
 
@@ -227,7 +227,7 @@ def _run_validation_v3(
             if (i + 1) % 10 == 0:
                 print(f"[{prefix}] Processed {i + 1} batches")
 
-    # BUG FIX: Compute average metrics for both domains per Phase 2 spec.
+    # Phase 2: compute average metrics for both domains.
     avg_metrics = {
         "ssim_A": float(sum(metrics["ssim_A"]) / max(1, len(metrics["ssim_A"]))),
         "psnr_A": float(sum(metrics["psnr_A"]) / max(1, len(metrics["psnr_A"]))),
@@ -235,7 +235,7 @@ def _run_validation_v3(
         "psnr_B": float(sum(metrics["psnr_B"]) / max(1, len(metrics["psnr_B"]))),
     }
 
-    # BUG FIX: Early stopping score now uses mean of both domains per spec.
+    # Phase 2: early stopping score uses mean of both domains.
     early_stopping_score = 0.5 * (avg_metrics["ssim_A"] + avg_metrics["ssim_B"])
 
     fid_count = min(fid_max_samples, len(real_B_list))
@@ -248,7 +248,7 @@ def _run_validation_v3(
         fake_B_tensor = torch.cat(fake_B_list[:fid_count])
         avg_metrics["fid_B"] = calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
 
-    # BUG FIX: Compute FID for domain A as well per Phase 2 spec.
+    # Phase 2: compute FID for domain A as well.
     fid_count_A = min(fid_max_samples, len(real_A_list))
     if (
         fid_count_A >= fid_min_samples
@@ -538,7 +538,7 @@ def train_v3(
                 optimizer_G.zero_grad(set_to_none=True)
 
             # SPEC COMPLIANCE: Per Phase 2 spec, generator step comes before discriminator steps.
-            # Step order: Generator → Discriminator A → Discriminator B
+            # Step order: Generator -> Discriminator A -> Discriminator B
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
             with autocast("cuda", enabled=use_amp):
@@ -937,7 +937,7 @@ def train_v3(
             and epoch + 1 >= tcfg.early_stopping_warmup
             and val_metrics is not None
         ):
-            # BUG FIX: Early stopping score now uses mean(SSIM_A, SSIM_B) per spec.
+            # Phase 2: early stopping score uses mean(SSIM_A, SSIM_B).
             avg_ssim = 0.5 * (
                 val_metrics.get("ssim_A", 0.0) + val_metrics.get("ssim_B", 0.0)
             )

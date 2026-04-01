@@ -4,7 +4,7 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 
 ---
 
-## Model V1 — Hybrid UVCGAN + CycleGAN
+## Model V1 ï¿½ Hybrid UVCGAN + CycleGAN
 
 | File | Documentation | Description |
 |---|---|---|
@@ -13,7 +13,7 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `model_v1/losses.py` | [losses.md](model_v1/losses.md) | V1 loss functions: LSGAN + cycle + identity + VGG19 perceptual + two-sided GP. All parameters and data flow |
 | `model_v1/training_loop.py` | [training_loop.md](model_v1/training_loop.md) | V1 training loop: full step-by-step flow, hardcoded hyperparameters, differences from v2 |
 
-## Model V2 — True UVCGAN
+## Model V2 ï¿½ True UVCGAN
 
 | File | Documentation | Description |
 |---|---|---|
@@ -22,16 +22,16 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `model_v2/losses.py` | [losses.md](model_v2/losses.md) | V2 loss functions: LSGAN + one-sided GP (?=100) + contrastive + spectral. Paper-aligned formulas and full data flow |
 | `model_v2/training_loop.py` | [training_loop.md](model_v2/training_loop.md) | V2 training loop: gradient accumulation, AMP safety, per-batch step detail, validation/early stopping separation |
 
-## Model V3 — DiT Diffusion
+## Model V3 ï¿½ DiT Diffusion
 
 | File | Documentation | Description |
 |---|---|---|
-| `model_v3/generator.py` | [generator.md](model_v3/generator.md) | DiT backbone, ConditionEncoder, adaLN-Zero blocks |
+| `model_v3/generator.py` | [generator.md](model_v3/generator.md) | CycleDiT generator: ConditionTokenizer + domain embedding + DiT backbone |
+| `model_v3/discriminator.py` | [discriminator.md](model_v3/discriminator.md) | Three-branch ProjectionDiscriminator (local PatchGAN + global + spectral FFT) |
 | `model_v3/noise_scheduler.py` | [noise_scheduler.md](model_v3/noise_scheduler.md) | DDPM scheduler and DDIM sampler |
 | `model_v3/vae_wrapper.py` | [vae_wrapper.md](model_v3/vae_wrapper.md) | SD VAE wrapper for latent diffusion |
-| `model_v3/training_loop.py` | [training_loop.md](model_v3/training_loop.md) | Diffusion training loop with EMA and AMP |
-| `model_v3/losses.py` | [losses.md](model_v3/losses.md) | v3 diffusion loss helper functions |
-| `model_v3/data_loader.py` | [data_loader.md](model_v3/data_loader.md) | Paired A/B dataloader for v3 diffusion |
+| `model_v3/training_loop.py` | [training_loop.md](model_v3/training_loop.md) | Adversarial diffusion training with cycle + identity losses, EMA, and AMP |
+| `model_v3/losses.py` | [losses.md](model_v3/losses.md) | Diffusion loss + LSGAN + R1 penalty + cycle consistency + identity constraints |
 | `model_v3/history_utils.py` | [history_utils.md](model_v3/history_utils.md) | v3 training history CSV/plots (no discriminator terms) |
 
 ## Shared

@@ -21,7 +21,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 
 | File | Purpose |
 |---|---|
-| `trainModel.py` | Training entry point � prompts for epoch size, epochs, test size, and model version |
+| `trainModel.py` | Training entry point � prompts for epoch size, epochs, test size, and model version |
 | `app.py` | Inference script — translates whole-slide images via patch-based staining/unstaining |
 | `preprocess_data.py` | Patch extraction, tissue/background filtering, and train/test split |
 | `unzip.py` | Helper to extract the dataset ZIP archive into the expected directory layout |
@@ -38,7 +38,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 |---|---|
 | `model_v1/training_loop.py` | v1 training loop — CycleGAN-style with LSGAN, single PatchGAN discriminator, gradient clipping, AMP |
 | `model_v2/training_loop.py` | v2 training loop — paper-aligned LSGAN + one-sided GP, multi-scale spectral-norm discriminators, warm-up + linear LR decay, gradient accumulation, and per-interval validation |
-| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
+| `model_v3/training_loop.py` | v3 training loop — DiT diffusion + adversarial training (Phase 1), cycle consistency + identity losses (Phase 2), dual discriminators, EMA, R1 penalty, ReplayBuffer, and validation |
 
 ### Models
 
@@ -46,11 +46,12 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 |---|---|
 | `model_v1/generator.py` | v1 generator — U-Net + ViT bottleneck with ReZero Transformer blocks |
 | `model_v2/generator.py` | v2 generator — U-Net + ViT with LayerScale, cross-domain skip fusion, Kaiming/Xavier weight init, and optional gradient checkpointing |
-| `model_v3/generator.py` | v3 generator � DiT backbone with conditional encoder for latent diffusion |
+| `model_v3/generator.py` | v3 generator — DiT backbone with conditional encoder for latent diffusion |
 | `model_v1/discriminator.py` | v1 discriminator — standard PatchGAN |
 | `model_v2/discriminator.py` | v2 discriminator — spectral-norm multi-scale PatchGAN |
-| `model_v3/noise_scheduler.py` | v3 scheduler � DDPM scheduler + DDIM sampler |
-| `model_v3/vae_wrapper.py` | v3 VAE wrapper � SD VAE encode/decode for latents |
+| `model_v3/discriminator.py` | v3 discriminator — three-branch ProjectionDiscriminator (local PatchGAN + global + spectral FFT) |
+| `model_v3/noise_scheduler.py` | v3 scheduler — DDPM scheduler + DDIM sampler |
+| `model_v3/vae_wrapper.py` | v3 VAE wrapper — SD VAE encode/decode for latents |
 
 ### Losses
 
@@ -58,7 +59,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 |---|---|
 | `model_v1/losses.py` | v1 composite loss — LSGAN, cycle-consistency, identity, VGG19 perceptual, gradient penalty |
 | `model_v2/losses.py` | v2 composite loss (`UVCGANLoss`) — LSGAN + one-sided GP (γ=100, λ=0.1), cycle, identity, multi-level VGG19 perceptual, optional NT-Xent contrastive, optional spectral frequency loss |
-| `model_v3/losses.py` | v3 diffusion loss helpers (noise prediction + perceptual terms) |
+| `model_v3/losses.py` | v3 diffusion loss — LSGAN generators/discriminators, R1 penalty, cycle consistency, identity constraints, Min-SNR weighting, optional perceptual terms |
 
 ### Data & Utilities
 
@@ -71,7 +72,6 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 | `shared/validation.py` | Per-interval validation — runs generators, computes metrics, saves comparison images |
 | `shared/testing.py` | End-of-training test inference and comparison image export |
 | `shared/history_utils.py` | Training history visualisation and CSV persistence |
-| `model_v3/data_loader.py` | v3 paired data loader for aligned A/B training pairs |
 | `model_v3/history_utils.py` | v3 training history CSV/plots (no discriminator terms) |
 
 ---
@@ -228,12 +228,12 @@ Label smoothing: real targets use 0.97 instead of 1.0. Discriminator fakes are d
 ---
 
 ### v2 — True UVCGAN (`model_v2/training_loop.py`)
-| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
+| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 
 Paper-aligned implementation of Prokopenko et al., *UVCGAN v2*, 2023.
 
 **Generator (`model_v2/generator.py` → `ViTUNetGeneratorV2`)**
-| `model_v3/generator.py` | v3 generator � DiT backbone with conditional encoder for latent diffusion |
+| `model_v3/generator.py` | v3 generator � DiT backbone with conditional encoder for latent diffusion |
 
 Revised U-Net + ViT architecture with several structural improvements over v1:
 
@@ -263,8 +263,8 @@ fake_A = G_BA.forward_with_cross_domain(real_B, skips_from_G_AB(real_A))
 ```
 
 **Discriminator (`model_v2/discriminator.py` → `MultiScaleDiscriminator`)**
-| `model_v3/noise_scheduler.py` | v3 scheduler � DDPM scheduler + DDIM sampler |
-| `model_v3/vae_wrapper.py` | v3 VAE wrapper � SD VAE encode/decode for latents |
+| `model_v3/noise_scheduler.py` | v3 scheduler � DDPM scheduler + DDIM sampler |
+| `model_v3/vae_wrapper.py` | v3 VAE wrapper � SD VAE encode/decode for latents |
 
 Wraps N independent `SpectralNormDiscriminator` instances, each operating on a progressively downsampled version of the input (2× average-pool between scales):
 
@@ -291,7 +291,7 @@ Wraps N independent `SpectralNormDiscriminator` instances, each operating on a p
 The one-sided GP is softer than WGAN-GP — it only penalises gradients that exceed γ=100, leaving D free to have small-norm gradients near real data. This is appropriate because the GAN objective is LSGAN (not Wasserstein). The GP is always computed in float32 regardless of AMP state to avoid NaN gradients.
 
 **Training (`model_v2/training_loop.py`)**
-| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
+| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 - Adam `lr=2e-4`, betas `(0.5, 0.999)`, `n_critic=1`
 - Warm-up LR ramp for `warmup_epochs` epochs, then constant, then linear decay from `decay_start_epoch`
 - Gradient clipping (max norm 1.0)
@@ -305,7 +305,7 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 
 ### v3 — DiT Diffusion (`model_v3/training_loop.py`)
 
-v3 training assumes paired A/B patches with matching filenames in `trainA/trainB` and `testA/testB` (see `model_v3/data_loader.py`).
+v3 training uses the shared unpaired loader in `shared/data_loader.py` (trainA/trainB and testA/testB are still expected).
 
 Conditional latent diffusion with a full Transformer backbone:
 
