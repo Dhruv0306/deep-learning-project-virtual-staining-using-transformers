@@ -16,6 +16,7 @@ Losses:
 
 from __future__ import annotations
 
+import copy
 import os
 from typing import Optional
 
@@ -53,6 +54,24 @@ def _global_grad_norm(parameters) -> float:
     if not grads:
         return 0.0
     return float(torch.norm(torch.stack([g.norm() for g in grads])))
+
+
+def _make_lr_lambda(warmup: int, decay_start: int, total: int):
+    """
+    Linear warmup then linear decay LR schedule.
+    """
+
+    def lr_lambda(epoch: int) -> float:
+        if epoch < warmup:
+            return max(1e-8, (epoch + 1) / max(1, warmup))
+        if epoch < decay_start:
+            return 1.0
+        remaining = total - decay_start
+        if remaining <= 0:
+            return 0.0
+        return max(0.0, 1.0 - (epoch - decay_start) / remaining)
+
+    return lr_lambda
 
 
 def _lsgan_gen_loss(pred_fake: torch.Tensor) -> torch.Tensor:
@@ -314,12 +333,42 @@ def train_v4(
         D_B.parameters(), lr=tcfg.lr, betas=(tcfg.beta1, tcfg.beta2)
     )
 
+    # ---- LR schedulers ----
+    lr_scheduler_G = None
+    lr_scheduler_D_A = None
+    lr_scheduler_D_B = None
+    if tcfg.use_lr_schedule:
+        lr_lambda = _make_lr_lambda(
+            warmup=tcfg.lr_warmup_epochs,
+            decay_start=tcfg.lr_decay_start_epoch,
+            total=tcfg.num_epochs,
+        )
+        lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(
+            optimizer_G, lr_lambda=lr_lambda
+        )
+        lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(
+            optimizer_D_A, lr_lambda=lr_lambda
+        )
+        lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(
+            optimizer_D_B, lr_lambda=lr_lambda
+        )
+
     use_amp = tcfg.use_amp and device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
+
+    # ---- EMA ----
+    ema_G_AB = None
+    ema_G_BA = None
+    if tcfg.use_ema:
+        ema_G_AB = copy.deepcopy(G_AB).to(device)
+        ema_G_BA = copy.deepcopy(G_BA).to(device)
+        ema_G_AB.requires_grad_(False)
+        ema_G_BA.requires_grad_(False)
 
     # ---- Metrics / PatchNCE ----
     # Shared SSIM/PSNR calculator reused across validation calls.
     metrics_calculator = MetricsCalculator(device=device)
+    idt_loss = torch.nn.L1Loss()
     nce_layers = list(tcfg.nce_layers)
     max_layers = mcfg.encoder_depth if mcfg.use_transformer_encoder else 4
     nce_layers = [idx for idx in nce_layers if idx < max_layers]
@@ -371,6 +420,7 @@ def train_v4(
         epoch_loss_G = 0.0
         epoch_loss_G_gan = 0.0
         epoch_loss_NCE = 0.0
+        epoch_loss_Id = 0.0
         epoch_loss_G_AB = 0.0
         epoch_loss_G_BA = 0.0
         epoch_loss_D_A = 0.0
@@ -499,7 +549,17 @@ def train_v4(
                     loss_nce_BA = nce_criterion(patches_fake_A, patches_real_B)
                     loss_nce = 0.5 * (loss_nce_AB + loss_nce_BA)
 
-                loss_G = tcfg.lambda_gan * loss_G_gan + tcfg.lambda_nce * loss_nce
+                loss_id = torch.tensor(0.0, device=device)
+                if tcfg.lambda_identity > 0.0:
+                    idt_B = G_AB(real_B)
+                    idt_A = G_BA(real_A)
+                    loss_id = idt_loss(idt_B, real_B) + idt_loss(idt_A, real_A)
+
+                loss_G = (
+                    tcfg.lambda_gan * loss_G_gan
+                    + tcfg.lambda_nce * loss_nce
+                    + tcfg.lambda_identity * loss_id
+                )
                 loss_G_scaled = (
                     loss_G / accumulate
                 )  # scale before backward for correct gradient magnitude
@@ -538,6 +598,17 @@ def train_v4(
                     scaler.update()
                 else:
                     optimizer_G.step()
+
+                if tcfg.use_ema and ema_G_AB is not None and ema_G_BA is not None:
+                    with torch.no_grad():
+                        for ema_p, p in zip(ema_G_AB.parameters(), G_AB.parameters()):
+                            ema_p.data.mul_(tcfg.ema_decay).add_(
+                                p.data, alpha=1 - tcfg.ema_decay
+                            )
+                        for ema_p, p in zip(ema_G_BA.parameters(), G_BA.parameters()):
+                            ema_p.data.mul_(tcfg.ema_decay).add_(
+                                p.data, alpha=1 - tcfg.ema_decay
+                            )
                 accum_count = 0
             else:
                 grad_norm = 0.0
@@ -551,6 +622,7 @@ def train_v4(
                 "Loss_NCE": float(loss_nce.item()),
                 "Loss_NCE_AB": float(loss_nce_AB.item()),
                 "Loss_NCE_BA": float(loss_nce_BA.item()),
+                "Loss_Id": float(loss_id.item()),
                 "Loss_G_AB": float(loss_G_AB.item()),
                 "Loss_G_BA": float(loss_G_BA.item()),
                 "Loss_D_A": float(loss_D_A.item()),
@@ -560,6 +632,7 @@ def train_v4(
             epoch_loss_G += float(loss_G.item())
             epoch_loss_G_gan += float(loss_G_gan.item())
             epoch_loss_NCE += float(loss_nce.item())
+            epoch_loss_Id += float(loss_id.item())
             epoch_loss_G_AB += float(loss_G_AB.item())
             epoch_loss_G_BA += float(loss_G_BA.item())
             epoch_loss_D_A += float(loss_D_A.item())
@@ -573,6 +646,7 @@ def train_v4(
                     f"Loss_G: {loss_G.item():.4f} "
                     f"Loss_G_GAN: {loss_G_gan.item():.4f} "
                     f"Loss_NCE: {loss_nce.item():.4f} "
+                    f"Loss_Id: {loss_id.item():.4f} "
                     f"Loss_D_A: {loss_D_A.item():.4f} "
                     f"Loss_D_B: {loss_D_B.item():.4f} "
                     f"GradNorm_G: {grad_norm:.4f}"
@@ -583,6 +657,7 @@ def train_v4(
         avg_loss_G = epoch_loss_G / n_batches
         avg_loss_G_gan = epoch_loss_G_gan / n_batches
         avg_loss_NCE = epoch_loss_NCE / n_batches
+        avg_loss_Id = epoch_loss_Id / n_batches
         avg_loss_G_AB = epoch_loss_G_AB / n_batches
         avg_loss_G_BA = epoch_loss_G_BA / n_batches
         avg_loss_D_A = epoch_loss_D_A / n_batches
@@ -593,6 +668,7 @@ def train_v4(
         writer.add_scalar("Loss/Generator", avg_loss_G, epoch + 1)
         writer.add_scalar("Loss/GAN", avg_loss_G_gan, epoch + 1)
         writer.add_scalar("Loss/NCE", avg_loss_NCE, epoch + 1)
+        writer.add_scalar("Loss/Identity", avg_loss_Id, epoch + 1)
         writer.add_scalar("Loss/Generator_AB", avg_loss_G_AB, epoch + 1)
         writer.add_scalar("Loss/Generator_BA", avg_loss_G_BA, epoch + 1)
         writer.add_scalar("Loss/Discriminator_A", avg_loss_D_A, epoch + 1)
@@ -608,6 +684,24 @@ def train_v4(
             f"Avg Loss_D_B: {avg_loss_D_B:.4f}"
         )
 
+        if lr_scheduler_G is not None:
+            lr_scheduler_G.step()
+            writer.add_scalar(
+                "LR/Generator", lr_scheduler_G.get_last_lr()[0], epoch + 1
+            )
+
+        if lr_scheduler_D_A is not None:
+            lr_scheduler_D_A.step()
+            writer.add_scalar(
+                "LR/Discriminator_A", lr_scheduler_D_A.get_last_lr()[0], epoch + 1
+            )
+
+        if lr_scheduler_D_B is not None:
+            lr_scheduler_D_B.step()
+            writer.add_scalar(
+                "LR/Discriminator_B", lr_scheduler_D_B.get_last_lr()[0], epoch + 1
+            )
+
         if (epoch + 1) % tcfg.save_every == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
@@ -617,9 +711,30 @@ def train_v4(
                     "G_BA_state_dict": G_BA.state_dict(),
                     "D_A_state_dict": D_A.state_dict(),
                     "D_B_state_dict": D_B.state_dict(),
+                    "ema_G_AB_state_dict": (
+                        ema_G_AB.state_dict() if ema_G_AB is not None else None
+                    ),
+                    "ema_G_BA_state_dict": (
+                        ema_G_BA.state_dict() if ema_G_BA is not None else None
+                    ),
                     "optimizer_G_state_dict": optimizer_G.state_dict(),
                     "optimizer_D_A_state_dict": optimizer_D_A.state_dict(),
                     "optimizer_D_B_state_dict": optimizer_D_B.state_dict(),
+                    "lr_scheduler_G_state_dict": (
+                        lr_scheduler_G.state_dict()
+                        if lr_scheduler_G is not None
+                        else None
+                    ),
+                    "lr_scheduler_D_A_state_dict": (
+                        lr_scheduler_D_A.state_dict()
+                        if lr_scheduler_D_A is not None
+                        else None
+                    ),
+                    "lr_scheduler_D_B_state_dict": (
+                        lr_scheduler_D_B.state_dict()
+                        if lr_scheduler_D_B is not None
+                        else None
+                    ),
                 },
                 ckpt_path,
             )
@@ -627,10 +742,12 @@ def train_v4(
 
         if (epoch + 1) >= tcfg.validation_every:
             save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
+            val_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
+            val_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
             _run_validation_phase1(
                 epoch=epoch + 1,
-                G_AB=G_AB,
-                G_BA=G_BA,
+                G_AB=val_G_AB,
+                G_BA=val_G_BA,
                 test_loader=test_loader,
                 device=device,
                 save_dir=save_dir,
@@ -649,9 +766,24 @@ def train_v4(
             "G_BA_state_dict": G_BA.state_dict(),
             "D_A_state_dict": D_A.state_dict(),
             "D_B_state_dict": D_B.state_dict(),
+            "ema_G_AB_state_dict": (
+                ema_G_AB.state_dict() if ema_G_AB is not None else None
+            ),
+            "ema_G_BA_state_dict": (
+                ema_G_BA.state_dict() if ema_G_BA is not None else None
+            ),
             "optimizer_G_state_dict": optimizer_G.state_dict(),
             "optimizer_D_A_state_dict": optimizer_D_A.state_dict(),
             "optimizer_D_B_state_dict": optimizer_D_B.state_dict(),
+            "lr_scheduler_G_state_dict": (
+                lr_scheduler_G.state_dict() if lr_scheduler_G is not None else None
+            ),
+            "lr_scheduler_D_A_state_dict": (
+                lr_scheduler_D_A.state_dict() if lr_scheduler_D_A is not None else None
+            ),
+            "lr_scheduler_D_B_state_dict": (
+                lr_scheduler_D_B.state_dict() if lr_scheduler_D_B is not None else None
+            ),
         },
         final_ckpt,
     )
@@ -660,10 +792,12 @@ def train_v4(
     # ---- Final test-set export ----
     test_dir = os.path.join(model_dir, "test_images")
     writer.add_scalar("Testing Started", tcfg.num_epochs, tcfg.num_epochs)
+    test_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
+    test_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
     _run_validation_phase1(
         epoch=tcfg.num_epochs,
-        G_AB=G_AB,
-        G_BA=G_BA,
+        G_AB=test_G_AB,
+        G_BA=test_G_BA,
         test_loader=test_loader,
         device=device,
         save_dir=test_dir,

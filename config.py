@@ -447,6 +447,7 @@ class V4ModelConfig:
         - ``num_res_blocks`` controls generator depth.
         - ``disc_n_layers`` controls PatchGAN depth.
     """
+
     input_nc: int = 3
     output_nc: int = 3
     base_channels: int = 64
@@ -469,6 +470,7 @@ class V4TrainingConfig:
     """
     Training loop hyperparameters for the v4 Phase 1/2 GAN baseline.
     """
+
     num_epochs: int = 200
     epoch_size: int = 3000
     test_size: int = 200
@@ -485,12 +487,18 @@ class V4TrainingConfig:
     validation_max_batches: int = 50
     lambda_gan: float = 1.0
     lambda_nce: float = 1.0
+    lambda_identity: float = 5.0
     nce_layers: tuple[int, ...] = (0, 1, 2)
     nce_num_patches: int = 128
     nce_temperature: float = 0.07
     nce_proj_dim: int = 256
     use_replay_buffer: bool = True
     replay_buffer_size: int = 50
+    use_ema: bool = True
+    ema_decay: float = 0.999
+    use_lr_schedule: bool = True
+    lr_warmup_epochs: int = 5
+    lr_decay_start_epoch: int = 100
 
 
 @dataclass
@@ -498,6 +506,7 @@ class V4DataConfig:
     """
     Data loading configuration for v4 Phase 1.
     """
+
     image_size: int = 256
     batch_size: int = 4
     num_workers: int = 4
@@ -509,6 +518,7 @@ class V4Config:
     """
     Top-level configuration container for v4 Phase 1 training.
     """
+
     model_version: int = 4
     model: V4ModelConfig = field(default_factory=V4ModelConfig)
     training: V4TrainingConfig = field(default_factory=V4TrainingConfig)
@@ -525,14 +535,14 @@ class V4Config:
 
 def get_v4_config() -> V4Config:
     """
-    Return a default config for the v4 Phase 1 GAN baseline.
+    Return a default config for the v4
     """
     return V4Config()
 
 
 def get_v4_8gb_config() -> V4Config:
     """
-    Return a VRAM-lean v4 Phase 3 config.
+    Return a VRAM-lean v4
     """
     cfg = V4Config()
     cfg.model.use_gradient_checkpointing = True
