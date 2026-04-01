@@ -124,8 +124,6 @@ def main():
         print(f"Validation image directory: {val_dir}")
         cfg = get_v4_8gb_config()
         cfg.training.test_size = test_size
-        cfg.training.validation_samples = test_size
-        cfg.training.validation_max_batches = test_size
         history, G_AB, G_BA, D_A, D_B = train_v4_phase1(
             epoch_size=epoch_size,
             num_epochs=num_epochs,

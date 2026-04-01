@@ -1,17 +1,17 @@
 """
-model_v4/training_loop.py — Phase 1 training loop for CUT + Transformer (v4).
+model_v4/training_loop.py — Phase 2 training loop for CUT + Transformer (v4).
 
-Implements a minimal unpaired GAN baseline (no cycle loss, no NCE, no
-Transformer) to establish a stable training foundation before later phases
-add contrastive learning and a Transformer encoder.
+Adds PatchNCE contrastive loss on top of the Phase 1 GAN baseline (still no
+Transformer). PatchNCE is computed on encoder features sampled at shared
+spatial locations between real and generated images.
 
 Data flow:
     real_A → G_AB → fake_B   (unstained → stained)
     real_B → G_BA → fake_A   (stained   → unstained)
 
 Losses:
-    Generator:     LSGAN  — (D(fake) − 1)²
-    Discriminator: LSGAN  — (D(real) − 1)² + D(fake)²
+    Generator:     λ_gan * LSGAN + λ_nce * PatchNCE
+    Discriminator: LSGAN — (D(real) − 1)² + D(fake)²
 """
 
 from __future__ import annotations
@@ -27,10 +27,13 @@ from torch.utils.tensorboard import SummaryWriter
 from config import V4Config
 from shared.data_loader import getDataLoader
 from shared.metrics import MetricsCalculator
+from shared.replay_buffer import ReplayBuffer
 from shared.validation import save_images_with_title
 
 from model_v4.generator import getGeneratorV4
 from model_v4.discriminator import getDiscriminatorV4
+from model_v4.patch_sampler import PatchSampler
+from model_v4.nce_loss import PatchNCELoss
 
 
 def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
@@ -131,20 +134,20 @@ def _run_validation_phase1(
                 metrics[key].append(float(value))
 
             if i < num_samples:
-                row_A = torch.cat([real_A[:1], fake_B[:1], rec_B[:1], real_B[:1]], dim=0).cpu()
+                row_A = torch.cat([real_A[:1], fake_B[:1], rec_A[:1], real_B[:1]], dim=0).cpu()
                 out_path_A = os.path.join(save_dir, f"image_{i + 1}_A.png")
                 save_images_with_title(
                     row_A,
-                    labels=["Real A", "Fake B", "Reconstructed B", "Real B"],
+                    labels=["Real A", "Fake B", "Reconstructed A", "Real B"],
                     out_path=out_path_A,
                     value_range=(-1, 1),
                 )
 
-                row_B = torch.cat([real_B[:1], fake_A[:1], rec_A[:1], real_A[:1]], dim=0).cpu()
+                row_B = torch.cat([real_B[:1], fake_A[:1], rec_B[:1], real_A[:1]], dim=0).cpu()
                 out_path_B = os.path.join(save_dir, f"image_{i + 1}_B.png")
                 save_images_with_title(
                     row_B,
-                    labels=["Real B", "Fake A", "Reconstructed A", "Real A"],
+                    labels=["Real B", "Fake A", "Reconstructed B", "Real A"],
                     out_path=out_path_B,
                     value_range=(-1, 1),
                 )
@@ -185,7 +188,7 @@ def train_v4_phase1(
     cfg: Optional[V4Config] = None,
 ):
     """
-    Train the Phase 1 baseline GAN (A ↔ B, LSGAN only — no cycle, no NCE).
+    Train the Phase 2 GAN baseline (A ↔ B, LSGAN + PatchNCE).
 
     Any argument that is not None overrides the corresponding field in *cfg*
     before training begins, allowing the caller to pass a pre-built config and
@@ -287,9 +290,19 @@ def train_v4_phase1(
     use_amp = tcfg.use_amp and device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
 
-    # ---- Metrics ----
+    # ---- Metrics / PatchNCE ----
     # Shared SSIM/PSNR calculator reused across validation calls.
     metrics_calculator = MetricsCalculator(device=device)
+    nce_layers = list(tcfg.nce_layers)
+    patch_sampler = PatchSampler(num_patches=tcfg.nce_num_patches)
+    nce_criterion = PatchNCELoss(
+        temperature=tcfg.nce_temperature, proj_dim=tcfg.nce_proj_dim
+    ).to(device)
+    use_nce = tcfg.lambda_nce > 0.0
+
+    # ---- Replay buffers ----
+    replay_A = ReplayBuffer(tcfg.replay_buffer_size) if tcfg.use_replay_buffer else None
+    replay_B = ReplayBuffer(tcfg.replay_buffer_size) if tcfg.use_replay_buffer else None
 
     # ---- Output dirs / TensorBoard ----
     # Fall back to a default path when model_dir was not supplied via cfg.
@@ -322,6 +335,8 @@ def train_v4_phase1(
 
         epoch_step = {}
         epoch_loss_G = 0.0
+        epoch_loss_G_gan = 0.0
+        epoch_loss_NCE = 0.0
         epoch_loss_G_AB = 0.0
         epoch_loss_G_BA = 0.0
         epoch_loss_D_A = 0.0
@@ -354,9 +369,14 @@ def train_v4_phase1(
                 fake_A = G_BA(real_B)
 
             optimizer_D_A.zero_grad(set_to_none=True)
+            fake_A_detached = (
+                replay_A.push_and_pop(fake_A.detach())
+                if replay_A is not None
+                else fake_A.detach()
+            )
             with autocast("cuda", enabled=False):
                 pred_real_A = D_A(real_A.float())
-                pred_fake_A = D_A(fake_A.detach().float())
+                pred_fake_A = D_A(fake_A_detached.float())
                 loss_D_A = _lsgan_disc_loss(pred_real_A, pred_fake_A)
             if not torch.isfinite(loss_D_A):
                 print(
@@ -370,9 +390,14 @@ def train_v4_phase1(
             optimizer_D_A.step()
 
             optimizer_D_B.zero_grad(set_to_none=True)
+            fake_B_detached = (
+                replay_B.push_and_pop(fake_B.detach())
+                if replay_B is not None
+                else fake_B.detach()
+            )
             with autocast("cuda", enabled=False):
                 pred_real_B = D_B(real_B.float())
-                pred_fake_B = D_B(fake_B.detach().float())
+                pred_fake_B = D_B(fake_B_detached.float())
                 loss_D_B = _lsgan_disc_loss(pred_real_B, pred_fake_B)
             if not torch.isfinite(loss_D_B):
                 print(
@@ -399,13 +424,46 @@ def train_v4_phase1(
                 optimizer_G.zero_grad(set_to_none=True)  # reset at start of accumulation window
 
             with autocast("cuda", enabled=use_amp):
-                fake_B = G_AB(real_A)
-                fake_A = G_BA(real_B)
+                fake_B, feats_real_A = G_AB(
+                    real_A, return_features=True, nce_layers=nce_layers
+                )
+                fake_A, feats_real_B = G_BA(
+                    real_B, return_features=True, nce_layers=nce_layers
+                )
                 pred_fake_B = D_B(fake_B)
                 pred_fake_A = D_A(fake_A)
                 loss_G_AB = _lsgan_gen_loss(pred_fake_B)
                 loss_G_BA = _lsgan_gen_loss(pred_fake_A)
-                loss_G = loss_G_AB + loss_G_BA
+                loss_G_gan = loss_G_AB + loss_G_BA
+
+                loss_nce = torch.tensor(0.0, device=device)
+                loss_nce_AB = torch.tensor(0.0, device=device)
+                loss_nce_BA = torch.tensor(0.0, device=device)
+                if use_nce:
+                    feats_fake_B = G_AB.encode_features(fake_B, nce_layers=nce_layers)
+                    feats_fake_A = G_BA.encode_features(fake_A, nce_layers=nce_layers)
+
+                    patches_real_A, patch_ids_A = patch_sampler.sample(
+                        feats_real_A, num_patches=tcfg.nce_num_patches
+                    )
+                    patches_fake_B, _ = patch_sampler.sample(
+                        feats_fake_B,
+                        num_patches=tcfg.nce_num_patches,
+                        patch_ids=patch_ids_A,
+                    )
+                    patches_real_B, patch_ids_B = patch_sampler.sample(
+                        feats_real_B, num_patches=tcfg.nce_num_patches
+                    )
+                    patches_fake_A, _ = patch_sampler.sample(
+                        feats_fake_A,
+                        num_patches=tcfg.nce_num_patches,
+                        patch_ids=patch_ids_B,
+                    )
+                    loss_nce_AB = nce_criterion(patches_fake_B, patches_real_A)
+                    loss_nce_BA = nce_criterion(patches_fake_A, patches_real_B)
+                    loss_nce = 0.5 * (loss_nce_AB + loss_nce_BA)
+
+                loss_G = tcfg.lambda_gan * loss_G_gan + tcfg.lambda_nce * loss_nce
                 loss_G_scaled = loss_G / accumulate  # scale before backward for correct gradient magnitude
 
             if not torch.isfinite(loss_G):
@@ -449,6 +507,10 @@ def train_v4_phase1(
             epoch_step[i] = {
                 "Batch": i,
                 "Loss_G": float(loss_G.item()),
+                "Loss_G_GAN": float(loss_G_gan.item()),
+                "Loss_NCE": float(loss_nce.item()),
+                "Loss_NCE_AB": float(loss_nce_AB.item()),
+                "Loss_NCE_BA": float(loss_nce_BA.item()),
                 "Loss_G_AB": float(loss_G_AB.item()),
                 "Loss_G_BA": float(loss_G_BA.item()),
                 "Loss_D_A": float(loss_D_A.item()),
@@ -456,6 +518,8 @@ def train_v4_phase1(
                 "GradNorm_G": float(grad_norm),
             }
             epoch_loss_G += float(loss_G.item())
+            epoch_loss_G_gan += float(loss_G_gan.item())
+            epoch_loss_NCE += float(loss_nce.item())
             epoch_loss_G_AB += float(loss_G_AB.item())
             epoch_loss_G_BA += float(loss_G_BA.item())
             epoch_loss_D_A += float(loss_D_A.item())
@@ -467,6 +531,7 @@ def train_v4_phase1(
                     f"Epoch [{epoch + 1}/{tcfg.num_epochs}] "
                     f"Batch [{i}/{len(train_loader)}] "
                     f"Loss_G: {loss_G.item():.4f} "
+                    f"Loss_NCE: {loss_nce.item():.4f} "
                     f"Loss_D_A: {loss_D_A.item():.4f} "
                     f"Loss_D_B: {loss_D_B.item():.4f} "
                     f"GradNorm_G: {grad_norm:.4f}"
@@ -475,6 +540,8 @@ def train_v4_phase1(
         # ---- Epoch-level summary ----
         n_batches = max(1, len(train_loader))
         avg_loss_G = epoch_loss_G / n_batches
+        avg_loss_G_gan = epoch_loss_G_gan / n_batches
+        avg_loss_NCE = epoch_loss_NCE / n_batches
         avg_loss_G_AB = epoch_loss_G_AB / n_batches
         avg_loss_G_BA = epoch_loss_G_BA / n_batches
         avg_loss_D_A = epoch_loss_D_A / n_batches
@@ -483,6 +550,8 @@ def train_v4_phase1(
 
         history[epoch + 1] = epoch_step
         writer.add_scalar("Loss/Generator", avg_loss_G, epoch + 1)
+        writer.add_scalar("Loss/GAN", avg_loss_G_gan, epoch + 1)
+        writer.add_scalar("Loss/NCE", avg_loss_NCE, epoch + 1)
         writer.add_scalar("Loss/Generator_AB", avg_loss_G_AB, epoch + 1)
         writer.add_scalar("Loss/Generator_BA", avg_loss_G_BA, epoch + 1)
         writer.add_scalar("Loss/Discriminator_A", avg_loss_D_A, epoch + 1)
@@ -513,7 +582,7 @@ def train_v4_phase1(
             )
             print(f"Checkpoint saved: {ckpt_path}")
 
-        if (epoch + 1) >= tcfg.validation_after:
+        if (epoch + 1) >= tcfg.validation_every:
             save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
             _run_validation_phase1(
                 epoch=epoch + 1,

@@ -130,14 +130,45 @@ class ResnetGenerator(nn.Module):
             nn.Tanh(),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.in_conv(x)
-        x = self.down1(x)
-        x = self.down2(x)
-        x = self.res_blocks(x)
-        x = self.up1(x)
+    def _encode(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        f0 = self.in_conv(x)
+        f1 = self.down1(f0)
+        f2 = self.down2(f1)
+        f3 = self.res_blocks(f2)
+        return f0, f1, f2, f3
+
+    def encode_features(
+        self, x: torch.Tensor, nce_layers: list[int] | tuple[int, ...] | None = None
+    ) -> list[torch.Tensor]:
+        """
+        Extract encoder features for PatchNCE.
+
+        Args:
+            x: Input image tensor.
+            nce_layers: Indices into the feature list [f0, f1, f2, f3].
+                If None, returns all features.
+        """
+        feats = list(self._encode(x))
+        if nce_layers is None:
+            return feats
+        return [feats[i] for i in nce_layers]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_features: bool = False,
+        nce_layers: list[int] | tuple[int, ...] | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        f0, f1, f2, f3 = self._encode(x)
+        x = self.up1(f3)
         x = self.up2(x)
-        return self.out_conv(x)
+        out = self.out_conv(x)
+        if return_features:
+            feats = [f0, f1, f2, f3]
+            if nce_layers is not None:
+                feats = [feats[i] for i in nce_layers]
+            return out, feats
+        return out
 
 
 def init_weights_v4(net: nn.Module) -> None:

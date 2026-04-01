@@ -458,10 +458,11 @@ class V4ModelConfig:
 @dataclass
 class V4TrainingConfig:
     """
-    Training loop hyperparameters for the v4 Phase 1 GAN baseline.
+    Training loop hyperparameters for the v4 Phase 1/2 GAN baseline.
     """
     num_epochs: int = 200
     epoch_size: int = 3000
+    test_size: int = 200
     lr: float = 2e-4
     beta1: float = 0.5
     beta2: float = 0.999
@@ -470,10 +471,17 @@ class V4TrainingConfig:
     accumulate_grads: int = 1
     log_every: int = 50
     save_every: int = 20
-    validation_after: int = 5
-    validation_samples: int = 6
+    validation_every: int = 5
+    validation_samples: int = 10
     validation_max_batches: int = 50
-    test_size: int = 200
+    lambda_gan: float = 1.0
+    lambda_nce: float = 1.0
+    nce_layers: tuple[int, ...] = (0, 1, 2)
+    nce_num_patches: int = 128
+    nce_temperature: float = 0.07
+    nce_proj_dim: int = 256
+    use_replay_buffer: bool = True
+    replay_buffer_size: int = 50
 
 
 @dataclass

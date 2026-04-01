@@ -14,6 +14,8 @@ Public API:
 
 from .generator import ResnetGenerator, getGeneratorV4
 from .discriminator import PatchGANDiscriminator, getDiscriminatorV4
+from .patch_sampler import PatchSampler
+from .nce_loss import PatchNCELoss
 from .training_loop import train_v4_phase1
 
 __all__ = [
@@ -21,5 +23,7 @@ __all__ = [
     "PatchGANDiscriminator",
     "getGeneratorV4",
     "getDiscriminatorV4",
+    "PatchSampler",
+    "PatchNCELoss",
     "train_v4_phase1",
 ]
