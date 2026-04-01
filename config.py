@@ -189,6 +189,8 @@ class DiffusionConfig:
     cond_dropout_prob: float = 0.1
     cfg_scale: float = 2.0
     cond_patch_size: int = 16
+    cond_token_pool_stride: int = 1
+    use_cross_attention: bool = True
     min_snr_gamma: float = 5.0
     perceptual_every_n_steps: int = 4
     perceptual_batch_fraction: float = 0.5
@@ -211,7 +213,7 @@ class DiffusionConfig:
     # ProjectionDiscriminator toggles
     disc_use_local: bool = True
     disc_use_global: bool = True
-    disc_use_fft: bool = False
+    disc_use_fft: bool = True
     disc_base_channels: int = 64
     disc_global_base_channels: int = 64
     disc_fft_base_channels: int = 32
@@ -302,7 +304,7 @@ def get_default_config(model_version: int = 2) -> UVCGANConfig:
         cfg.training.lr = 2e-4
         cfg.training.beta1 = 0.5
         cfg.training.beta2 = 0.999
-        cfg.data.batch_size = 2
+        cfg.data.batch_size = 1
 
     return cfg
 
@@ -333,8 +335,8 @@ def get_8gb_config() -> UVCGANConfig:
     # batch_size=2 halves activation memory. accumulate_grads=2 means the
     # optimiser steps every 2 batches, so the effective gradient batch is
     # still 4. Loss scaling is handled in model_v2/training_loop.
-    cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
 
     # --- Perceptual loss resize ---
     # Set to 180 based on current memory/quality trade-offs.
@@ -359,23 +361,23 @@ def get_dit_config() -> UVCGANConfig:
     standard v3 architecture settings defined in :class:`DiffusionConfig`.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 768
-    cfg.diffusion.dit_depth = 12
-    cfg.diffusion.dit_heads = 12
-    cfg.diffusion.dit_patch_size = 2
-    cfg.diffusion.dit_mlp_ratio = 4.0
+    cfg.diffusion.dit_hidden_dim = 256
+    cfg.diffusion.dit_depth = 4
+    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_patch_size = 8
+    cfg.diffusion.dit_mlp_ratio = 2.0
     cfg.diffusion.use_gradient_checkpointing = True
     cfg.diffusion.prediction_type = "v"
     cfg.diffusion.cond_dropout_prob = 0.1
     cfg.diffusion.cfg_scale = 2.5
     cfg.diffusion.cond_patch_size = 8
-    cfg.diffusion.num_inference_steps = 100
+    cfg.diffusion.num_inference_steps = 20
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.diffusion.perceptual_every_n_steps = 4
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 4
-    cfg.training.accumulate_grads = 2
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -390,29 +392,41 @@ def get_dit_8gb_config() -> UVCGANConfig:
     checkpointing for DiT blocks and uses a lighter validation setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 512
-    cfg.diffusion.dit_depth = 8
-    cfg.diffusion.dit_heads = 8
-    cfg.diffusion.dit_patch_size = 2
-    cfg.diffusion.dit_mlp_ratio = 4.0
+    cfg.diffusion.dit_hidden_dim = 256
+    cfg.diffusion.dit_depth = 4
+    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_patch_size = 8
+    cfg.diffusion.dit_mlp_ratio = 2.0
     cfg.diffusion.use_gradient_checkpointing = True
     cfg.diffusion.prediction_type = "v"
     cfg.diffusion.cond_dropout_prob = 0.1
     cfg.diffusion.cfg_scale = 1.0
-    cfg.diffusion.cond_patch_size = 16
-    cfg.diffusion.num_inference_steps = 100
+    cfg.diffusion.cond_patch_size = 32
+    cfg.diffusion.cond_token_pool_stride = 4
+    cfg.diffusion.use_cross_attention = False
+    cfg.diffusion.num_inference_steps = 20
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
     cfg.data.batch_size = 1
     cfg.training.accumulate_grads = 4
     # Slightly higher worker count helps keep GPU fed on fast local SSDs.
-    cfg.data.num_workers = 6
-    cfg.data.prefetch_factor = 4
+    cfg.data.num_workers = 2
+    cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.00
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
+    cfg.diffusion.disc_use_fft = (
+        False  # FFT discriminator is memory-intensive; disable for 8 GB
+    )
+    cfg.diffusion.disc_use_global = False  # Disable global branch to save memory
+    cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
+    cfg.diffusion.disc_base_channels = 16  # Reduce base channels further to save memory
+    cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)
+    cfg.diffusion.disc_n_layers = (
+        2  # Reduce layers in each discriminator to save memory
+    )
 
     return cfg

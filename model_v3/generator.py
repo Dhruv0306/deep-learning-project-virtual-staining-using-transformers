@@ -22,6 +22,7 @@ from typing import Optional
 
 import torch
 from torch import nn, Tensor
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from model_v2.generator import _get_2d_sincos_pos_embed, init_weights_v2
@@ -113,13 +114,17 @@ class ConditionTokenizer(nn.Module):
         hidden_dim: int = 512,
         image_size: int = 256,
         patch_size: int = 16,
+        pool_stride: int = 1,
     ):
         super().__init__()
         if image_size % patch_size != 0:
             raise ValueError("image_size must be divisible by cond patch_size.")
+        if pool_stride < 1:
+            raise ValueError("pool_stride must be >= 1.")
         self.hidden_dim = hidden_dim
         self.image_size = image_size
         self.patch_size = patch_size
+        self.pool_stride = pool_stride
         self.proj = nn.Conv2d(
             3,
             hidden_dim,
@@ -129,6 +134,13 @@ class ConditionTokenizer(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.proj(x)
+        if self.pool_stride > 1:
+            h, w = x.shape[-2:]
+            if h % self.pool_stride != 0 or w % self.pool_stride != 0:
+                raise ValueError(
+                    "Condition token grid must be divisible by pool_stride."
+                )
+            x = F.avg_pool2d(x, kernel_size=self.pool_stride, stride=self.pool_stride)
         n, c, h, w = x.shape
         tokens = x.flatten(2).transpose(1, 2).contiguous()
         pos = _get_2d_sincos_pos_embed(
@@ -146,15 +158,27 @@ class DiTBlock(nn.Module):
     DiT block with adaLN-Zero conditioning.
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float = 4.0):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        use_cross_attn: bool = True,
+    ):
         super().__init__()
+        self.use_cross_attn = use_cross_attn
         self.norm1 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         self.attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.norm_xc = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.norm_c = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.cross_attn = nn.MultiheadAttention(
-            hidden_dim, num_heads, batch_first=True
-        )
+        if use_cross_attn:
+            self.norm_xc = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            self.norm_c = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+            self.cross_attn = nn.MultiheadAttention(
+                hidden_dim, num_heads, batch_first=True
+            )
+        else:
+            self.norm_xc = None
+            self.norm_c = None
+            self.cross_attn = None
         self.norm2 = nn.LayerNorm(hidden_dim, elementwise_affine=False)
         mlp_hidden = int(hidden_dim * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -187,11 +211,15 @@ class DiTBlock(nn.Module):
         attn_out, _ = self.attn(x, x, x)
         tokens = tokens + alpha1.unsqueeze(1) * attn_out
 
-        x = self.norm_xc(tokens)
-        x = x * (1 + gamma_x.unsqueeze(1)) + beta_x.unsqueeze(1)
-        c = self.norm_c(cond_tokens)
-        cross_out, _ = self.cross_attn(x, c, c)
-        tokens = tokens + alpha_x.unsqueeze(1) * cross_out
+        if self.use_cross_attn:
+            assert self.norm_xc is not None
+            assert self.norm_c is not None
+            assert self.cross_attn is not None
+            x = self.norm_xc(tokens)
+            x = x * (1 + gamma_x.unsqueeze(1)) + beta_x.unsqueeze(1)
+            c = self.norm_c(cond_tokens)
+            cross_out, _ = self.cross_attn(x, c, c)
+            tokens = tokens + alpha_x.unsqueeze(1) * cross_out
 
         x = self.norm2(tokens)
         x = x * (1 + gamma2.unsqueeze(1)) + beta2.unsqueeze(1)
@@ -223,6 +251,7 @@ class DiTGenerator(nn.Module):
         patch_size: int = 2,
         latent_size: int = 32,
         use_gradient_checkpointing: bool = False,
+        use_cross_attn: bool = True,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -231,6 +260,7 @@ class DiTGenerator(nn.Module):
         self.patch_size = patch_size
         self.latent_size = latent_size
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_cross_attn = use_cross_attn
 
         self.patch_embed = PatchEmbed(
             in_channels=in_channels,
@@ -242,7 +272,10 @@ class DiTGenerator(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 DiTBlock(
-                    hidden_dim=hidden_dim, num_heads=num_heads, mlp_ratio=mlp_ratio
+                    hidden_dim=hidden_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    use_cross_attn=use_cross_attn,
                 )
                 for _ in range(depth)
             ]
@@ -410,12 +443,14 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> CycleDiTGenera
         patch_size=cfg.dit_patch_size,
         latent_size=32,
         use_gradient_checkpointing=cfg.use_gradient_checkpointing,
+        use_cross_attn=getattr(cfg, "use_cross_attention", True),
     ).to(device)
 
     cond_tokenizer = ConditionTokenizer(
         hidden_dim=cfg.dit_hidden_dim,
         image_size=256,
         patch_size=cfg.cond_patch_size,
+        pool_stride=getattr(cfg, "cond_token_pool_stride", 1),
     ).to(device)
     domain_embedding = DomainEmbedding(cfg.dit_hidden_dim).to(device)
 
@@ -441,4 +476,3 @@ def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> CycleDiTGenera
         _ = out["v_pred"]
 
     return model
-
