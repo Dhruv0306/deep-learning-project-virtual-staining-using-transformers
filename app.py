@@ -10,6 +10,7 @@ Both model versions are supported:
   - v1 (``ViTUNetGenerator``)   — loaded when ``model_version=1``
   - v2 (``ViTUNetGeneratorV2``) — loaded when ``model_version=2``
   - v3 (``DiTGenerator``)       — loaded when ``model_version=3``
+  - v4 (``TransformerGeneratorV4``) — loaded when ``model_version=4``
 
 For v2 the architecture hyperparameters (``vit_depth``, ``use_cross_domain``)
 are auto-detected from the checkpoint state dict, so the loaded model always
@@ -22,13 +23,14 @@ CLI usage::
 
 You will be prompted for:
   - Path to the trained checkpoint (``.pth`` file)
-    - Model version (1, 2, or 3)
+    - Model version (1, 2, 3, or 4)
     - Path to an unstained image  (A -> B translation)
-    - Path to a stained image     (B -> A translation, v1/v2 only)
+    - Path to a stained image     (B -> A translation, v1/v2/v4 only)
 
 Model-version behavior:
     - v1/v2 run bidirectional translation using ``G_AB`` and ``G_BA``.
     - v3 runs bidirectional translation (unstained <-> stained) via diffusion sampling with domain conditioning.
+    - v4 runs bidirectional translation using the Transformer + PatchNCE generators.
 
 Outputs are written to:
   - ``data/reconstructed_stained_output.png``
@@ -44,6 +46,8 @@ from torchvision.utils import save_image
 from PIL import Image
 from PIL import ImageFile
 
+Image.MAX_IMAGE_PIXELS = None
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -178,6 +182,139 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
     G_AB.eval()
     G_BA.eval()
 
+    return G_AB, G_BA
+
+
+def _infer_v4_kwargs(state_dict: dict, fallback_cfg) -> dict:
+    """
+    Infer v4 generator architecture parameters from a checkpoint state dict.
+    """
+    if any(k.startswith("patch_embed.proj") for k in state_dict):
+        patch_w = state_dict["patch_embed.proj.weight"].shape[2]
+        encoder_dim = state_dict["patch_embed.proj.weight"].shape[0]
+        block_indices = set()
+        for key in state_dict:
+            if key.startswith("blocks."):
+                parts = key.split(".")
+                if len(parts) > 1 and parts[1].isdigit():
+                    block_indices.add(int(parts[1]))
+        encoder_depth = (
+            len(block_indices) if block_indices else fallback_cfg.encoder_depth
+        )
+
+        mlp_ratio = fallback_cfg.encoder_mlp_ratio
+        for key, weight in state_dict.items():
+            if key.startswith("blocks.") and key.endswith("mlp.0.weight"):
+                mlp_ratio = weight.shape[0] / encoder_dim
+                break
+
+        base_channels = fallback_cfg.base_channels
+        proj_weight = state_dict.get("proj.0.weight")
+        if proj_weight is not None and proj_weight.shape[0] % 4 == 0:
+            base_channels = proj_weight.shape[0] // 4
+
+        return dict(
+            use_transformer_encoder=True,
+            patch_size=patch_w,
+            encoder_dim=encoder_dim,
+            encoder_depth=encoder_depth,
+            encoder_mlp_ratio=mlp_ratio,
+            base_channels=base_channels,
+        )
+
+    # ResNet fallback
+    base_channels = fallback_cfg.base_channels
+    in_conv_weight = state_dict.get("in_conv.1.weight")
+    if in_conv_weight is not None:
+        base_channels = in_conv_weight.shape[0]
+
+    res_block_indices = set()
+    for key in state_dict:
+        if key.startswith("res_blocks."):
+            parts = key.split(".")
+            if len(parts) > 1 and parts[1].isdigit():
+                res_block_indices.add(int(parts[1]))
+    num_res_blocks = (
+        len(res_block_indices) if res_block_indices else fallback_cfg.num_res_blocks
+    )
+
+    return dict(
+        use_transformer_encoder=False,
+        base_channels=base_channels,
+        num_res_blocks=num_res_blocks,
+    )
+
+
+def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
+    """
+    Load v4 generators (Transformer + PatchNCE) from checkpoint.
+    """
+    from config import get_v4_8gb_config
+    from model_v4.generator import getGeneratorV4
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    cfg = get_v4_8gb_config()
+
+    def _pick_state(ema_key: str, raw_key: str):
+        state = checkpoint.get(ema_key)
+        if state is None:
+            state = checkpoint.get(raw_key)
+        return state
+
+    state_ab = _pick_state("ema_G_AB_state_dict", "G_AB_state_dict")
+    state_ba = _pick_state("ema_G_BA_state_dict", "G_BA_state_dict")
+    if state_ab is None or state_ba is None:
+        raise KeyError("Checkpoint missing v4 generator state dicts.")
+
+    inferred = _infer_v4_kwargs(state_ab, cfg.model)
+
+    G_AB = getGeneratorV4(
+        input_nc=cfg.model.input_nc,
+        output_nc=cfg.model.output_nc,
+        base_channels=inferred.get("base_channels", cfg.model.base_channels),
+        num_res_blocks=inferred.get("num_res_blocks", cfg.model.num_res_blocks),
+        use_transformer_encoder=inferred.get(
+            "use_transformer_encoder", cfg.model.use_transformer_encoder
+        ),
+        image_size=image_size,
+        patch_size=inferred.get("patch_size", cfg.model.patch_size),
+        encoder_dim=inferred.get("encoder_dim", cfg.model.encoder_dim),
+        encoder_depth=inferred.get("encoder_depth", cfg.model.encoder_depth),
+        encoder_heads=cfg.model.encoder_heads,
+        encoder_mlp_ratio=inferred.get(
+            "encoder_mlp_ratio", cfg.model.encoder_mlp_ratio
+        ),
+        encoder_dropout=cfg.model.encoder_dropout,
+        use_gradient_checkpointing=False,
+        device=torch.device(device),
+        run_smoke_test=False,
+    )
+    G_BA = getGeneratorV4(
+        input_nc=cfg.model.output_nc,
+        output_nc=cfg.model.input_nc,
+        base_channels=inferred.get("base_channels", cfg.model.base_channels),
+        num_res_blocks=inferred.get("num_res_blocks", cfg.model.num_res_blocks),
+        use_transformer_encoder=inferred.get(
+            "use_transformer_encoder", cfg.model.use_transformer_encoder
+        ),
+        image_size=image_size,
+        patch_size=inferred.get("patch_size", cfg.model.patch_size),
+        encoder_dim=inferred.get("encoder_dim", cfg.model.encoder_dim),
+        encoder_depth=inferred.get("encoder_depth", cfg.model.encoder_depth),
+        encoder_heads=cfg.model.encoder_heads,
+        encoder_mlp_ratio=inferred.get(
+            "encoder_mlp_ratio", cfg.model.encoder_mlp_ratio
+        ),
+        encoder_dropout=cfg.model.encoder_dropout,
+        use_gradient_checkpointing=False,
+        device=torch.device(device),
+        run_smoke_test=False,
+    )
+
+    G_AB.load_state_dict(state_ab)
+    G_BA.load_state_dict(state_ba)
+    G_AB.eval()
+    G_BA.eval()
     return G_AB, G_BA
 
 
@@ -579,7 +716,7 @@ if __name__ == "__main__":
     model_path = input("Enter model path: ")
     model_version = int(
         input(
-            "Enter 1 for Hybrid UVCGAN based, 2 for True-UVCGAN based, 3 for DiT diffusion: "
+            "Enter 1 for Hybrid UVCGAN based, 2 for True-UVCGAN based, 3 for DiT diffusion, 4 for v4 Transformer: "
         )
     )
 
@@ -639,7 +776,76 @@ if __name__ == "__main__":
         print(f"[Stain/v3] Num patches: {num_patches}")
         print(f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}")
         print(f"[Stain/v3] Patch stride: {stride}")
-    else:
+    elif model_version == 4:
+        if not model_path or not model_path.strip():
+            raise ValueError("Checkpoint_path is required")
+        G_AB, G_BA = load_v4_model(
+            checkpoint_path=model_path, device=device, image_size=patch_size
+        )
+
+        unstained_image_path = input("Provide Path to Unstained Image: ")
+        stained_image_path = input("Provide Path to Stained Image: ")
+        unstained_image_path = (
+            os.path.join(
+                dataset_root,
+                "Un_Stained",
+                "HC21-01338(A3-1).10X unstained.jpg",
+            )
+            if not unstained_image_path
+            else os.path.normpath(unstained_image_path)
+        )
+        stained_image_path = (
+            os.path.join(
+                dataset_root,
+                "C_Stained",
+                "HC21-01338(A3-2).10X unstained.jpg",
+            )
+            if not stained_image_path
+            else os.path.normpath(stained_image_path)
+        )
+
+        print(f"Unstained Image Path: {unstained_image_path}")
+        print(f"Stained Image Path: {stained_image_path}")
+
+        # A -> B (unstained -> stained)
+        original_size, padded_size, num_patches, stained_output_path = (
+            translate_image_from_patches(
+                input_image_path=unstained_image_path,
+                model=G_AB,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+
+        print(f"[Stain/v4] Original Image size: {original_size}")
+        print(f"[Stain/v4] Padded Image size: {padded_size}")
+        print(f"[Stain/v4] Num patches: {num_patches}")
+        print(f"[Stain/v4] Saved reconstructed stained image at: {stained_output_path}")
+        print(f"[Stain/v4] Patch stride: {stride}")
+
+        # B -> A (stained -> unstained)
+        original_size, padded_size, num_patches, unstained_output_path = (
+            translate_image_from_patches(
+                input_image_path=stained_image_path,
+                model=G_BA,
+                transform=transform,
+                output_path=os.path.join("data", "reconstructed_unstained_output.png"),
+                patch_size=patch_size,
+                stride=stride,
+                device=device,
+            )
+        )
+        print(f"[Unstain/v4] Original Image size: {original_size}")
+        print(f"[Unstain/v4] Padded Image size: {padded_size}")
+        print(f"[Unstain/v4] Num patches: {num_patches}")
+        print(
+            f"[Unstain/v4] Saved reconstructed unstained image at: {unstained_output_path}"
+        )
+        print(f"[Unstain/v4] Patch stride: {stride}")
+    elif model_version in (1, 2):
         # Load the model
         G_AB, G_BA = load_model(
             checkpoint_path=model_path, device=device, model_version=model_version
@@ -708,5 +914,7 @@ if __name__ == "__main__":
             f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}"
         )
         print(f"[Unstain] Patch stride: {stride}")
-Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+    else:
+        raise ValueError(
+            f"Invalid model_version: {model_version}. Must be 1, 2, 3, or 4."
+        )

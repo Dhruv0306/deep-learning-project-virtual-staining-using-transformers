@@ -50,7 +50,7 @@ model_v4/
  |-- patch_sampler.py        # Patch extraction for NCE
  |-- nce_loss.py             # PatchNCE loss
  |-- training_loop.py        # Full training pipeline
- |-- inference.py            # Image translation
+ |-- app.py (root)           # Whole-slide translation (shared)
  |-- utils/
  |   |-- replay_buffer.py
  |   |-- image_utils.py
@@ -335,7 +335,7 @@ Deployable translation system.
 
 ## Deliverables
 
-* `inference.py`
+* `app.py` (model v4 integration)
 
 ---
 
