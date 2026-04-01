@@ -485,6 +485,8 @@ class V4TrainingConfig:
     validation_every: int = 5
     validation_samples: int = 10
     validation_max_batches: int = 50
+    validation_fid_samples: int = 200
+    validation_fid_min_samples: int = 50
     lambda_gan: float = 1.0
     lambda_nce: float = 1.0
     lambda_identity: float = 5.0

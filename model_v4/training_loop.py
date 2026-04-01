@@ -100,6 +100,8 @@ def _run_validation_phase1(
     num_samples: int,
     calculator: MetricsCalculator,
     max_batches: int = 50,
+    fid_max_samples: int = 200,
+    fid_min_samples: int = 50,
     writer: SummaryWriter | None = None,
     is_test: bool = False,
 ) -> dict[str, float]:
@@ -136,6 +138,10 @@ def _run_validation_phase1(
     )  # noqa: E501
 
     metrics = {"ssim_A": [], "psnr_A": [], "ssim_B": [], "psnr_B": []}
+    real_A_list = []
+    real_B_list = []
+    fake_A_list = []
+    fake_B_list = []
 
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
@@ -151,6 +157,11 @@ def _run_validation_phase1(
             batch_metrics = calculator.evaluate_batch(real_A, real_B, fake_A, fake_B)
             for key, value in batch_metrics.items():
                 metrics[key].append(float(value))
+
+            real_A_list.append(real_A)
+            real_B_list.append(real_B)
+            fake_A_list.append(fake_A)
+            fake_B_list.append(fake_B)
 
             if i < num_samples:
                 row_A = torch.cat(
@@ -184,12 +195,41 @@ def _run_validation_phase1(
         "psnr_B": float(sum(metrics["psnr_B"]) / max(1, len(metrics["psnr_B"]))),
     }
 
+    # Optional FID (domain A and B) if enough samples are collected.
+    fid_count = min(fid_max_samples, len(real_B_list))
+    if (
+        fid_count >= fid_min_samples
+        or is_test
+        or (fid_count < fid_min_samples and epoch % 10 == 0)
+    ) and fid_count > 0:
+        real_B_tensor = torch.cat(real_B_list[:fid_count])
+        fake_B_tensor = torch.cat(fake_B_list[:fid_count])
+        avg_metrics["fid_B"] = float(
+            calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
+        )
+
+    fid_count_A = min(fid_max_samples, len(real_A_list))
+    if (
+        fid_count_A >= fid_min_samples
+        or is_test
+        or (fid_count_A < fid_min_samples and epoch % 10 == 0)
+    ) and fid_count_A > 0:
+        real_A_tensor = torch.cat(real_A_list[:fid_count_A])
+        fake_A_tensor = torch.cat(fake_A_list[:fid_count_A])
+        avg_metrics["fid_A"] = float(
+            calculator.evaluate_fid(real_A_tensor, fake_A_tensor)
+        )
+
     prefix = "Testing" if is_test else "Validation"
     if writer is not None:
         writer.add_scalar(f"{prefix}/ssim_A", avg_metrics["ssim_A"], epoch)
         writer.add_scalar(f"{prefix}/psnr_A", avg_metrics["psnr_A"], epoch)
         writer.add_scalar(f"{prefix}/ssim_B", avg_metrics["ssim_B"], epoch)
         writer.add_scalar(f"{prefix}/psnr_B", avg_metrics["psnr_B"], epoch)
+        if "fid_A" in avg_metrics:
+            writer.add_scalar(f"{prefix}/fid_A", avg_metrics["fid_A"], epoch)
+        if "fid_B" in avg_metrics:
+            writer.add_scalar(f"{prefix}/fid_B", avg_metrics["fid_B"], epoch)
 
     print(
         f"{prefix} Metrics - SSIM_A: {avg_metrics['ssim_A']:.4f}, "
@@ -197,6 +237,10 @@ def _run_validation_phase1(
         f"PSNR_A: {avg_metrics['psnr_A']:.2f}, "
         f"PSNR_B: {avg_metrics['psnr_B']:.2f}"
     )
+    if "fid_A" in avg_metrics:
+        print(f"{prefix} FID_A: {avg_metrics['fid_A']:.2f}")
+    if "fid_B" in avg_metrics:
+        print(f"{prefix} FID_B: {avg_metrics['fid_B']:.2f}")
 
     G_AB.train()
     G_BA.train()
@@ -754,6 +798,8 @@ def train_v4(
                 num_samples=tcfg.validation_samples,
                 calculator=metrics_calculator,
                 max_batches=tcfg.validation_max_batches,
+                fid_max_samples=tcfg.validation_fid_samples,
+                fid_min_samples=tcfg.validation_fid_min_samples,
                 writer=writer,
                 is_test=False,
             )
@@ -804,6 +850,8 @@ def train_v4(
         num_samples=tcfg.test_size,
         calculator=metrics_calculator,
         max_batches=tcfg.test_size,
+        fid_max_samples=tcfg.validation_fid_samples,
+        fid_min_samples=tcfg.validation_fid_min_samples,
         writer=writer,
         is_test=True,
     )
