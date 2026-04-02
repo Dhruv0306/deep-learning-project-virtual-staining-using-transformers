@@ -48,8 +48,6 @@ from PIL import ImageFile
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def is_v3_checkpoint(ckpt: dict) -> bool:
