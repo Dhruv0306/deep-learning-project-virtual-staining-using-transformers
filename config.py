@@ -349,7 +349,7 @@ def get_8gb_config() -> UVCGANConfig:
 
     # --- Gradient checkpointing ---
     # Disabled based on measured memory headroom to keep training faster.
-    cfg.generator.use_gradient_checkpointing = False
+    cfg.generator.use_gradient_checkpointing = True
 
     # --- ViT depth ---
     # Kept at 4 to preserve capacity; not reduced in this profile.
@@ -363,8 +363,8 @@ def get_8gb_config() -> UVCGANConfig:
     # batch_size=1 quarters activation memory. accumulate_grads=4 means the
     # optimiser steps every 4 batches, so the effective gradient batch is
     # still 4. Loss scaling is handled in model_v2/training_loop.
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
 
     # --- Perceptual loss resize ---
     # Set to 180 based on current memory/quality trade-offs.
@@ -404,8 +404,9 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.diffusion.perceptual_every_n_steps = 4
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -436,13 +437,14 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
     # Slightly higher worker count helps keep GPU fed on fast local SSDs.
     cfg.data.num_workers = 2
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.00
+    cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -451,10 +453,10 @@ def get_dit_8gb_config() -> UVCGANConfig:
     )
     cfg.diffusion.disc_use_global = False  # Disable global branch to save memory
     cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
-    cfg.diffusion.disc_base_channels = 16  # Reduce base channels further to save memory
+    cfg.diffusion.disc_base_channels = 64  # Reduce base channels further to save memory
     cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)
     cfg.diffusion.disc_n_layers = (
-        2  # Reduce layers in each discriminator to save memory
+        3  # Reduce layers in each discriminator to save memory
     )
 
     return cfg
