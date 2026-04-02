@@ -2,168 +2,68 @@
 
 Source of truth: ../../model_v3/noise_scheduler.py
 
-Role: Forward noising utilities and reverse latent sampling.
+This module provides the diffusion forward-process scheduler and the DDIM
+reverse sampler used by v3.
 
----
+## Public Components
 
-## Component Structure
+1. `_linear_beta_schedule`
+2. `_cosine_beta_schedule`
+3. `DDPMScheduler`
+4. `DDIMSampler`
 
-1. _linear_beta_schedule
-2. _cosine_beta_schedule
-3. DDPMScheduler
-4. DDIMSampler
+## `_linear_beta_schedule`
 
----
+Returns a simple linear beta ramp from `1e-4` to `2e-2` over `T` steps.
 
-## 1) _linear_beta_schedule
+## `_cosine_beta_schedule`
 
-Input:
-- num_timesteps = T
+Implements the cosine schedule from Nichol & Dhariwal with a small offset
+`s=0.008` and a maximum beta clamp of `0.999`.
 
-Dataflow:
-- linspace from 1e-4 to 2e-2 length T
+## `DDPMScheduler`
 
-Output:
-- betas: (T,)
+Stores the diffusion schedule as module buffers so the tensors move with
+the module across devices.
 
----
+Key buffers:
 
-## 2) _cosine_beta_schedule
+- `betas`
+- `alphas`
+- `alphas_cumprod`
+- `sqrt_alphas_cumprod`
+- `sqrt_one_minus_alphas_cumprod`
 
-Input:
-- num_timesteps = T
-- offset s
+Important methods:
 
-Dataflow:
-1. build t grid length T+1
-2. cosine cumulative profile f
-3. convert adjacent ratios to betas
-4. clamp max to 0.999
+- `_extract(arr, t, x_shape)`: gather per-timestep schedule values and
+  broadcast them to the target tensor shape
+- `add_noise(x0, noise, t)`: construct `x_t` from clean latent plus noise
+- `predict_x0(x_t, eps_pred, t)`: reconstruct the clean latent from epsilon
+- `get_v_target(x0, noise, t)`: build the v-parameterization target
+- `predict_eps_from_v(x_t, v_pred, t)`: convert v-prediction to epsilon
+- `predict_x0_from_v(x_t, v_pred, t)`: convert v-prediction directly to `x0`
+- `get_alpha_bar(t)`: return `alpha_bar` for scalar or batched timesteps
 
-Output:
-- betas: (T,)
+## `DDIMSampler`
 
----
+Performs reverse sampling from Gaussian noise back to a latent sample.
 
-## 3) DDPMScheduler
+Behavior:
 
-Buffers after initialization:
-- betas: (T,)
-- alphas: (T,)
-- alphas_cumprod: (T,)
-- sqrt_alphas_cumprod: (T,)
-- sqrt_one_minus_alphas_cumprod: (T,)
+1. initialize `z_t` with random noise
+2. iterate a timestep subsequence from high to low
+3. call the model with the current latent, timestep, and condition
+4. optionally apply classifier-free guidance via `cfg_scale`
+5. convert the model output to epsilon or `x0` as needed
+6. apply the DDIM update rule
 
-### _extract(arr, t, x_shape)
+Sampling arguments now support:
 
-Input:
-- arr: (T,)
-- t: (N,)
-- x_shape: usually (N,C,H,W)
+- `prediction_type`: `"v"` or `"eps"`
+- `cfg_scale`: classifier-free guidance scale
+- `uncond_condition`: unconditional conditioning input for CFG
+- `target_domain`: translation direction id
 
-Dataflow:
-1. gather arr at timestep indices -> (N,)
-2. unsqueeze until broadcast rank matches x_shape
-
-Output:
-- broadcast tensor typically (N,1,1,1)
-
-### add_noise(x0, noise, t)
-
-Input:
-- x0: (N,C,H,W)
-- noise: (N,C,H,W)
-- t: (N,)
-
-Dataflow:
-1. coeff1 = sqrt_alpha_bar(t): (N,1,1,1)
-2. coeff2 = sqrt(1-alpha_bar(t)): (N,1,1,1)
-3. x_t = coeff1*x0 + coeff2*noise
-
-Output:
-- x_t: (N,C,H,W)
-
-### predict_x0(x_t, eps_pred, t)
-
-Input:
-- x_t: (N,C,H,W)
-- eps_pred: (N,C,H,W)
-- t: (N,)
-
-Dataflow:
-- x0_pred = (x_t - sqrt(1-alpha_bar_t)*eps_pred) / sqrt(alpha_bar_t)
-
-Output:
-- x0_pred: (N,C,H,W)
-
-### get_v_target(x0, noise, t)
-
-Purpose:
-- compute v-parameterization training target
-
-Formula:
-- v = sqrt(alpha_bar_t) * noise - sqrt(1 - alpha_bar_t) * x0
-
-Output:
-- v_target: (N,C,H,W)
-
-### predict_eps_from_v(x_t, v_pred, t)
-
-Purpose:
-- convert v-prediction to epsilon prediction
-
-Output:
-- eps_pred: (N,C,H,W)
-
-### predict_x0_from_v(x_t, v_pred, t)
-
-Purpose:
-- convert v-prediction to x0 reconstruction
-
-Output:
-- x0_pred: (N,C,H,W)
-
-### get_alpha_bar(t)
-
-Input:
-- t scalar or (N,)
-
-Output:
-- alpha_bar values broadcastable to query shape
-
----
-
-## 4) DDIMSampler
-
-Inputs to sample:
-- model: predicts v or eps (tensor or dict with key v_pred)
-- condition: image/tokens expected by CycleDiTGenerator
-- shape: (N,4,32,32)
-- num_steps
-- eta
-- prediction_type (v or eps)
-- cfg_scale
-- uncond_condition
-- target_domain
-
-### Dataflow per sampling run
-
-1. initialize latent noise:
-   - z_t: shape argument, usually (N,4,32,32)
-2. build timestep sequence length num_steps
-3. for each timestep:
-   - t_batch: (N,)
-   - model_out = model(z_t, t_batch, condition, target_domain=...)
-   - optional CFG blend with uncond_condition when cfg_scale > 1
-   - convert to eps_pred based on prediction_type
-   - z0_pred = predict_x0(...): (N,4,32,32)
-   - compute alpha_bar_t and alpha_bar_prev scalars
-   - compute sigma scalar (depends on eta)
-   - compute direction term dir_xt: (N,4,32,32)
-   - update z_t: (N,4,32,32)
-   - optional noise add when eta>0
-   - final boundary uses alpha_bar_prev = alphas_cumprod[0]
-4. return final z_t
-
-Output:
-- sampled latent z0-like tensor: (N,4,32,32)
+The sampler is used both for full image generation and for the short
+cycle-consistency denoising path.

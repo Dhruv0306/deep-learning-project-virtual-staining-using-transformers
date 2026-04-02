@@ -21,7 +21,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 
 | File | Purpose |
 |---|---|
-| `trainModel.py` | Training entry point � prompts for epoch size, epochs, test size, and model version |
+| `trainModel.py` | Training entry point - prompts for epoch size, epochs, test size, and model version |
 | `app.py` | Inference script — translates whole-slide images via patch-based staining/unstaining |
 | `preprocess_data.py` | Patch extraction, tissue/background filtering, and train/test split |
 | `unzip.py` | Helper to extract the dataset ZIP archive into the expected directory layout |
@@ -72,7 +72,7 @@ This project uses the **E-stainind DermaRepo H&E staining dataset** with **unsta
 | `shared/validation.py` | Per-interval validation — runs generators, computes metrics, saves comparison images |
 | `shared/testing.py` | End-of-training test inference and comparison image export |
 | `shared/history_utils.py` | Training history visualisation and CSV persistence |
-| `model_v3/history_utils.py` | v3 training history CSV/plots (no discriminator terms) |
+| `model_v3/history_utils.py` | v3 training history CSV/plots — denoising, adversarial, cycle, identity, discriminator, and gradient-norm terms |
 
 ---
 
@@ -228,12 +228,10 @@ Label smoothing: real targets use 0.97 instead of 1.0. Discriminator fakes are d
 ---
 
 ### v2 — True UVCGAN (`model_v2/training_loop.py`)
-| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 
 Paper-aligned implementation of Prokopenko et al., *UVCGAN v2*, 2023.
 
 **Generator (`model_v2/generator.py` → `ViTUNetGeneratorV2`)**
-| `model_v3/generator.py` | v3 generator � DiT backbone with conditional encoder for latent diffusion |
 
 Revised U-Net + ViT architecture with several structural improvements over v1:
 
@@ -263,8 +261,6 @@ fake_A = G_BA.forward_with_cross_domain(real_B, skips_from_G_AB(real_A))
 ```
 
 **Discriminator (`model_v2/discriminator.py` → `MultiScaleDiscriminator`)**
-| `model_v3/noise_scheduler.py` | v3 scheduler � DDPM scheduler + DDIM sampler |
-| `model_v3/vae_wrapper.py` | v3 VAE wrapper � SD VAE encode/decode for latents |
 
 Wraps N independent `SpectralNormDiscriminator` instances, each operating on a progressively downsampled version of the input (2× average-pool between scales):
 
@@ -275,7 +271,6 @@ Wraps N independent `SpectralNormDiscriminator` instances, each operating on a p
 **Spectral normalisation** divides each conv weight matrix by its largest singular value, bounding the discriminator's Lipschitz constant and preventing it from becoming too strong relative to the generator.
 
 **Loss (`model_v2/losses.py` → `UVCGANLoss`)**
-| `model_v3/losses.py` | v3 diffusion loss helpers (noise prediction + perceptual terms) |
 
 | Term | Formula | Weight |
 |---|---|---|
@@ -291,7 +286,6 @@ Wraps N independent `SpectralNormDiscriminator` instances, each operating on a p
 The one-sided GP is softer than WGAN-GP — it only penalises gradients that exceed γ=100, leaving D free to have small-norm gradients near real data. This is appropriate because the GAN objective is LSGAN (not Wasserstein). The GP is always computed in float32 regardless of AMP state to avoid NaN gradients.
 
 **Training (`model_v2/training_loop.py`)**
-| `model_v3/training_loop.py` | v3 training loop � DiT diffusion with EMA, DDPM/DDIM sampling, and validation/testing |
 - Adam `lr=2e-4`, betas `(0.5, 0.999)`, `n_critic=1`
 - Warm-up LR ramp for `warmup_epochs` epochs, then constant, then linear decay from `decay_start_epoch`
 - Gradient clipping (max norm 1.0)
@@ -305,14 +299,82 @@ The one-sided GP is softer than WGAN-GP — it only penalises gradients that exc
 
 ### v3 — DiT Diffusion (`model_v3/training_loop.py`)
 
-v3 training uses the shared unpaired loader in `shared/data_loader.py` (trainA/trainB and testA/testB are still expected).
+Conditional latent diffusion with a full Transformer backbone and CycleGAN-style consistency losses.
 
-Conditional latent diffusion with a full Transformer backbone:
+**Generator (`model_v3/generator.py` → `CycleDiTGenerator`)**
 
-- VAE latent space (4 channels, 32x32 for 256x256 inputs)
-- Conditioning via external `ConditionEncoder` and adaLN-Zero
-- Noise prediction objective (MSE), optional VGG perceptual term
-- DDIM sampling for inference (default 50 steps)
+Wraps three sub-modules:
+
+- `DiTGenerator` — patchifies the noisy latent `(N, 4, 32, 32)` into tokens, adds 2-D sincos positional embeddings, runs `depth` DiT blocks, and unpatchifies back to `(N, 4, 32, 32)`.
+- `ConditionTokenizer` — patchifies the conditioning image `(N, 3, 256, 256)` via a strided Conv2d and adds 2-D sincos positional embeddings to produce condition tokens `(N, L, hidden_dim)`.
+- `DomainEmbedding` — learned 2-entry embedding (domain 0 = unstained, domain 1 = stained) added to condition tokens to bias the model toward the requested output domain.
+
+Each `DiTBlock` applies:
+1. Self-attention with adaLN-Zero scale/shift/gate from `timestep_embed + domain_embed_mean`.
+2. Optional cross-attention to condition tokens.
+3. Feed-forward MLP with adaLN-Zero scale/shift/gate.
+
+The output head is zero-initialised so the model starts as identity. Gradient checkpointing is supported on DiT blocks.
+
+```
+z_t:(N,4,32,32) → PatchEmbed → tokens:(N,L,Hd)
+                → depth × DiTBlock(cond_tokens, timestep+domain)
+                → head → unpatchify → noise/v-pred:(N,4,32,32)
+```
+
+where `L = (32 / patch_size)²` and `Hd = hidden_dim`.
+
+**Discriminator (`model_v3/discriminator.py` → `ProjectionDiscriminator`)**
+
+Three-branch composite discriminator, one instance per domain (D_A, D_B):
+
+| Branch | Input | Output | Purpose |
+|---|---|---|---|
+| Local PatchGAN (`SpectralNormDiscriminator`) | 256×256 | patch map | texture and stain granularity |
+| Global (`GlobalDiscriminatorBranch`) | 256×256 → 4×4 | scalar (N,1) | overall colour and tissue layout |
+| FFT (`FFTDiscriminatorBranch`) | grayscale rfft2 log-magnitude | scalar (N,1) | periodic VAE decode artifacts |
+
+All branches use spectral normalisation. The FFT branch converts to grayscale, computes `log1p(|rfft2|)`, normalises per-sample, then runs a small CNN. Forward returns a list of logit tensors averaged by the LSGAN helpers.
+
+**Noise Scheduler (`model_v3/noise_scheduler.py`)**
+
+- `DDPMScheduler` — precomputes cosine or linear beta schedule buffers (`betas`, `alphas_cumprod`, `sqrt_alphas_cumprod`, `sqrt_one_minus_alphas_cumprod`). Provides `add_noise`, `predict_x0`, `get_v_target`, `predict_x0_from_v`, and `predict_eps_from_v`.
+- `DDIMSampler` — deterministic reverse sampler over a linearly-spaced timestep subsequence. `eta=0` gives fully deterministic sampling; `eta=1` recovers DDPM stochasticity. Supports classifier-free guidance via `cfg_scale`.
+
+**VAE (`model_v3/vae_wrapper.py` → `VAEWrapper`)**
+
+Frozen `stabilityai/sd-vae-ft-mse` AutoencoderKL (~335 MB, downloaded on first run). Encodes 256×256 images to `(N, 4, 32, 32)` latents scaled by 0.18215 and decodes back. All VAE parameters are frozen; always in eval mode.
+
+**Loss (`model_v3/losses.py`)**
+
+Two-stage per-batch loss:
+
+| Stage | Term | Formula | Weight |
+|---|---|---|---|
+| 1 — Denoising | MSE (v-mode) | MSE(v_pred, v_target) | `lambda_denoising` |
+| 1 — Denoising | MSE (eps-mode) | MSE(eps_pred, noise) | `lambda_denoising` |
+| 1 — Denoising | Min-SNR weighting | per-sample SNR cap | `min_snr_gamma` (0 = off) |
+| 1 — Denoising | Perceptual | VGG19 on VAE-decoded x0 vs real | `lambda_perceptual_v3` |
+| 2 — Adversarial | LSGAN generator | MSE(D(fake), 1) | `lambda_adv_v3` (warm-up ramp) |
+| 2 — Cycle | Latent cycle | L1(rec_A, z0_A) + L1(rec_B, z0_B) via short DDIM | `lambda_cycle_v3` |
+| 2 — Identity | Latent identity at t=0 | L1(x0_pred, z0) same-domain pass | `lambda_identity_v3` (linear decay) |
+| D — Discriminator | LSGAN | 0.5×(MSE(D(real),1) + MSE(D(fake),0)) | 1.0 |
+| D — R1 penalty | R1 | 0.5×γ×E[‖∇D(x_real)‖²] | `r1_gamma` every `r1_interval` steps |
+
+Stage 1 and Stage 2 use separate forward passes so Stage 1 activations are freed before the larger Stage 2 graph is built, reducing peak VRAM.
+
+**Training (`model_v3/training_loop.py`)**
+- AdamW `lr=1e-4`, betas `(0.9, 0.999)`, `weight_decay=0.01` for the generator; Adam `lr=2e-4`, betas `(0.5, 0.999)` for discriminators
+- Linear warmup then cosine LR decay for all optimisers
+- EMA of generator weights with decay 0.9999
+- Gradient clipping (max norm from `grad_clip_norm_g`)
+- Gradient accumulation over `accumulate_grads` batches
+- Replay buffers (size 50) for discriminator stabilisation
+- Adaptive discriminator update: skips D step when `loss_D < adaptive_d_loss_threshold`
+- Mixed precision (AMP); R1 penalty always in float32
+- Validation uses EMA model with DDIM sampling (default 50 steps)
+- Early stopping monitors mean(SSIM_A, SSIM_B) after `early_stopping_warmup` epochs
+- Checkpoints saved every 20 epochs; key: `dit_state_dict` / `ema_state_dict`
 
 Note: the VAE checkpoint downloads ~335 MB on first run.
 
@@ -383,7 +445,9 @@ history, G_AB, G_BA, D_A, D_B = train_v2(
 tensorboard --logdir data\E_Staining_DermaRepo\H_E-Staining_dataset\models_v2_YYYY_MM_DD_HH_MM_SS\tensorboard_logs
 ```
 
-Logged scalars include: `Loss/Generator`, `Loss/Discriminator_A`, `Loss/Discriminator_B`, `LR/Generator`, `Diagnostics/GradNorm_G`, `Validation/ssim_A`, `Validation/ssim_B`, `Validation/psnr_A`, `Validation/psnr_B`, `EarlyStopping/ssim`, `EarlyStopping/counter`.
+v1/v2 logged scalars: `Loss/Generator`, `Loss/Discriminator_A`, `Loss/Discriminator_B`, `LR/Generator`, `Diagnostics/GradNorm_G`, `Validation/ssim_A`, `Validation/ssim_B`, `Validation/psnr_A`, `Validation/psnr_B`, `EarlyStopping/ssim`, `EarlyStopping/counter`.
+
+v3 logged scalars: `Loss/DiT`, `Loss/Perceptual`, `Loss/G_adv`, `Loss/D_A`, `Loss/D_B`, `Loss/Cycle`, `Loss/Identity`, `LR/DiT`, `LR/D_A`, `LR/D_B`, `Diagnostics/GradNorm`, `Diagnostics/TimestepMean`, `Diagnostics/TimestepStd`, `Weights/lambda_adv_current`, `Weights/lambda_identity_current`, `Validation/ssim_A`, `Validation/ssim_B`, `Validation/psnr_A`, `Validation/psnr_B`, `EarlyStopping/ssim`, `EarlyStopping/counter`, `EarlyStopping/divergence_counter`.
 
 ---
 

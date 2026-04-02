@@ -2,67 +2,82 @@
 
 Source of truth: ../app.py
 
-This script runs patch-based translation for large histology images.
+This script performs patch-based whole-slide translation for all model
+versions in the project. It supports both non-overlapping and overlapping
+tile inference, then reconstructs the full image with seam-aware blending.
 
 ## Supported Model Versions
 
-- version 1: ViTUNetGenerator (CycleGAN-style)
-- version 2: ViTUNetGeneratorV2 (true UVCGAN)
+- version 1: ViTUNetGenerator (hybrid baseline)
+- version 2: ViTUNetGeneratorV2 (true UVCGAN v2)
 - version 3: DiT diffusion pipeline
+- version 4: CUT + Transformer generator pipeline
 
-## Runtime Behavior
+## Runtime Defaults
 
-- All paths use patch_size = 256 by default in main().
-- main() sets stride = patch_size // 2 for overlapping patches and smoother blending.
+- `patch_size = 256`
+- `stride = patch_size // 2` (50% overlap)
+- normalized tensor range: `[-1, 1]`
 
-Version-specific behavior:
+Overlapping tiles are blended with a 2-D Hann-style window to reduce visible
+stitching artifacts.
 
-- v1 and v2:
-  - loads G_AB and G_BA from checkpoint
-  - performs both directions:
-    - unstained -> stained
-    - stained -> unstained
+## Checkpoint Loading Paths
 
-- v3:
-  - loads DiT model, condition encoder, VAE wrapper, and DDIM sampler
-  - performs unstained -> stained only
+- `load_model(checkpoint_path, device, model_version)`
+  - supports v1/v2
+  - v2 architecture (`vit_depth`, `use_cross_domain`) is auto-inferred from
+    checkpoint keys by `_infer_v2_kwargs`
 
-## Core Functions
+- `load_v3_components(checkpoint_path, device)`
+  - loads DiT, VAE wrapper, DDPM scheduler, DDIM sampler
+  - uses checkpoint `config` if available, else `get_dit_config().diffusion`
 
-- load_model(checkpoint_path, device, model_version)
-  - supports model_version 1 and 2
-  - v2 architecture args are inferred from checkpoint keys via _infer_v2_kwargs
+- `load_v4_model(checkpoint_path, device, image_size)`
+  - prefers EMA weights when present
+  - infers generator architecture from saved weights via `_infer_v4_kwargs`
+  - supports both Transformer and ResNet v4 checkpoints
 
-- load_v3_components(checkpoint_path, device)
-  - loads diffusion components and config used for inference step count
+## Patch Pipeline
 
-- pad_to_patch_multiple(image, patch_size)
-  - right/bottom white padding so dimensions are multiples of patch size
+- `pad_to_patch_multiple(image, patch_size)`
+  - pads right and bottom with white pixels so dimensions are divisible
 
-- extract_patches_with_coords(image, patch_size, stride)
-  - extracts patches and stores (top, left) positions
+- `extract_patches_with_coords(image, patch_size, stride)`
+  - extracts row-major patches and records `(top, left)` positions
 
-- reconstruct_tensor_from_patches(...)
-  - blends overlapping outputs using a 2D Hann-style window
+- `_blend_window(patch_size, device, dtype, eps)`
+  - creates smooth per-pixel blending weights for overlaps
 
-- translate_image_from_patches(...)
-  - v1/v2 patch inference path
+- `reconstruct_tensor_from_patches(...)`
+  - accumulates weighted patch predictions and normalizes by weight map
 
-- translate_image_from_patches_v3(...)
-  - v3 batched diffusion inference path
+- `translate_image_from_patches(...)`
+  - generic generator-based translation (v1/v2/v4)
+
+- `translate_image_from_patches_v3(...)`
+  - batched diffusion sampling path for v3
+
+## Direction Behavior by Version
+
+- v1/v2: bidirectional (`A -> B` and `B -> A`)
+- v3: currently unstained-to-stained path in patch diffusion function
+- v4: bidirectional (`A -> B` and `B -> A`)
 
 ## Outputs
 
-- data/reconstructed_stained_output.png
-- data/reconstructed_unstained_output.png (v1/v2 only)
+- `data/reconstructed_stained_output.png`
+- `data/reconstructed_unstained_output.png` (v1/v2/v4)
 
-## CLI Prompts
+## CLI Usage
 
+```bash
 python app.py
+```
 
 Prompts:
 
-- Enter model path
-- Enter model version (1, 2, or 3)
-- Path to unstained input
-- Path to stained input (v1/v2 path)
+- model checkpoint path
+- model version (1, 2, 3, or 4)
+- unstained image path
+- stained image path (for v1/v2/v4)

@@ -4,28 +4,31 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 
 ---
 
-## Model V1 � Hybrid UVCGAN + CycleGAN
+## Model V1 - Hybrid UVCGAN + CycleGAN
 
 | File | Documentation | Description |
 |---|---|---|
+| `model_v1/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v1/dataflow_pipeline.md) | End-to-end v1 training/inference dataflow shown as a diagram pipeline |
 | `model_v1/generator.py` | [generator.md](model_v1/generator.md) | V1 generator: U-Net + ViT with ReZero Transformer blocks. Architecture diagram, all building blocks, weight init |
 | `model_v1/discriminator.py` | [discriminator.md](model_v1/discriminator.md) | V1 discriminator: single-scale PatchGAN. Architecture, receptive field, data flow |
 | `model_v1/losses.py` | [losses.md](model_v1/losses.md) | V1 loss functions: LSGAN + cycle + identity + VGG19 perceptual + two-sided GP. All parameters and data flow |
 | `model_v1/training_loop.py` | [training_loop.md](model_v1/training_loop.md) | V1 training loop: full step-by-step flow, hardcoded hyperparameters, differences from v2 |
 
-## Model V2 � True UVCGAN
+## Model V2 - True UVCGAN
 
 | File | Documentation | Description |
 |---|---|---|
+| `model_v2/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v2/dataflow_pipeline.md) | End-to-end v2 training/inference dataflow shown as a diagram pipeline |
 | `model_v2/generator.py` | [generator.md](model_v2/generator.md) | V2 generator: U-Net + ViT with LayerScale, cross-domain fusion, gradient checkpointing. Full architecture diagram and every class/function |
 | `model_v2/discriminator.py` | [discriminator.md](model_v2/discriminator.md) | V2 discriminator: multi-scale spectral-norm PatchGAN. Architecture at each scale, spectral norm explanation |
 | `model_v2/losses.py` | [losses.md](model_v2/losses.md) | V2 loss functions: LSGAN + one-sided GP (?=100) + contrastive + spectral. Paper-aligned formulas and full data flow |
 | `model_v2/training_loop.py` | [training_loop.md](model_v2/training_loop.md) | V2 training loop: gradient accumulation, AMP safety, per-batch step detail, validation/early stopping separation |
 
-## Model V3 � DiT Diffusion
+## Model V3 - DiT Diffusion
 
 | File | Documentation | Description |
 |---|---|---|
+| `model_v3/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v3/dataflow_pipeline.md) | End-to-end v3 overview with the latent diffusion and adversarial dataflow pipeline |
 | `model_v3/generator.py` | [generator.md](model_v3/generator.md) | CycleDiT generator: ConditionTokenizer + domain embedding + DiT backbone |
 | `model_v3/discriminator.py` | [discriminator.md](model_v3/discriminator.md) | Three-branch ProjectionDiscriminator (local PatchGAN + global + spectral FFT) |
 | `model_v3/noise_scheduler.py` | [noise_scheduler.md](model_v3/noise_scheduler.md) | DDPM scheduler and DDIM sampler |
@@ -34,11 +37,25 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `model_v3/losses.py` | [losses.md](model_v3/losses.md) | Diffusion loss + LSGAN + R1 penalty + cycle consistency + identity constraints |
 | `model_v3/history_utils.py` | [history_utils.md](model_v3/history_utils.md) | v3 training history CSV/plots (no discriminator terms) |
 
+## Model V4 - CUT + Transformer
+
+| File | Documentation | Description |
+|---|---|---|
+| `model_v4/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v4/dataflow_pipeline.md) | End-to-end v4 overview with the CUT + Transformer and PatchNCE dataflow pipeline |
+| `model_v4/generator.py` | [generator.md](model_v4/generator.md) | v4 generators: ResNet baseline and Transformer encoder + CNN decoder |
+| `model_v4/discriminator.py` | [discriminator.md](model_v4/discriminator.md) | v4 discriminator: N-layer 70x70 PatchGAN |
+| `model_v4/transformer_blocks.py` | [transformer_blocks.md](model_v4/transformer_blocks.md) | Patch embedding and Transformer blocks used by v4 generator |
+| `model_v4/patch_sampler.py` | [patch_sampler.md](model_v4/patch_sampler.md) | Random spatial patch sampler for PatchNCE |
+| `model_v4/nce_loss.py` | [nce_loss.md](model_v4/nce_loss.md) | PatchNCE contrastive loss with per-layer projection heads |
+| `model_v4/training_loop.py` | [training_loop.md](model_v4/training_loop.md) | v4 training loop (LSGAN + PatchNCE + identity + EMA + validation) |
+
+The v1, v2, v3, and v4 folders now include folder-level dataflow pipeline pages that explain the full diagrammed flow before diving into the per-module pages.
+
 ## Shared
 
 | File | Documentation | Description |
 |---|---|---|
-| `config.py` | [config.md](config.md) | All hyperparameters across all dataclasses. Every field explained. `get_8gb_config()` VRAM savings table |
+| `config.py` | [config.md](config.md) | Config reference for v1/v2/v3 (`UVCGANConfig`) and v4 (`V4Config`) |
 | `shared/data_loader.py` | [data_loader.md](shared/data_loader.md) | Unpaired dataset class, transform pipeline, `getDataLoader` factory, and `denormalize` helper |
 | `shared/replay_buffer.py` | [replay_buffer.md](shared/replay_buffer.md) | Fixed-size pool of past fake images for discriminator stabilisation |
 | `shared/metrics.py` | [metrics.md](shared/metrics.md) | SSIM, PSNR, and FID metrics via `MetricsCalculator`. InceptionV3 feature extraction |
@@ -47,5 +64,5 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | `shared/EarlyStopping.py` | [early_stopping.md](shared/early_stopping.md) | SSIM-plateau and loss-divergence early stopping |
 | `shared/history_utils.py` | [history_utils.md](shared/history_utils.md) | Training history visualisation, CSV save/append/load |
 | `preprocess_data.py` | [preprocess_data.md](preprocess_data.md) | Whole-slide patch extraction, tissue filtering, train/test split |
-| `trainModel.py` | [train_model.md](train_model.md) | Interactive training entry point. Prompts for parameters and dispatches to v1/v2/v3 loops |
-| `app.py` | [app.md](app.md) | Patch-based whole-slide inference with cosine blending. Supports all model versions |
+| `trainModel.py` | [train_model.md](train_model.md) | Interactive training entry point. Prompts for parameters and dispatches to v1/v2/v3/v4 loops |
+| `app.py` | [app.md](app.md) | Patch-based whole-slide inference with overlap blending. Supports v1/v2/v3/v4 |

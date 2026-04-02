@@ -56,7 +56,16 @@ def _make_cosine_warmup_lambda(
     warmup: int, total: int, lr_min_ratio: float
 ) -> Callable[[int], float]:
     """
-    Cosine decay with linear warmup.
+    Return a LambdaLR multiplier with linear warmup then cosine decay.
+
+    Schedule:
+        [0, warmup)       — linear ramp from ~0 to 1
+        [warmup, total)   — cosine decay from 1 down to lr_min_ratio
+
+    Args:
+        warmup:       Number of warmup epochs.
+        total:        Total training epochs.
+        lr_min_ratio: Minimum LR as a fraction of the base LR.
     """
 
     def lr_lambda(epoch: int) -> float:
@@ -72,6 +81,11 @@ def _make_cosine_warmup_lambda(
 
 
 def _global_grad_norm(parameters) -> float:
+    """
+    Compute the global L2 gradient norm across all parameters with a grad.
+
+    Returns a plain Python float for logging (no clipping applied).
+    """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
         return 0.0
@@ -79,6 +93,7 @@ def _global_grad_norm(parameters) -> float:
 
 
 def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
+    """Enable or disable gradient computation for all parameters in module."""
     for p in module.parameters():
         p.requires_grad = flag
 
@@ -102,6 +117,39 @@ def _run_validation_v3(
     cfg_scale: float = 1.0,
     is_test: bool = False,
 ):
+    """
+    Run one validation (or test) pass and save comparison image grids.
+
+    Generates fake_B (A→B) for every batch up to max_batches, computes
+    SSIM/PSNR for both domains, and optionally computes FID when enough
+    samples are available.  For the first num_samples batches, also
+    generates fake_A (B→A) and cycle reconstructions and saves 4-panel
+    PNG grids to save_dir.
+
+    Args:
+        epoch:          Current epoch number (used for TensorBoard and filenames).
+        ema_model:      EMA copy of CycleDiTGenerator in eval mode.
+        vae:            Frozen VAEWrapper for decoding latents.
+        sampler:        DDIMSampler instance.
+        test_loader:    DataLoader yielding {"A": tensor, "B": tensor} dicts.
+        device:         Inference device.
+        save_dir:       Directory for comparison PNG grids.
+        calculator:     MetricsCalculator for SSIM/PSNR/FID.
+        num_steps:      DDIM inference steps.
+        writer:         TensorBoard SummaryWriter.
+        max_batches:    Maximum batches to evaluate.
+        num_samples:    Number of image grids to save.
+        fid_max_samples: Maximum samples used for FID.
+        fid_min_samples: Minimum samples required to compute FID.
+        prediction_type: ``"v"`` or ``"eps"``.
+        cfg_scale:      Classifier-free guidance scale.
+        is_test:        If True, logs under ``Testing`` prefix and always
+                        attempts FID regardless of sample count.
+
+    Returns:
+        Dict with keys ``ssim_A``, ``psnr_A``, ``ssim_B``, ``psnr_B``
+        (and optionally ``fid_A``, ``fid_B``).
+    """
     ema_model.eval()
     vae.eval()
 
@@ -288,15 +336,39 @@ def train_v3(
     cfg: Optional[UVCGANConfig] = None,
 ):
     """
-    Train v3 latent diffusion model (DiT + condition tokenizer + frozen VAE).
+    Train the v3 CycleDiT latent diffusion model.
+
+    Builds the DiT backbone, frozen VAE, dual ProjectionDiscriminators,
+    DDPM scheduler, and EMA model, then runs the two-stage per-batch loop:
+
+        Stage 1 — diffusion denoising loss (MSE ± Min-SNR ± perceptual).
+        Stage 2 — adversarial + cycle-consistency + identity losses on a
+                   fresh forward pass to allow Stage 1 activations to be
+                   freed before the larger Stage 2 graph is built.
+
+    Discriminators are updated after the generator step using replay
+    buffers and optional R1 gradient penalty.
+
+    Any argument that is not None overrides the corresponding field in cfg
+    before training begins.
 
     Args:
-        epoch_size, num_epochs, model_dir, val_dir, test_size: optional
-            overrides for corresponding config fields.
-        cfg: full ``UVCGANConfig`` configured for model_version=3.
+        epoch_size:         Samples per epoch (overrides cfg.training.epoch_size).
+        num_epochs:         Total epochs (overrides cfg.training.num_epochs).
+        model_dir:          Root output directory for checkpoints and logs.
+        val_dir:            Directory for per-epoch validation image grids.
+        test_size:          Test samples exported at end of training.
+        resume_checkpoint:  Path to a v3 ``.pth`` checkpoint to resume from.
+                            Must contain ``dit_state_dict``.
+        cfg:                UVCGANConfig with model_version=3.  Defaults to
+                            ``get_dit_8gb_config()`` when None.
 
     Returns:
-        tuple: ``(history, dit_model, ema_model, cond_tokenizer)``.
+        tuple: ``(history, dit_model, ema_model, None)``
+            - history:   Full training history reloaded from CSV.
+            - dit_model: Trained CycleDiTGenerator (raw weights).
+            - ema_model: EMA copy of the generator.
+            - None:      Placeholder for API compatibility with v1/v2/v4.
     """
     if cfg is None:
         cfg = get_dit_8gb_config()
@@ -538,9 +610,31 @@ def train_v3(
                 optimizer_G.zero_grad(set_to_none=True)
 
             # SPEC COMPLIANCE: Per Phase 2 spec, generator step comes before discriminator steps.
-            # Step order: Generator -> Discriminator A -> Discriminator B
+            # Step order: Generator -> Discriminator A -> Discriminator B.
+            # Split the generator update into two fresh forward/backward phases so
+            # diffusion activations can be released before the cycle/identity graph
+            # is constructed. This reduces peak VRAM without changing the number of
+            # optimizer steps per batch.
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
+
+            global_step = epoch * len(train_loader) + i
+            if dcfg.lambda_adv_warmup_steps > 0:
+                warm = min(1.0, global_step / float(dcfg.lambda_adv_warmup_steps))
+            else:
+                warm = 1.0
+            lambda_adv_curr = dcfg.lambda_adv_v3 * warm
+
+            # --- Phase 2: Cycle and Identity Losses ---
+            lambda_identity_curr = _compute_identity_weight(
+                epoch=epoch,
+                num_epochs=tcfg.num_epochs,
+                l_start=dcfg.lambda_identity_v3_start,
+                l_end=dcfg.lambda_identity_v3_end,
+                decay_ratio=dcfg.identity_decay_end_ratio,
+            )
+
+            # Stage 1: diffusion-only objective.
             with autocast("cuda", enabled=use_amp):
                 out_A2B = dit_model(
                     z_t_A,
@@ -572,7 +666,7 @@ def train_v3(
                 lambda_perc=dcfg.lambda_perceptual_v3,
                 prediction_type=dcfg.prediction_type,
                 min_snr_gamma=dcfg.min_snr_gamma,
-                global_step=(epoch * len(train_loader) + i),
+                global_step=global_step,
                 perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
                 perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
@@ -589,7 +683,7 @@ def train_v3(
                 lambda_perc=dcfg.lambda_perceptual_v3,
                 prediction_type=dcfg.prediction_type,
                 min_snr_gamma=dcfg.min_snr_gamma,
-                global_step=(epoch * len(train_loader) + i),
+                global_step=global_step,
                 perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
                 perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
@@ -597,24 +691,41 @@ def train_v3(
             denoise_loss = 0.5 * (loss_A2B + loss_B2A)
             loss_simple = 0.5 * (loss_simple_A2B + loss_simple_B2A)
             loss_perc_val = 0.5 * (loss_perc_A2B + loss_perc_B2A)
+            loss_denoise = dcfg.lambda_denoising * denoise_loss
 
-            global_step = epoch * len(train_loader) + i
-            if dcfg.lambda_adv_warmup_steps > 0:
-                warm = min(1.0, global_step / float(dcfg.lambda_adv_warmup_steps))
-            else:
-                warm = 1.0
-            lambda_adv_curr = dcfg.lambda_adv_v3 * warm
+            if not torch.isfinite(loss_denoise):
+                print(
+                    f"[warn] non-finite diffusion loss at epoch {epoch+1} batch {i}, skipping"
+                )
+                optimizer_G.zero_grad(set_to_none=True)
+                accum_count = 0
+                _set_requires_grad(D_A, True)
+                _set_requires_grad(D_B, True)
+                continue
 
-            # --- Phase 2: Cycle and Identity Losses ---
-            lambda_identity_curr = _compute_identity_weight(
-                epoch=epoch,
-                num_epochs=tcfg.num_epochs,
-                l_start=dcfg.lambda_identity_v3_start,
-                l_end=dcfg.lambda_identity_v3_end,
-                decay_ratio=dcfg.identity_decay_end_ratio,
-            )
+            scaler.scale(loss_denoise / accumulate).backward()
 
+            del out_A2B, out_B2A, loss_A2B, loss_B2A
+
+            # Stage 2: adversarial, cycle, and identity losses on a fresh forward pass.
             with autocast("cuda", enabled=use_amp):
+                out_A2B = dit_model(
+                    z_t_A,
+                    t_A,
+                    real_A,
+                    target_domain=1,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
+                out_B2A = dit_model(
+                    z_t_B,
+                    t_B,
+                    real_B,
+                    target_domain=0,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
+
                 # Phase 2 rule: all non-denoising losses use x0 reconstructions.
                 z0_fake_B = out_A2B["x0_pred"]
                 z0_fake_A = out_B2A["x0_pred"]
@@ -631,7 +742,8 @@ def train_v3(
                 loss_cyc = _compute_cycle_loss(
                     model=dit_model,
                     scheduler=scheduler,
-                    vae=vae,
+                    z0_A=z0_A,
+                    z0_B=z0_B,
                     z0_fake_B=z0_fake_B,
                     z0_fake_A=z0_fake_A,
                     noise_A=noise_A,
@@ -654,7 +766,6 @@ def train_v3(
                     loss_id = _compute_identity_loss(
                         model=dit_model,
                         scheduler=scheduler,
-                        vae=vae,
                         z0_A=z0_A,
                         z0_B=z0_B,
                         real_A=real_A,
@@ -663,22 +774,25 @@ def train_v3(
                         prediction_type=dcfg.prediction_type,
                     )
 
-            # Total generator loss: denoising + adversarial + cycle + identity
-            loss = (
-                dcfg.lambda_denoising * denoise_loss
-                + lambda_adv_curr * loss_adv_G
+            aux_loss = (
+                lambda_adv_curr * loss_adv_G
                 + dcfg.lambda_cycle_v3 * loss_cyc
                 + lambda_identity_curr * loss_id
             )
 
-            if not torch.isfinite(loss):
-                print(f"[warn] non-finite loss at epoch {epoch+1} batch {i}, skipping")
+            if not torch.isfinite(aux_loss):
+                print(
+                    f"[warn] non-finite auxiliary loss at epoch {epoch+1} batch {i}, skipping"
+                )
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
+                _set_requires_grad(D_A, True)
+                _set_requires_grad(D_B, True)
                 continue
 
-            loss_scaled = loss / accumulate
-            scaler.scale(loss_scaled).backward()
+            scaler.scale(aux_loss / accumulate).backward()
+
+            loss = loss_denoise + aux_loss
             accum_count += 1
 
             if accum_count == accumulate or (

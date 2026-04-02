@@ -6,6 +6,7 @@ diffusion hyperparameters. The top-level ``model_version`` switch supports:
     - v1: Hybrid CycleGAN/UVCGAN baseline
     - v2: True UVCGAN v2
     - v3: DiT diffusion pipeline
+    - v4: CUT baseline (GAN + PatchNCE + Transformer)
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
   - GAN objective  : LSGAN, NOT Wasserstein
@@ -171,7 +172,34 @@ class DataConfig:
 @dataclass
 class DiffusionConfig:
     """
-    Hyperparameters for the v3 diffusion model.
+    Hyperparameters for the v3 DiT diffusion model.
+
+    Key fields:
+        num_timesteps:          DDPM diffusion steps during training.
+        beta_schedule:          Noise schedule type (``"cosine"`` or ``"linear"``).
+        dit_hidden_dim:         Token embedding dimension for the DiT backbone.
+        dit_depth:              Number of DiT Transformer blocks.
+        dit_heads:              Attention heads per DiT block.
+        dit_patch_size:         Latent patch size fed into the DiT.
+        prediction_type:        Noise prediction target — ``"v"`` (v-prediction)
+                                or ``"epsilon"``.
+        num_inference_steps:    DDIM sampling steps at inference time.
+        cfg_scale:              Classifier-free guidance scale (1.0 = no guidance).
+        min_snr_gamma:          Min-SNR loss weighting gamma (5.0 per paper).
+        use_gradient_checkpointing: Recompute DiT activations during backward
+                                to reduce peak VRAM.
+        vae_model_id:           HuggingFace model ID for the SD VAE encoder/decoder.
+        lambda_denoising:       Weight for the diffusion noise-prediction loss.
+        lambda_adv_v3:          Adversarial loss weight (ramped up over
+                                ``lambda_adv_warmup_steps`` steps).
+        lambda_cycle_v3:        Cycle-consistency loss weight.
+        lambda_identity_v3_start/end: Identity loss weight, linearly decayed
+                                from start to end over the first
+                                ``identity_decay_end_ratio`` of training.
+        use_r1_penalty:         Enable R1 gradient penalty on the discriminator.
+        r1_gamma:               R1 penalty coefficient.
+        r1_interval:            Apply R1 every N discriminator steps.
+        disc_use_local/global/fft: Toggle the three ProjectionDiscriminator branches.
     """
 
     num_timesteps: int = 1000
@@ -198,11 +226,11 @@ class DiffusionConfig:
     lambda_denoising: float = 1.0
     lambda_adv_v3: float = 0.5
     lambda_adv_warmup_steps: int = 3000
-    lambda_cycle_v3: float = 5.0
-    lambda_identity_v3_start: float = 1.0
+    lambda_cycle_v3: float = 10.0
+    lambda_identity_v3_start: float = 5.0
     lambda_identity_v3_end: float = 0.0
     identity_decay_end_ratio: float = 0.3
-    cycle_ddim_steps: int = 10
+    cycle_ddim_steps: int = 4
     cycle_ddim_eta: float = 0.0
     use_r1_penalty: bool = True
     r1_gamma: float = 10.0
@@ -233,11 +261,13 @@ class UVCGANConfig:
     Fields:
         model_version (int): ``1`` for the hybrid UVCGAN + CycleGAN model;
             ``2`` for the true UVCGAN v2 model; ``3`` for DiT diffusion.
+            Note: v4 uses the separate :class:`V4Config` container.
         generator (GeneratorConfig): Generator architecture settings.
         discriminator (DiscriminatorConfig): Discriminator settings.
         loss (LossConfig): Loss function weights and options.
         training (TrainingConfig): Optimiser, scheduler, and loop settings.
         data (DataConfig): Dataset path, batch size, and worker settings.
+        diffusion (DiffusionConfig): DiT diffusion settings (v3 only).
         model_dir (str | None): Root directory for checkpoints, TensorBoard
             logs, and CSV history.  Auto-generated from a timestamp when
             ``None``.
@@ -260,10 +290,10 @@ class UVCGANConfig:
         Validate inter-field constraints after dataclass initialisation.
 
         Raises:
-            ValueError: If ``model_version`` is not 1, 2, or 3, or if
-                ``decay_start_epoch`` is too close to ``num_epochs`` to
-                allow a meaningful linear decay phase (fewer than 2 epochs
-                of decay would remain).
+            ValueError: If ``model_version`` is not 1, 2, or 3 (use
+                :class:`V4Config` for v4), or if ``decay_start_epoch`` is
+                too close to ``num_epochs`` to allow a meaningful linear
+                decay phase (fewer than 2 epochs of decay would remain).
         """
         if self.model_version not in (1, 2, 3):
             raise ValueError(
@@ -320,8 +350,8 @@ def get_8gb_config() -> UVCGANConfig:
     cfg = UVCGANConfig(model_version=2)
 
     # --- Gradient checkpointing ---
-    # Disabled based on measured memory headroom to keep training faster.
-    cfg.generator.use_gradient_checkpointing = False
+    # Enabled to save activation memory during the Transformer backward pass.
+    cfg.generator.use_gradient_checkpointing = True
 
     # --- ViT depth ---
     # Kept at 4 to preserve capacity; not reduced in this profile.
@@ -331,12 +361,12 @@ def get_8gb_config() -> UVCGANConfig:
     # Kept at 3 (full multi-scale) for stability/quality.
     cfg.discriminator.num_scales = 3
 
-    # --- Batch size: 4 -> 1, with gradient accumulation to compensate ---
-    # batch_size=1 quarters activation memory. accumulate_grads=4 means the
-    # optimiser steps every 4 batches, so the effective gradient batch is
-    # still 4. Loss scaling is handled in model_v2/training_loop.
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
+    # batch_size=2 halves activation memory. accumulate_grads=2 means the
+    # optimiser steps every 2 batches, keeping the effective gradient batch
+    # at 4. Loss scaling is handled in model_v2/training_loop.
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
 
     # --- Perceptual loss resize ---
     # Set to 180 based on current memory/quality trade-offs.
@@ -376,8 +406,9 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.diffusion.perceptual_every_n_steps = 4
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -386,15 +417,28 @@ def get_dit_config() -> UVCGANConfig:
 
 def get_dit_8gb_config() -> UVCGANConfig:
     """
-    Return a VRAM-optimised config for v3 diffusion training.
+    Return a config for v3 diffusion training tuned for 8 GB GPUs.
 
-    Relative to :func:`get_dit_config`, this profile enables gradient
-    checkpointing for DiT blocks and uses a lighter validation setup.
+    Relative to :func:`get_dit_config`, this profile uses a larger DiT
+    (hidden_dim=512, depth=8, heads=8) but pairs it with gradient
+    checkpointing, AMP, a reduced batch size, and a lightweight validation
+    setup to stay within 8 GB VRAM.
+
+    DiT size notes:
+        hidden_dim=512, depth=8, and heads=8 increase model capacity. Combined
+        with gradient checkpointing this is still trainable on 8 GB; reduce
+        these values if OOM is observed.
+
+    Discriminator notes:
+        disc_use_global=True keeps the global branch active.
+        disc_base_channels=64 matches the default channel width.
+        disc_use_fft=False disables the FFT discriminator, which is the
+        primary memory saving relative to a fully featured setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 256
-    cfg.diffusion.dit_depth = 4
-    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_hidden_dim = 512
+    cfg.diffusion.dit_depth = 8
+    cfg.diffusion.dit_heads = 8
     cfg.diffusion.dit_patch_size = 8
     cfg.diffusion.dit_mlp_ratio = 2.0
     cfg.diffusion.use_gradient_checkpointing = True
@@ -408,25 +452,200 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4
+    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2
     # Slightly higher worker count helps keep GPU fed on fast local SSDs.
-    cfg.data.num_workers = 2
+    cfg.data.num_workers = 4
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
-    cfg.diffusion.lambda_perceptual_v3 = 0.00
+    cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = (
-        False  # FFT discriminator is memory-intensive; disable for 8 GB
-    )
-    cfg.diffusion.disc_use_global = False  # Disable global branch to save memory
+    cfg.diffusion.disc_use_fft = False  # FFT discriminator is memory-intensive; disable
+    cfg.diffusion.disc_use_global = True  # Keep global discriminator branch active
     cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
-    cfg.diffusion.disc_base_channels = 16  # Reduce base channels further to save memory
-    cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)
-    cfg.diffusion.disc_n_layers = (
-        2  # Reduce layers in each discriminator to save memory
-    )
+    cfg.diffusion.disc_base_channels = 64  # Standard channel width
+    cfg.diffusion.disc_global_base_channels = 16
+    cfg.diffusion.disc_n_layers = 3
 
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# v4 config (GAN + PatchNCE + Transformer)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class V4ModelConfig:
+    """
+    Architecture hyperparameters for the v4 generator and discriminator.
+
+    Generator fields:
+        input_nc / output_nc:   Input and output image channels.
+        base_channels:          Base feature-map width for the CNN decoder.
+        num_res_blocks:         ResNet bottleneck depth (ResnetGenerator only).
+        use_transformer_encoder: If True, use TransformerGeneratorV4;
+                                 otherwise use ResnetGenerator.
+        image_size:             Square input image size.
+        patch_size:             Transformer patch size (power of 2).
+        encoder_dim:            Transformer token embedding dimension.
+        encoder_depth:          Number of Transformer blocks.
+        encoder_heads:          Attention heads per Transformer block.
+        encoder_mlp_ratio:      MLP hidden-dim multiplier in Transformer blocks.
+        encoder_dropout:        Dropout inside Transformer blocks.
+        use_gradient_checkpointing: Recompute Transformer activations during
+                                backward to reduce peak VRAM.
+
+    Discriminator fields:
+        disc_base_channels:     Base feature-map width for PatchGAN.
+        disc_n_layers:          Number of strided downsampling layers.
+    """
+
+    input_nc: int = 3
+    output_nc: int = 3
+    base_channels: int = 64
+    num_res_blocks: int = 6
+    disc_base_channels: int = 64
+    disc_n_layers: int = 3
+    use_transformer_encoder: bool = True
+    image_size: int = 256
+    patch_size: int = 8
+    encoder_dim: int = 224
+    encoder_depth: int = 4
+    encoder_heads: int = 4
+    encoder_mlp_ratio: float = 3.0
+    encoder_dropout: float = 0.0
+    use_gradient_checkpointing: bool = False
+
+
+@dataclass
+class V4TrainingConfig:
+    """
+    Training loop hyperparameters for the v4 GAN + PatchNCE baseline.
+
+    Key fields:
+        lambda_gan:         Weight for the LSGAN adversarial loss.
+        lambda_nce:         Weight for the PatchNCE contrastive loss.
+        lambda_identity:    Weight for the identity (self-reconstruction) loss.
+        nce_layers:         Encoder block indices used for NCE feature extraction.
+        nce_num_patches:    Spatial patches sampled per feature map per step.
+        nce_temperature:    InfoNCE softmax temperature.
+        nce_proj_dim:       Output dimension of the per-layer MLP projectors.
+        use_replay_buffer:  Stabilise discriminator with a history of fake samples.
+        use_ema:            Maintain an EMA copy of both generators.
+        ema_decay:          EMA decay factor (higher = slower update).
+        use_lr_schedule:    Enable linear warmup + linear decay LR schedule.
+        lr_warmup_epochs:   Epochs over which LR ramps from 0 to ``lr``.
+        lr_decay_start_epoch: Epoch at which linear LR decay begins.
+        accumulate_grads:   Gradient accumulation steps before an optimiser step.
+        validation_every:   Run validation after this many epochs.
+        save_every:         Save a checkpoint every N epochs.
+    """
+
+    num_epochs: int = 200
+    epoch_size: int = 3000
+    test_size: int = 200
+    lr: float = 2e-4
+    beta1: float = 0.5
+    beta2: float = 0.999
+    grad_clip_norm: float = 1.0
+    use_amp: bool = True
+    accumulate_grads: int = 1
+    log_every: int = 50
+    save_every: int = 20
+    validation_every: int = 5
+    validation_samples: int = 10
+    validation_max_batches: int = 50
+    validation_fid_samples: int = 200
+    validation_fid_min_samples: int = 50
+    lambda_gan: float = 1.0
+    lambda_nce: float = 1.0
+    lambda_identity: float = 5.0
+    nce_layers: tuple[int, ...] = (0, 1, 2)
+    nce_num_patches: int = 128
+    nce_temperature: float = 0.07
+    nce_proj_dim: int = 256
+    use_replay_buffer: bool = True
+    replay_buffer_size: int = 50
+    use_ema: bool = True
+    ema_decay: float = 0.999
+    use_lr_schedule: bool = True
+    lr_warmup_epochs: int = 5
+    lr_decay_start_epoch: int = 100
+
+
+@dataclass
+class V4DataConfig:
+    """
+    Data loading configuration for v4 training.
+
+    Fields:
+        image_size:      Spatial size to which patches are resized (square).
+        batch_size:      Samples per mini-batch.
+        num_workers:     DataLoader worker processes (0 = main process only).
+        prefetch_factor: Batches prefetched per worker.
+    """
+
+    image_size: int = 256
+    batch_size: int = 4
+    num_workers: int = 4
+    prefetch_factor: int = 2
+
+
+@dataclass
+class V4Config:
+    """
+    Top-level configuration container for v4 training.
+
+    Groups all sub-configurations into typed fields and validates that
+    ``model_version`` is exactly 4.  Pass an instance to ``train_v4()``.
+
+    Fields:
+        model_version: Must be ``4``.
+        model:         Generator and discriminator architecture settings.
+        training:      Optimiser, scheduler, NCE, and loop settings.
+        data:          Dataset path, batch size, and worker settings.
+        model_dir:     Root output directory for checkpoints and logs.
+                       Auto-generated when ``None``.
+        val_dir:       Directory for per-epoch validation images.
+                       Defaults to ``model_dir/validation_images`` when ``None``.
+    """
+
+    model_version: int = 4
+    model: V4ModelConfig = field(default_factory=V4ModelConfig)
+    training: V4TrainingConfig = field(default_factory=V4TrainingConfig)
+    data: V4DataConfig = field(default_factory=V4DataConfig)
+    model_dir: Optional[str] = None
+    val_dir: Optional[str] = None
+
+    def __post_init__(self):
+        if self.model_version != 4:
+            raise ValueError(
+                f"model_version must be 4 for V4Config, got {self.model_version!r}."
+            )
+
+
+def get_v4_config() -> V4Config:
+    """
+    Return a default V4Config with full-capacity settings.
+
+    Suitable for GPUs with 12+ GB VRAM.  Gradient checkpointing is disabled
+    for maximum training speed.
+    """
+    return V4Config()
+
+
+def get_v4_8gb_config() -> V4Config:
+    """
+    Return a VRAM-optimised V4Config for 8 GB GPUs.
+
+    Enables gradient checkpointing in the Transformer encoder to reduce
+    peak activation memory at the cost of a slightly slower backward pass.
+    All other settings are identical to :func:`get_v4_config`.
+    """
+    cfg = V4Config()
+    cfg.model.use_gradient_checkpointing = True
     return cfg

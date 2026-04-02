@@ -9,6 +9,7 @@ Supported model versions:
     1 -> Hybrid CycleGAN/UVCGAN baseline (model_v1)
     2 -> True UVCGAN v2 (model_v2)
     3 -> DiT diffusion pipeline (model_v3)
+    4 -> Transformer + PatchNCE (model_v4)
 """
 
 import os
@@ -16,8 +17,9 @@ from datetime import datetime
 
 from shared.history_utils import save_history_to_csv, visualize_history
 from model_v1.training_loop import train_v1
-from config import get_8gb_config
+from config import get_8gb_config, get_v4_8gb_config
 from model_v2.training_loop import train_v2
+from model_v4.training_loop import train_v4
 
 
 def main():
@@ -27,7 +29,7 @@ def main():
     Returns:
         tuple: ``(history, G_AB, G_BA, D_A, D_B)``.
 
-        For model versions 1 and 2, these are the CycleGAN-style generators
+        For model versions 1, 2, and 4, these are the CycleGAN-style generators
         and discriminators returned by the corresponding training loop.
 
         For model version 3, this return shape is preserved for compatibility
@@ -41,6 +43,8 @@ def main():
         model_version=1 launches ``train_v1``.
         model_version=2 launches ``train_v2`` with ``get_8gb_config()``.
         model_version=3 launches ``train_v3`` with ``get_dit_8gb_config()``.
+        model_version=4 launches ``train_v4`` with ``get_v4_8gb_config()``.
+        All model directories are timestamped to keep each run isolated.
     """
 
     # User-controlled training parameters.
@@ -49,7 +53,8 @@ def main():
     test_size = int(input("Enter Test Size: "))
     model_version = int(
         input(
-            "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, 3 for DiT diffusion: "
+            "Enter model version you want 1 for Hybrid, 2 for true UVCGAN, "
+            "3 for DiT diffusion, 4 for v4 (Transformer + NCE): "
         )
     )
 
@@ -108,6 +113,25 @@ def main():
         G_BA = ema_model
         D_A = cond_encoder
         D_B = None
+    elif model_version == 4:
+        model_dir = os.path.join(
+            dataset_root,
+            f"models_v4_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}",
+        )
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"Model directory: {model_dir}")
+        val_dir = os.path.join(model_dir, "validation_images")
+        os.makedirs(val_dir, exist_ok=True)
+        print(f"Validation image directory: {val_dir}")
+        cfg = get_v4_8gb_config()
+        cfg.training.test_size = test_size
+        history, G_AB, G_BA, D_A, D_B = train_v4(
+            epoch_size=epoch_size,
+            num_epochs=num_epochs,
+            model_dir=model_dir,
+            val_dir=val_dir,
+            cfg=cfg,
+        )
     else:
         # Create a timestamped model directory so each run is isolated.
         model_dir = os.path.join(
@@ -133,6 +157,7 @@ def main():
     history_saver = save_history_to_csv
     if model_version == 3:
         from model_v3.history_utils import visualize_history_v3, save_history_to_csv_v3
+
         history_visualizer = visualize_history_v3
         history_saver = save_history_to_csv_v3
     history_visualizer(history, model_dir=model_dir)
@@ -143,5 +168,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-

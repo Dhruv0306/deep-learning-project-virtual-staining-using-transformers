@@ -2,261 +2,127 @@
 
 Source of truth: ../../model_v3/training_loop.py
 
-Role: Trains DiT diffusion model with adversarial losses, cycle consistency, and identity constraints. Includes EMA, gradient accumulation, AMP, and per-epoch validation with early stopping.
+This module trains the v3 CycleDiT pipeline with two-stage generator updates,
+dual discriminators, EMA, replay buffers, AMP, gradient accumulation, periodic
+validation, and resume support.
 
----
+## Public Components
 
-## Component Structure
+1. `_make_cosine_warmup_lambda`
+2. `_global_grad_norm`
+3. `_set_requires_grad`
+4. `_run_validation_v3`
+5. `train_v3`
 
-1. `_make_cosine_warmup_lambda` — LR scheduler helper
-2. `_global_grad_norm` — Gradient norm tracking
-3. `_run_validation_v3` — Per-epoch validation and metrics
-4. `train_v3` — Main training loop with phases
+## `_make_cosine_warmup_lambda`
 
----
+Creates a learning-rate multiplier with linear warmup followed by cosine decay
+to a small minimum ratio.
 
-## 1) `_make_cosine_warmup_lambda`
+## `_global_grad_norm`
 
-**Purpose**: Create LR schedule with linear warmup → cosine decay.
+Returns the L2 norm of all available gradients as a Python float for logging.
 
-**Formula**:
-```
-if epoch < warmup:
-    return (epoch + 1) / warmup
-else:
-    progress = (epoch - warmup) / (total - warmup)
-    cosine = 0.5 * (1 + cos(π * progress))
-    return lr_min_ratio + (1 - lr_min_ratio) * cosine
-```
+## `_run_validation_v3`
 
-**Use**: Passed to `torch.optim.lr_scheduler.LambdaLR` for generator and discriminators.
+Runs validation or test-time export on the A/B paired test loader.
 
----
+Behavior:
 
-## 2) `_global_grad_norm`
+1. use the EMA generator when available
+2. sample A→B and B→A translations with DDIM
+3. decode latents through the VAE
+4. compute SSIM, PSNR, and optionally FID for both domains
+5. save comparison grids to the output directory
 
-**Purpose**: Compute L2 norm of all gradients for stability monitoring.
+The validation path now tracks both domains instead of only the B domain.
 
-**Formula**:
-```
-total_grad_norm = ||[grad_1, grad_2, ..., grad_n]||_2
-```
+## `train_v3`
 
-**Output**: Python float for TensorBoard logging
+Signature highlights:
 
----
+- `resume_checkpoint` is supported
+- `cfg` defaults to `get_dit_8gb_config()` when omitted
+- return value is `(history, dit_model, ema_model, None)`
 
-## 3) `_run_validation_v3`
+### Setup
 
-**Purpose**: Run per-epoch validation on test set, compute metrics, save comparison images.
+The loop constructs:
 
-**Inputs**:
-- `epoch`: current epoch number
-- `ema_model`: EMA-averaged generator (uses `v_pred` output)
-- `vae`: VAE decoder for latent → image conversion
-- `sampler`: DDIMSampler for conditional image sampling
-- `test_loader`: test dataloader with {A, B} pairs
-- `device`: GPU/CPU
-- `save_dir`: directory for validation image comparisons
-- `calculator`: MetricsCalculator (SSIM, PSNR, FID)
-- `num_steps`: DDIM denoising steps
-- `writer`: TensorBoard SummaryWriter
-- `max_batches`, `num_samples`, `fid_max_samples`: validation config
+- frozen VAE wrapper
+- trainable DiT generator
+- EMA generator copy
+- dual `ProjectionDiscriminator` instances
+- DDPM scheduler and DDIM sampler
+- replay buffers
+- optional VGG perceptual loss
 
-**Per-Batch Dataflow**:
+### Resume Support
 
-1. Sample condition images:
-   ```
-   real_A: (B, 3, 256, 256)
-   ```
+When `resume_checkpoint` is provided, the loop restores:
 
-2. Condition encode (via VAE):
-   ```
-   c = encode(real_A)  # Extract condition features
-   ```
+- model weights
+- EMA weights
+- discriminator weights
+- optimizer state
+- scheduler state
+- AMP scaler state when available
+- starting epoch
 
-3. Latent-space DDIM sampling:
-   ```
-   z0 = sampler.sample(
-       shape=(B, 4, 32, 32),
-       condition=c,
-       target_domain=1,  # Generate domain B
-       num_steps=num_steps,
-       eta=1.0
-   )
-   ```
+### Per-Batch Flow
 
-4. Decode to image space:
-   ```
-   fake_B = vae.decode(z0)  # (B, 3, 256, 256)
-   ```
+For each batch the code now performs:
 
-5. Compute metrics:
-   ```
-   SSIM_B = ssim(fake_B, real_B)
-   PSNR_B = psnr(fake_B, real_B)
-   FID_B = fid_inception_distance(fake_B, real_B)
-   ```
+1. encode real images to VAE latents
+2. sample timesteps and noise
+3. run diffusion-only generator loss first
+4. run a fresh forward pass for adversarial, cycle, and identity losses
+5. update the EMA model after generator stepping
+6. update discriminators with replay-buffer fakes and optional R1 penalty
 
-6. Save comparison image row for preview
+This ordering matches the current implementation and is intended to reduce
+peak VRAM by freeing diffusion activations before the auxiliary graph is built.
 
-**Outputs**:
-- metrics_dict: {ssim_B, psnr_B, fid_B, ...}
-- Saved PNG images to `save_dir`
+### Loss Terms
 
----
+- diffusion loss from `compute_diffusion_loss`
+- adversarial loss from `_lsgan_gen_loss`
+- cycle loss from `_compute_cycle_loss`
+- identity loss from `_compute_identity_loss`
+- discriminator losses from `_lsgan_disc_loss`
+- optional R1 penalty from `_r1_penalty_loss`
 
-## 4) `train_v3` — Main Training Loop
+### Logging and Checkpointing
 
-### 4A) Setup Phase
+Per-batch history now stores:
 
-**Models**:
-- `vae`: Frozen SD VAE for latent encoding/decoding
-- `dit_model`: Trainable DiT generator
-- `ema_model`: EMA copy of dit_model (for validation/testing)
-- `D_A`: Domain A discriminator (multi-scale spectral-norm PatchGAN)
-- `D_B`: Domain B discriminator (multi-scale spectral-norm PatchGAN)
+- `Loss_DiT_A2B`
+- `Loss_DiT_B2A`
+- `Loss_DiT`
+- `Loss_G_Adv`
+- `Loss_Cyc`
+- `Loss_Id`
+- `Loss_D_A`
+- `Loss_D_B`
+- `Lambda_Adv`
+- `Lambda_Id`
+- `Loss_Perceptual`
+- `Loss Total`
+- `GradNorm`
 
-**Optimizers**:
-- Generator: AdamW, lr=1e-4, standard DCGAN-style schedule
-- D_A, D_B: Adam, lr from config, beta1/beta2 from config
+The history is written to CSV and visualized through `model_v3/history_utils.py`.
 
-**Learning Rate Schedule**:
-- Cosine warmup: 0 → 1e-4 over `warmup_epochs`
-- Cosine decay: 1e-4 → 1e-10 over remaining epochs
+### Validation and Early Stopping
 
-**Infrastructure**:
-- `scheduler`: DDPMScheduler (DDPM diffusion schedule)
-- `sampler`: DDIMSampler for fast conditional sampling
-- `scaler`: GradScaler for AMP (if enabled)
-- `replay_A`, `replay_B`: ReplayBuffer for discriminator stability
-- `perceptual_loss`: Optional VGG19 perceptual term
+Validation runs after the configured warmup and uses the averaged SSIM score
+from both domains for early-stopping decisions.
 
-**Config Overrides**:
-```python
-train_v3(
-    epoch_size=1024,           # Override
-    num_epochs=120,            # Override
-    model_dir="./models_v3",   # Override
-    cfg=get_dit_8gb_config()   # Provide full config
-)
-```
+### Returned Values
 
-### 4B) Per-Epoch Training Dataflow
-
-**For each batch in `train_loader`**:
-
-#### **1. Latent Encoding**
-
-```
-real_A, real_B: (N, 3, 256, 256) [from loader]
-↓ VAE encoding
-z0_A, z0_B: (N, 4, 32, 32) [latent at t=0]
-↓ Add noise
-t_A, t_B: (N,) [random timestep indices]
-noise_A, noise_B: (N, 4, 32, 32) [random Gaussian]
-↓ Noise addition
-z_t_A, z_t_B: (N, 4, 32, 32) [noisy latents at t]
-```
-
----
-
-#### **2. Generator Step (Phase 1: Diffusion + Adversarial)**
-
-**Forward pass** (both directions):
-
-```
-out_A2B = model(z_t_A, t_A, real_A, target_domain=1)
-    → v_pred_A2B: (N, 4, 32, 32)
-    → x0_pred_A2B: (N, 4, 32, 32) [x0 reconstruction]
-
-out_B2A = model(z_t_B, t_B, real_B, target_domain=0)
-    → v_pred_B2A: (N, 4, 32, 32)
-    → x0_pred_B2A: (N, 4, 32, 32)
-```
-
-**Diffusion Loss** (for each direction):
-
-```
-loss_A2B = compute_diffusion_loss(
-    z0=z0_A, z_t=z_t_A, t=t_A, noise=noise_A,
-    model_pred=v_pred_A2B, real_B=real_B,
-    lambda_perc=dcfg.lambda_perceptual_v3,
-    min_snr_gamma=dcfg.min_snr_gamma
-)
-→ (loss, loss_simple, loss_perc_val)
-```
-Same for B→A.
-
-**Adversarial Loss** (Generator):
-
-```
-z0_fake_B = x0_pred_A2B
-fake_B_img = vae.decode(z0_fake_B).clamp(-1, 1)
-D_B_output = D_B(fake_B_img)
-loss_adv_G_B = LSGAN_gen_loss(D_B_output)
-```
-Same for domain A.
-
-**Total Generator Loss**:
-
-```
-loss_G = (
-    lambda_denoising * denoise_loss  # Main diffusion term
-    + lambda_adv_curr * loss_adv_G   # Warmup-scaled adversarial term
-    + lambda_cycle_v3 * loss_cyc     # Phase 2 cycle consistency
-    + lambda_id_curr * loss_id       # Phase 2 identity loss
-)
-```
-
----
-
-#### **3. Phase 2: Cycle & Identity Losses**
-
-**Cycle Consistency**:
-
-```
-z0_fake_B, z0_fake_A from primary passes above
-↓ Reuse same noise/timestep
-z_t_rec_A = add_noise(z0_fake_B, noise_A, t_A)
-z_t_rec_B = add_noise(z0_fake_A, noise_B, t_B)
-↓ Short DDIM denoising (e.g., 4-10 steps)
-z0_rec_A = DDIM_shortcut(..., z_t_rec_A, ...)
-z0_rec_B = DDIM_shortcut(..., z_t_rec_B, ...)
-↓ Decode
-rec_A = vae.decode(z0_rec_A)
-rec_B = vae.decode(z0_rec_B)
-↓ L1 reconstruction
-loss_cyc = ||rec_A - real_A||_1 + ||rec_B - real_B||_1
-```
-
-**Identity Loss** (only if `lambda_id_curr > 0`):
-
-```
-t_idt = [0, 0, ..., 0]  [zero timestep]
-z0_idt_A = model(z0_A, t=0, cond=real_A, domain=A)["x0_pred"]
-z0_idt_B = model(z0_B, t=0, cond=real_B, domain=B)["x0_pred"]
-↓ Decode
-idt_A = vae.decode(z0_idt_A)
-idt_B = vae.decode(z0_idt_B)
-↓ L1 constraint
-loss_id = ||idt_A - real_A||_1 + ||idt_B - real_B||_1
-```
-
-**Identity Weight Schedule**:
-
-```
-lambda_id_curr = linear_decay(
-    epoch,
-    start=lambda_identity_v3_start,
-    end=lambda_identity_v3_end,
-    decay_ratio=identity_decay_end_ratio
-)
-```
-
----
-
-#### **4. Discriminator Steps**
+- `history`: nested epoch -> batch loss dictionary
+- `dit_model`: raw generator weights
+- `ema_model`: EMA generator weights
+- `None`: placeholder to preserve compatibility with the v1/v2/v4-style tuple
 
 **Replay Buffer**:
 
