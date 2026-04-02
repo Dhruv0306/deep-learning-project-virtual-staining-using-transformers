@@ -261,11 +261,13 @@ class UVCGANConfig:
     Fields:
         model_version (int): ``1`` for the hybrid UVCGAN + CycleGAN model;
             ``2`` for the true UVCGAN v2 model; ``3`` for DiT diffusion.
+            Note: v4 uses the separate :class:`V4Config` container.
         generator (GeneratorConfig): Generator architecture settings.
         discriminator (DiscriminatorConfig): Discriminator settings.
         loss (LossConfig): Loss function weights and options.
         training (TrainingConfig): Optimiser, scheduler, and loop settings.
         data (DataConfig): Dataset path, batch size, and worker settings.
+        diffusion (DiffusionConfig): DiT diffusion settings (v3 only).
         model_dir (str | None): Root directory for checkpoints, TensorBoard
             logs, and CSV history.  Auto-generated from a timestamp when
             ``None``.
@@ -288,10 +290,10 @@ class UVCGANConfig:
         Validate inter-field constraints after dataclass initialisation.
 
         Raises:
-            ValueError: If ``model_version`` is not 1, 2, or 3, or if
-                ``decay_start_epoch`` is too close to ``num_epochs`` to
-                allow a meaningful linear decay phase (fewer than 2 epochs
-                of decay would remain).
+            ValueError: If ``model_version`` is not 1, 2, or 3 (use
+                :class:`V4Config` for v4), or if ``decay_start_epoch`` is
+                too close to ``num_epochs`` to allow a meaningful linear
+                decay phase (fewer than 2 epochs of decay would remain).
         """
         if self.model_version not in (1, 2, 3):
             raise ValueError(

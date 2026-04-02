@@ -336,6 +336,20 @@ class TransformerGeneratorV4(nn.Module):
     def encode_features(
         self, x: torch.Tensor, nce_layers: list[int] | tuple[int, ...] | None = None
     ) -> list[torch.Tensor]:
+        """
+        Extract spatial feature maps from Transformer blocks for PatchNCE.
+
+        Runs the full encoder (patch embed + positional encoding + Transformer
+        blocks) and reshapes each collected token sequence back to a spatial
+        map ``(B, embed_dim, H', W')``.
+
+        Args:
+            x:          Input image tensor ``(B, C, H, W)``.
+            nce_layers: Block indices to collect.  ``None`` collects all blocks.
+
+        Returns:
+            List of spatial feature maps, one per collected block.
+        """
         _, grid, feats = self._encode_tokens(
             x, return_features=True, nce_layers=nce_layers
         )

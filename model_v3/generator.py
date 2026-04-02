@@ -30,11 +30,16 @@ from model_v2.generator import _get_2d_sincos_pos_embed, init_weights_v2
 
 class PatchEmbed(nn.Module):
     """
-    Patchify latent and project to token embeddings.
+    Patchify a latent tensor and project each patch to a token embedding.
 
     Shape flow:
-        input  z: (N, C, H, W)
-        output t: (N, (H/p)*(W/p), hidden_dim)
+        z: (N, C, H, W) -> tokens: (N, (H/p)*(W/p), hidden_dim)
+
+    Args:
+        in_channels: Latent channel count (4 for SD VAE latents).
+        patch_size:  Spatial size of each non-overlapping patch.
+        hidden_dim:  Output token embedding dimension.
+        latent_size: Spatial side length of the latent (H == W assumed).
     """
 
     def __init__(
@@ -52,6 +57,16 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Linear(in_channels * patch_size * patch_size, hidden_dim)
 
     def forward(self, z: Tensor) -> Tensor:
+        """
+        Args:
+            z: Latent tensor (N, C, H, W).
+
+        Returns:
+            Token tensor (N, (H/p)*(W/p), hidden_dim).
+
+        Raises:
+            ValueError: If H or W is not divisible by patch_size.
+        """
         n, c, h, w = z.shape
         p = self.patch_size
         if h % p != 0 or w % p != 0:
@@ -64,7 +79,13 @@ class PatchEmbed(nn.Module):
 
 class TimestepEmbedding(nn.Module):
     """
-    Sinusoidal timestep embedding followed by an MLP.
+    Sinusoidal timestep embedding followed by a two-layer MLP.
+
+    Converts a batch of integer timesteps to continuous embeddings via
+    sine-cosine frequencies, then projects through SiLU-activated MLP.
+
+    Args:
+        hidden_dim: Output embedding dimension (also the MLP width).
     """
 
     def __init__(self, hidden_dim: int):
@@ -78,6 +99,15 @@ class TimestepEmbedding(nn.Module):
         )
 
     def _sincos(self, t: Tensor) -> Tensor:
+        """
+        Compute sinusoidal frequency embeddings for timestep tensor t.
+
+        Args:
+            t: Scalar or 1-D integer timestep tensor.
+
+        Returns:
+            Float tensor of shape (N, freq_dim) with interleaved sin/cos values.
+        """
         if t.dim() == 0:
             t = t.view(1)
         t = t.float()
@@ -98,15 +128,32 @@ class TimestepEmbedding(nn.Module):
         return emb
 
     def forward(self, t: Tensor) -> Tensor:
+        """
+        Args:
+            t: Integer timestep tensor (N,).
+
+        Returns:
+            Embedding tensor (N, hidden_dim).
+        """
         return self.mlp(self._sincos(t))
 
 
 class ConditionTokenizer(nn.Module):
     """
-    Patchify conditioning image and project to token embeddings.
+    Patchify a conditioning image and project to token embeddings.
 
-    Shape flow for 256x256 input and patch_size=16:
-        (N,3,256,256) -> (N,hidden_dim,16,16) -> (N,256,hidden_dim)
+    Shape flow for 256×256 input, patch_size=16, pool_stride=1:
+        (N, 3, 256, 256) -> conv -> (N, hidden_dim, 16, 16)
+                         -> flatten -> (N, 256, hidden_dim)
+
+    With pool_stride=4 the token grid is further reduced by average pooling,
+    lowering cross-attention cost at the expense of spatial resolution.
+
+    Args:
+        hidden_dim:   Token embedding dimension.
+        image_size:   Spatial side length of the conditioning image (square).
+        patch_size:   Stride of the patchifying convolution.
+        pool_stride:  Average-pool stride applied after projection (1 = off).
     """
 
     def __init__(
@@ -133,6 +180,17 @@ class ConditionTokenizer(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: Conditioning image tensor (N, 3, H, W) in [-1, 1].
+
+        Returns:
+            Token tensor (N, L, hidden_dim) with 2-D sincos positional
+            embeddings added, where L = (H/patch_size/pool_stride)².
+
+        Raises:
+            ValueError: If the token grid is not divisible by pool_stride.
+        """
         x = self.proj(x)
         if self.pool_stride > 1:
             h, w = x.shape[-2:]
@@ -155,7 +213,22 @@ class ConditionTokenizer(nn.Module):
 
 class DiTBlock(nn.Module):
     """
-    DiT block with adaLN-Zero conditioning.
+    DiT Transformer block with adaLN-Zero adaptive layer normalisation.
+
+    Each block applies:
+        1. Self-attention with adaLN-Zero scale/shift/gate from the
+           combined timestep + domain condition vector.
+        2. Optional cross-attention to condition tokens (use_cross_attn=True).
+        3. Feed-forward MLP with adaLN-Zero scale/shift/gate.
+
+    The adaLN linear is zero-initialised so the block starts as identity.
+
+    Args:
+        hidden_dim:     Token embedding dimension.
+        num_heads:      Attention heads for both self- and cross-attention.
+        mlp_ratio:      MLP hidden-dim multiplier.
+        use_cross_attn: If True, add a cross-attention sub-layer that attends
+                        to the condition token sequence.
     """
 
     def __init__(
@@ -193,6 +266,16 @@ class DiTBlock(nn.Module):
             nn.init.zeros_(ada_linear.bias)
 
     def forward(self, tokens: Tensor, cond_tokens: Tensor, cond: Tensor) -> Tensor:
+        """
+        Args:
+            tokens:      Latent token sequence (N, L, hidden_dim).
+            cond_tokens: Condition token sequence (N, Lc, hidden_dim).
+            cond:        Scalar condition vector (N, hidden_dim) — sum of
+                         timestep embedding and domain embedding.
+
+        Returns:
+            Updated token sequence (N, L, hidden_dim).
+        """
         params = self.adaLN(cond)
         (
             gamma1,
@@ -230,15 +313,31 @@ class DiTBlock(nn.Module):
 
 class DiTGenerator(nn.Module):
     """
-    Diffusion Transformer backbone.
+    Diffusion Transformer (DiT) backbone for latent noise prediction.
+
+    Patchifies the noisy latent, adds 2-D sincos positional embeddings,
+    runs depth DiT blocks conditioned on timestep + domain, then
+    unpatchifies back to the latent shape.
 
     Forward inputs:
-        z_t: (N,4,32,32)
-        t:   (N,)
-        c:   (N,Lc,hidden_dim)
+        z_t: (N, 4, 32, 32)  — noisy latent at timestep t
+        t:   (N,)             — integer diffusion timesteps
+        c:   (N, Lc, hidden_dim) — condition token sequence
 
     Forward output:
-        eps_pred: (N,4,32,32)
+        pred: (N, 4, 32, 32) — v-prediction or eps-prediction target
+
+    Args:
+        in_channels:  Latent channel count (4 for SD VAE).
+        hidden_dim:   Token embedding dimension.
+        depth:        Number of DiT blocks.
+        num_heads:    Attention heads per block.
+        mlp_ratio:    MLP hidden-dim multiplier.
+        patch_size:   Latent patch size (must divide latent_size).
+        latent_size:  Spatial side length of the latent (32 for 256px images).
+        use_gradient_checkpointing: Recompute block activations during
+                      backward to reduce peak VRAM.
+        use_cross_attn: Enable cross-attention to condition tokens in each block.
     """
 
     def __init__(
@@ -287,11 +386,24 @@ class DiTGenerator(nn.Module):
         nn.init.zeros_(self.head.bias)
 
     def _pos_embed(self, device, dtype) -> Tensor:
+        """Return 2-D sincos positional embeddings for the latent patch grid."""
         grid = self.latent_size // self.patch_size
         pos = _get_2d_sincos_pos_embed(self.hidden_dim, grid, grid, device, dtype)
         return pos.unsqueeze(0)
 
     def unpatchify(self, tokens: Tensor) -> Tensor:
+        """
+        Reshape flat token predictions back to a spatial latent tensor.
+
+        Args:
+            tokens: (N, num_patches, patch_size² * in_channels)
+
+        Returns:
+            (N, in_channels, latent_size, latent_size)
+
+        Raises:
+            ValueError: If token length does not match the expected grid.
+        """
         n, num_patches, dim = tokens.shape
         p = self.patch_size
         h = w = self.latent_size // p
@@ -302,6 +414,15 @@ class DiTGenerator(nn.Module):
         return x.view(n, self.in_channels, h * p, w * p)
 
     def forward(self, z_t: Tensor, t: Tensor, c: Tensor) -> Tensor:
+        """
+        Args:
+            z_t: Noisy latent (N, 4, latent_size, latent_size).
+            t:   Integer timesteps (N,).
+            c:   Condition token sequence (N, Lc, hidden_dim).
+
+        Returns:
+            Noise or v-prediction (N, 4, latent_size, latent_size).
+        """
         tokens = self.patch_embed(z_t)
         tokens = tokens + self._pos_embed(tokens.device, tokens.dtype)
         cond_global = c.mean(dim=1)
@@ -324,9 +445,16 @@ class DomainEmbedding(nn.Module):
     """
     Learned domain embedding for conditional A/B translation.
 
+    Maps a domain id to a hidden_dim vector that is added to the condition
+    token sequence before the DiT backbone, biasing the model toward the
+    requested output domain.
+
     Domain ids:
-        0 -> domain A (Un-Stained)
-        1 -> domain B (Stained)
+        0 -> domain A (unstained)
+        1 -> domain B (H&E stained)
+
+    Args:
+        hidden_dim: Embedding dimension (must match DiTGenerator hidden_dim).
     """
 
     def __init__(self, hidden_dim: int):
@@ -334,21 +462,33 @@ class DomainEmbedding(nn.Module):
         self.embed = nn.Embedding(2, hidden_dim)
 
     def forward(self, domain_ids: Tensor) -> Tensor:
+        """
+        Args:
+            domain_ids: Long tensor (N,) with values in {0, 1}.
+
+        Returns:
+            Embedding tensor (N, hidden_dim).
+        """
         return self.embed(domain_ids)
 
 
 class CycleDiTGenerator(nn.Module):
     """
-    Phase-0 CycleDiT wrapper:
-      - internal condition tokenizer
-      - learned domain embedding
-      - DiT backbone
+    Top-level CycleDiT generator wrapping backbone, condition tokenizer,
+    and domain embedding into a single callable module.
 
-    Forward contract returns:
-      {
-        "v_pred": (N,4,32,32),
-        "x0_pred": (N,4,32,32) or None
-      }
+    Accepts a raw conditioning image (N, 3, H, W) or pre-computed tokens
+    (N, L, hidden_dim) and an integer target domain id, and returns a dict:
+
+        {
+            "v_pred":  (N, 4, 32, 32),  # always present
+            "x0_pred": (N, 4, 32, 32) or None  # present when scheduler given
+        }
+
+    Args:
+        backbone:         DiTGenerator backbone.
+        cond_tokenizer:   ConditionTokenizer for raw image conditioning.
+        domain_embedding: DomainEmbedding for target-domain bias.
     """
 
     def __init__(
@@ -363,7 +503,20 @@ class CycleDiTGenerator(nn.Module):
         self.domain_embedding = domain_embedding
 
     def _prepare_condition_tokens(self, condition: Tensor) -> Tensor:
-        # Condition can be a raw image (N,3,H,W) or precomputed tokens (N,L,Hd).
+        """
+        Tokenize a conditioning input if it is a raw image, or pass through
+        pre-computed tokens unchanged.
+
+        Args:
+            condition: (N, 3, H, W) image or (N, L, hidden_dim) token tensor.
+
+        Returns:
+            Token tensor (N, L, hidden_dim).
+
+        Raises:
+            ValueError: If condition has an unexpected number of dimensions.
+        """
+        # Raw image: tokenize via ConditionTokenizer.
         if condition.dim() == 4:
             return self.cond_tokenizer(condition)
         if condition.dim() == 3:
@@ -378,6 +531,20 @@ class CycleDiTGenerator(nn.Module):
         batch_size: int,
         device: torch.device,
     ) -> Tensor:
+        """
+        Normalise target_domain to a (N,) long tensor clamped to {0, 1}.
+
+        Args:
+            target_domain: Scalar int or tensor broadcastable to (N,).
+            batch_size:    Expected batch dimension.
+            device:        Target device.
+
+        Returns:
+            Long tensor (N,) with values in {0, 1}.
+
+        Raises:
+            ValueError: If tensor batch dimension does not match batch_size.
+        """
         if isinstance(target_domain, int):
             domain_ids = torch.full(
                 (batch_size,), int(target_domain), device=device, dtype=torch.long
@@ -399,6 +566,25 @@ class CycleDiTGenerator(nn.Module):
         scheduler=None,
         prediction_type: str = "v",
     ) -> dict[str, Tensor | None]:
+        """
+        Run one denoising step and optionally reconstruct x0.
+
+        Args:
+            z_t:           Noisy latent (N, 4, 32, 32).
+            t:             Integer timesteps (N,).
+            condition:     Conditioning image (N, 3, H, W) or tokens
+                           (N, L, hidden_dim).
+            target_domain: Target domain id — 0 (unstained) or 1 (stained).
+            scheduler:     DDPMScheduler used to derive x0_pred from the
+                           model output.  Pass None to skip x0 reconstruction.
+            prediction_type: ``"v"`` (v-parameterisation) or ``"eps"``.
+
+        Returns:
+            Dict with keys:
+                ``"v_pred"``  — model output (N, 4, 32, 32).
+                ``"x0_pred"`` — reconstructed clean latent, or None if
+                               scheduler is None.
+        """
         cond_tokens = self._prepare_condition_tokens(condition)
         domain_ids = self._prepare_domain_ids(target_domain, z_t.size(0), z_t.device)
 
@@ -425,11 +611,23 @@ class CycleDiTGenerator(nn.Module):
 
 def getGeneratorV3(cfg, device: Optional[torch.device] = None) -> CycleDiTGenerator:
     """
-    Factory for DiTGenerator based on DiffusionConfig.
+    Build, initialise, and smoke-test a CycleDiTGenerator from a DiffusionConfig.
 
-    Returns a model configured for latent size 32x32 and channel count 4,
-    then runs a smoke test on tensors shaped:
-        z_t:(1,4,32,32), t:(1,), c:(1,dit_hidden_dim)
+    Constructs the DiTGenerator backbone, ConditionTokenizer, and
+    DomainEmbedding from ``cfg``, applies weight initialisation, then
+    verifies the forward pass with a random batch.
+
+    Args:
+        cfg:    DiffusionConfig instance (from config.py).
+        device: Target device.  Auto-detected from CUDA availability if None.
+
+    Returns:
+        Initialised CycleDiTGenerator on the requested device.
+
+    Note:
+        Latent size is fixed at 32×32 (4-channel SD VAE latents for 256px
+        images).  The smoke test uses shape z_t:(1,4,32,32), t:(1,),
+        condition:(1,3,256,256).
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -20,10 +20,25 @@ from torch import nn, Tensor
 
 
 def _linear_beta_schedule(num_timesteps: int) -> Tensor:
+    """Linear beta schedule from 1e-4 to 2e-2 over num_timesteps steps."""
     return torch.linspace(1e-4, 2e-2, num_timesteps, dtype=torch.float32)
 
 
 def _cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> Tensor:
+    """
+    Cosine beta schedule (Nichol & Dhariwal, 2021).
+
+    Computes betas from the cosine-squared alpha_bar curve, clamped to
+    a maximum of 0.999 to prevent singular diffusion steps.
+
+    Args:
+        num_timesteps: Total diffusion steps T.
+        s:             Small offset to prevent beta from being too small
+                       near t=0 (default 0.008 per the paper).
+
+    Returns:
+        Float32 tensor of shape (num_timesteps,).
+    """
     steps = num_timesteps + 1
     t = torch.linspace(0, num_timesteps, steps, dtype=torch.float32)
     f = torch.cos(((t / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
@@ -34,10 +49,18 @@ def _cosine_beta_schedule(num_timesteps: int, s: float = 0.008) -> Tensor:
 
 class DDPMScheduler(nn.Module):
     """
-    DDPM forward-process scheduler with precomputed buffers.
+    DDPM forward-process scheduler with precomputed alpha buffers.
 
-    Key buffers:
-        betas, alphas, alphas_cumprod: (T,)
+    Registers all schedule tensors as non-trainable buffers so they move
+    with the module when calling ``.to(device)``.
+
+    Key buffers (all shape (T,)):
+        betas, alphas, alphas_cumprod,
+        sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod
+
+    Args:
+        num_timesteps: Total diffusion steps T (default 1000).
+        beta_schedule: ``"cosine"`` (recommended) or ``"linear"``.
     """
 
 
@@ -75,8 +98,15 @@ class DDPMScheduler(nn.Module):
 
     def _extract(self, arr: Tensor, t: Tensor, x_shape: Tuple[int, ...]) -> Tensor:
         """
-        Gather values from a buffer for batched timesteps and reshape
-        for broadcasting.
+        Gather per-sample schedule values and broadcast to x_shape.
+
+        Args:
+            arr:     1-D schedule buffer of length T.
+            t:       Integer timestep tensor (N,) or scalar.
+            x_shape: Shape of the target tensor for broadcasting.
+
+        Returns:
+            Tensor of shape (N, 1, 1, ...) broadcastable to x_shape.
         """
         if t.dim() == 0:
             t = t.view(1)
@@ -123,7 +153,9 @@ class DDPMScheduler(nn.Module):
 
     def predict_eps_from_v(self, x_t: Tensor, v_pred: Tensor, t: Tensor) -> Tensor:
         """
-        Recover eps prediction from v prediction.
+        Recover epsilon prediction from v-parameterisation output.
+
+        eps = sqrt(alpha_bar) * v + sqrt(1 - alpha_bar) * x_t
         """
         sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
         sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
@@ -131,7 +163,9 @@ class DDPMScheduler(nn.Module):
 
     def predict_x0_from_v(self, x_t: Tensor, v_pred: Tensor, t: Tensor) -> Tensor:
         """
-        Recover x0 prediction from v prediction.
+        Recover x0 prediction from v-parameterisation output.
+
+        x0 = sqrt(alpha_bar) * x_t - sqrt(1 - alpha_bar) * v
         """
         sqrt_alpha_bar = self._extract(self.sqrt_alphas_cumprod, t, x_t.shape)
         sqrt_one_minus = self._extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
@@ -140,16 +174,29 @@ class DDPMScheduler(nn.Module):
     def get_alpha_bar(self, t: Tensor) -> Tensor:
         """
         Return alpha_bar(t) for scalar or batched timesteps.
+
+        Args:
+            t: Integer timestep tensor (N,) or scalar.
+
+        Returns:
+            alpha_bar values with the same shape as t.
         """
         return self._extract(self.alphas_cumprod, t, t.shape)
 
 
 class DDIMSampler:
     """
-    Deterministic DDIM sampler.
+    Deterministic DDIM reverse sampler (Song et al., 2020).
 
-    Uses alphas_cumprod[0] as the terminal alpha_bar_prev when the
+    Iterates a linearly-spaced subsequence of timesteps from T-1 down to 0,
+    applying the DDIM update rule at each step.  Setting ``eta=0`` gives
+    fully deterministic sampling; ``eta=1`` recovers DDPM stochasticity.
+
+    Uses ``alphas_cumprod[0]`` as the terminal alpha_bar_prev when the
     subsequence reaches t=0 to keep the final update well-defined.
+
+    Args:
+        scheduler: DDPMScheduler instance whose alpha buffers are used.
     """
 
 
@@ -171,16 +218,23 @@ class DDIMSampler:
         target_domain: int = 1,
     ) -> Tensor:
         """
-        Sample a denoised latent z0 from pure noise using DDIM.
+        Sample a denoised latent z0 from pure Gaussian noise using DDIM.
 
         Args:
-            model:     DiTGenerator -- accepts (z_t, t_batch, condition).
-            condition: Pre-computed condition vector (N, hidden_dim).
-            shape:     Output shape (N, 4, 32, 32).
-            device:    Target device.
-            num_steps: Number of DDIM denoising steps (default 50).
-            eta:       Stochasticity coefficient.  0 = deterministic DDIM;
-                       1 = equivalent to DDPM.
+            model:             CycleDiTGenerator denoiser.
+            condition:         Conditioning image or tokens (N, 3, H, W) or
+                               (N, L, hidden_dim).
+            shape:             Output latent shape (N, 4, 32, 32).
+            device:            Target device.
+            num_steps:         DDIM denoising steps (default 50).
+            eta:               Stochasticity coefficient.  0 = deterministic
+                               DDIM; 1 ≈ DDPM.
+            prediction_type:   ``"v"`` or ``"eps"``.
+            cfg_scale:         Classifier-free guidance scale.  1.0 = no
+                               guidance; >1.0 amplifies the conditional signal.
+            uncond_condition:  Unconditional condition for CFG.  Defaults to
+                               zeros when cfg_scale > 1.0 and not provided.
+            target_domain:     Target domain id (0 = unstained, 1 = stained).
 
         Returns:
             Denoised latent tensor of shape ``shape``.

@@ -44,6 +44,7 @@ def main():
         model_version=2 launches ``train_v2`` with ``get_8gb_config()``.
         model_version=3 launches ``train_v3`` with ``get_dit_8gb_config()``.
         model_version=4 launches ``train_v4`` with ``get_v4_8gb_config()``.
+        All model directories are timestamped to keep each run isolated.
     """
 
     # User-controlled training parameters.

@@ -26,7 +26,18 @@ from model_v3.vae_wrapper import VAEWrapper
 
 
 def _lsgan_gen_loss(fake_outputs) -> torch.Tensor:
-    """Least-Squares GAN generator loss: minimize (D_fake - 1)^2."""
+    """
+    LSGAN generator loss: E[(D(fake) - 1)²].
+
+    Accepts either a single logit tensor or a list of tensors (multi-branch
+    discriminator).  List outputs are averaged across branches.
+
+    Args:
+        fake_outputs: Tensor or list of tensors from D(fake).
+
+    Returns:
+        Scalar loss tensor.
+    """
     if isinstance(fake_outputs, (list, tuple)):
         return torch.stack(
             [F.mse_loss(o, torch.ones_like(o)) for o in fake_outputs]
@@ -36,8 +47,17 @@ def _lsgan_gen_loss(fake_outputs) -> torch.Tensor:
 
 def _lsgan_disc_loss(real_outputs, fake_outputs) -> torch.Tensor:
     """
-    Least-Squares GAN discriminator loss:
-    minimize (D_real - 1)^2 + (D_fake - 0)^2.
+    LSGAN discriminator loss: E[(D(real) - 1)²] + E[D(fake)²].
+
+    Accepts single tensors or lists (multi-branch discriminator); list
+    outputs are averaged across branches.
+
+    Args:
+        real_outputs: Tensor or list of tensors from D(real).
+        fake_outputs: Tensor or list of tensors from D(fake).
+
+    Returns:
+        Scalar loss tensor.
     """
 
     def _single(r: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
@@ -58,9 +78,20 @@ def _r1_penalty_loss(
     gamma: float,
 ) -> torch.Tensor:
     """
-    R1 regularization penalty: penalize discriminator gradients on real images.
+    R1 gradient penalty: penalise discriminator gradients on real images.
 
-    Encourages D to have small gradients w.r.t. real inputs, improving stability.
+    Computes 0.5 * gamma * E[||∇D(x_real)||²], which encourages D to have
+    small gradients near real data and improves training stability.
+
+    Always run in float32 (outside autocast) to avoid NaN gradients.
+
+    Args:
+        discriminator: Discriminator module (ProjectionDiscriminator).
+        real_images:   Real image batch (N, 3, H, W) with requires_grad=True.
+        gamma:         R1 penalty coefficient (cfg.diffusion.r1_gamma).
+
+    Returns:
+        Scalar R1 penalty tensor.
     """
     real_scores = discriminator(real_images)
     if isinstance(real_scores, (list, tuple)):
@@ -91,11 +122,26 @@ def _ddim_shortcut_from_xt(
     eta: float,
 ) -> torch.Tensor:
     """
-    Deterministic short-DDIM denoising from a provided x_t start.
+    Short deterministic DDIM denoising from a provided x_t starting point.
 
-    This keeps Phase-2 cycle semantics by starting from x_t built with
-    shared (epsilon, t), then denoising to t=0 in a short path controlled
-    by (num_steps, eta).
+    Used in the cycle-consistency loss to reconstruct x0 from a noisy
+    latent built with shared (epsilon, t) from the primary forward pass.
+    Starting from x_t rather than pure noise keeps the cycle semantically
+    consistent with the denoising objective.
+
+    Args:
+        model:          CycleDiTGenerator.
+        scheduler:      DDPMScheduler with precomputed alpha buffers.
+        z_t_start:      Noisy latent to start denoising from (N, 4, 32, 32).
+        t_start:        Per-sample starting timestep (N,).
+        condition:      Conditioning image or tokens for the reverse direction.
+        target_domain:  Domain id for the reverse translation (0 or 1).
+        prediction_type: ``"v"`` or ``"eps"``.
+        num_steps:      Number of DDIM steps (typically cfg.cycle_ddim_steps).
+        eta:            DDIM stochasticity (0 = deterministic).
+
+    Returns:
+        Denoised latent estimate z0 (N, 4, 32, 32).
     """
     z_t = z_t_start
     steps = max(1, int(num_steps))
@@ -184,10 +230,32 @@ def _compute_cycle_loss(
     cycle_ddim_eta: float,
 ) -> torch.Tensor:
     """
-    Compute cycle consistency loss using shared (epsilon, t) from primary passes.
+    Compute latent-space cycle-consistency loss using shared (epsilon, t).
 
-    rec_A = G(fake_B.detach(), A, same noise_A, same t_A)
-    rec_B = G(fake_A.detach(), B, same noise_B, same t_B)
+    Builds noisy versions of the fake latents using the same noise and
+    timesteps as the primary forward pass, then denoises back via short
+    DDIM to obtain reconstructions:
+
+        rec_A = G(z_t(fake_B), condition=fake_B_img, domain=A)
+        rec_B = G(z_t(fake_A), condition=fake_A_img, domain=B)
+
+    Loss = L1(rec_A, z0_A) + L1(rec_B, z0_B).
+
+    Args:
+        model:            CycleDiTGenerator.
+        scheduler:        DDPMScheduler.
+        z0_A, z0_B:       Clean VAE latents for real_A and real_B.
+        z0_fake_B, z0_fake_A: x0 predictions from the primary forward pass.
+        noise_A, noise_B: Noise tensors used in the primary forward pass.
+        t_A, t_B:         Timesteps used in the primary forward pass.
+        fake_B_img, fake_A_img: Decoded fake images used as conditions.
+        real_A, real_B:   Unused (reserved for future extensions).
+        prediction_type:  ``"v"`` or ``"eps"``.
+        cycle_ddim_steps: DDIM steps for the short reverse path.
+        cycle_ddim_eta:   DDIM eta (0 = deterministic).
+
+    Returns:
+        Scalar cycle-consistency loss tensor.
     """
     z_t_rec_A = scheduler.add_noise(z0_fake_B.detach(), noise_A, t_A)
     z_t_rec_B = scheduler.add_noise(z0_fake_A.detach(), noise_B, t_B)
@@ -230,9 +298,24 @@ def _compute_identity_loss(
     prediction_type: str,
 ) -> torch.Tensor:
     """
-    Compute identity loss in latent space.
+    Compute latent-space identity loss at t=0.
 
-    Identity at t=0, epsilon=0: model should output minimal change in same domain.
+    Passes clean latents through the model with t=0 and same-domain
+    conditioning.  At t=0 the model should predict minimal change, so
+    the x0_pred should be close to the input z0:
+
+        loss = L1(x0_pred_A, z0_A) + L1(x0_pred_B, z0_B)
+
+    Args:
+        model:          CycleDiTGenerator.
+        scheduler:      DDPMScheduler (used to derive x0_pred).
+        z0_A, z0_B:     Clean VAE latents for real_A and real_B.
+        real_A, real_B: Conditioning images for same-domain passes.
+        device:         Device for the zero timestep tensor.
+        prediction_type: ``"v"`` or ``"eps"``.
+
+    Returns:
+        Scalar identity loss tensor.
     """
     b = z0_A.size(0)
     t_idt = torch.zeros(b, device=device, dtype=torch.long)
@@ -265,10 +348,23 @@ def _compute_identity_weight(
     epoch: int, num_epochs: int, l_start: float, l_end: float, decay_ratio: float
 ) -> float:
     """
-    Compute identity weight with linear decay.
+    Linearly decay the identity loss weight over the first portion of training.
 
-    Decays from l_start to l_end over first (decay_ratio * num_epochs) epochs,
-    then stays at l_end.
+    Schedule:
+        [0, decay_end_epoch)  — linear ramp from l_start to l_end
+        [decay_end_epoch, ∞)  — constant l_end
+
+    where decay_end_epoch = int(num_epochs * decay_ratio).
+
+    Args:
+        epoch:       Current epoch (0-indexed).
+        num_epochs:  Total training epochs.
+        l_start:     Initial identity weight.
+        l_end:       Final identity weight (typically 0.0).
+        decay_ratio: Fraction of training over which decay occurs.
+
+    Returns:
+        Float identity weight for the current epoch.
     """
     decay_end_epoch = int(num_epochs * decay_ratio)
     if epoch < decay_end_epoch:
@@ -295,20 +391,39 @@ def compute_diffusion_loss(
     perceptual_batch_fraction: float = 1.0,
 ) -> Tuple[Tensor, Tensor, float]:
     """
-    Compute diffusion training loss with an optional perceptual term.
+    Compute the diffusion denoising loss with an optional perceptual term.
 
-    Dataflow:
-        1) MSE prediction loss (optionally Min-SNR weighted):
-            - eps mode: mse(eps_pred, noise)
-            - v mode:   mse(v_pred, v_target)
-        2) Optional perceptual branch:
-            predict x0 -> decode to fake_B_pred -> perceptual(fake_B_pred, real_B)
-        3) total = mse + lambda_perc * perceptual
+    Pipeline:
+        1. MSE prediction loss (optionally Min-SNR weighted):
+               v-mode:   MSE(v_pred, v_target)
+               eps-mode: MSE(eps_pred, noise)
+        2. Optional perceptual branch (every perceptual_every_n_steps steps):
+               predict x0 -> VAE decode -> perceptual(fake_B_pred, real_B)
+        3. total = lambda_denoising * mse + lambda_perc * perceptual
+
+    Args:
+        z0:            Clean latent (N, 4, 32, 32).
+        z_t:           Noisy latent at timestep t (N, 4, 32, 32).
+        t:             Integer timesteps (N,).
+        noise:         Noise added to z0 to produce z_t (N, 4, 32, 32).
+        model_pred:    Model output — v_pred or eps_pred (N, 4, 32, 32).
+        real_B:        Target domain image for perceptual supervision
+                       (N, 3, 256, 256).
+        scheduler:     DDPMScheduler for v-target and x0 reconstruction.
+        vae:           VAEWrapper for decoding x0 to image space.
+        perceptual_loss: VGG perceptual loss module, or None to disable.
+        lambda_perc:   Weight for the perceptual term (0.0 = disabled).
+        prediction_type: ``"v"`` or ``"eps"``.
+        min_snr_gamma: Min-SNR loss weighting gamma (0.0 = disabled).
+        global_step:   Global training step counter for perceptual scheduling.
+        perceptual_every_n_steps: Run perceptual loss every N steps.
+        perceptual_batch_fraction: Fraction of the batch used for perceptual.
 
     Returns:
-        loss: total scalar tensor
-        loss_simple: scalar tensor (MSE term)
-        loss_perc_val: perceptual scalar as float (0.0 when disabled)
+        tuple:
+            loss       — total scalar tensor (MSE + perceptual).
+            loss_simple — MSE-only scalar tensor (logged separately).
+            loss_perc_val — perceptual scalar as float (0.0 when disabled).
     """
 
     noise = noise.to(dtype=model_pred.dtype)

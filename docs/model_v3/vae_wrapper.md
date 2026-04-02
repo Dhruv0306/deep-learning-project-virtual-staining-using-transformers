@@ -2,74 +2,62 @@
 
 Source of truth: ../../model_v3/vae_wrapper.py
 
-Role: Wraps AutoencoderKL encode/decode with Stable Diffusion latent scaling.
+This module wraps Stable Diffusion's `AutoencoderKL` for v3 latent diffusion
+training and inference.
 
----
+## Public Component
 
-## Component Structure
+- `VAEWrapper`
 
-1. VAEWrapper.__init__
-2. VAEWrapper.encode
-3. VAEWrapper.decode
+## `VAEWrapper`
 
----
+Behavior:
 
-## 1) __init__
+- loads the HuggingFace VAE identified by `model_id`
+- freezes all parameters
+- keeps the module in eval mode
+- uses the Stable Diffusion latent scaling convention of `0.18215`
 
-Input:
-- model_id string
+The wrapper caches the downloaded VAE checkpoint locally through the
+`diffusers`/`huggingface_hub` stack.
 
-Dataflow:
-1. load AutoencoderKL from pretrained source
-2. freeze parameters (requires_grad=False)
-3. set eval mode
-4. set latent_scale = 0.18215
-
-Output state:
-- ready wrapper with frozen VAE and scaling rule
-
----
-
-## 2) encode
+## `encode`
 
 Input:
-- x: (N,3,H,W), expected range [-1,1]
 
-Dataflow:
-1. clamp input to [-1,1]
-2. VAE encode distribution
-3. sample latent
-4. scale latent by 0.18215
+- image tensor `(N, 3, H, W)` in `[-1, 1]`
 
-Shape transitions (typical H=W=256):
-- (N,3,256,256) -> latent sample (N,4,32,32) -> scaled (N,4,32,32)
+Flow:
+
+1. clamp the image to `[-1, 1]`
+2. run VAE encoding
+3. sample from the latent distribution
+4. scale by `0.18215`
 
 Output:
-- z: (N,4,H/8,W/8)
 
----
+- scaled latent tensor `(N, 4, H/8, W/8)`
 
-## 3) decode
+## `decode`
 
 Input:
-- z: (N,4,h,w), expected scaled latent
 
-Dataflow:
-1. unscale latent by dividing 0.18215
+- scaled latent tensor `(N, 4, h, w)`
+
+Flow:
+
+1. divide by `0.18215`
 2. cast to float32
-3. VAE decode
-4. clamp output to [-1,1]
-
-Shape transitions (typical h=w=32):
-- (N,4,32,32) -> decoded (N,3,256,256) -> clamped (N,3,256,256)
+3. run VAE decoding
+4. clamp output to `[-1, 1]`
 
 Output:
-- img: (N,3,h*8,w*8)
 
----
+- image tensor `(N, 3, h*8, w*8)`
 
 ## Notes
 
-- Wrapper keeps VAE frozen by default.
-- Gradients can still flow through encode/decode unless caller wraps calls with no_grad.
-- Module raises informative ImportError when diffusers is unavailable.
+- The wrapper stays frozen and in eval mode.
+- Gradients can still flow through encode/decode if the caller does not use
+	`torch.no_grad()`.
+- An informative `ImportError` is raised when `diffusers` is unavailable.

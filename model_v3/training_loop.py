@@ -56,7 +56,16 @@ def _make_cosine_warmup_lambda(
     warmup: int, total: int, lr_min_ratio: float
 ) -> Callable[[int], float]:
     """
-    Cosine decay with linear warmup.
+    Return a LambdaLR multiplier with linear warmup then cosine decay.
+
+    Schedule:
+        [0, warmup)       — linear ramp from ~0 to 1
+        [warmup, total)   — cosine decay from 1 down to lr_min_ratio
+
+    Args:
+        warmup:       Number of warmup epochs.
+        total:        Total training epochs.
+        lr_min_ratio: Minimum LR as a fraction of the base LR.
     """
 
     def lr_lambda(epoch: int) -> float:
@@ -72,6 +81,11 @@ def _make_cosine_warmup_lambda(
 
 
 def _global_grad_norm(parameters) -> float:
+    """
+    Compute the global L2 gradient norm across all parameters with a grad.
+
+    Returns a plain Python float for logging (no clipping applied).
+    """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
         return 0.0
@@ -79,6 +93,7 @@ def _global_grad_norm(parameters) -> float:
 
 
 def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
+    """Enable or disable gradient computation for all parameters in module."""
     for p in module.parameters():
         p.requires_grad = flag
 
@@ -102,6 +117,39 @@ def _run_validation_v3(
     cfg_scale: float = 1.0,
     is_test: bool = False,
 ):
+    """
+    Run one validation (or test) pass and save comparison image grids.
+
+    Generates fake_B (A→B) for every batch up to max_batches, computes
+    SSIM/PSNR for both domains, and optionally computes FID when enough
+    samples are available.  For the first num_samples batches, also
+    generates fake_A (B→A) and cycle reconstructions and saves 4-panel
+    PNG grids to save_dir.
+
+    Args:
+        epoch:          Current epoch number (used for TensorBoard and filenames).
+        ema_model:      EMA copy of CycleDiTGenerator in eval mode.
+        vae:            Frozen VAEWrapper for decoding latents.
+        sampler:        DDIMSampler instance.
+        test_loader:    DataLoader yielding {"A": tensor, "B": tensor} dicts.
+        device:         Inference device.
+        save_dir:       Directory for comparison PNG grids.
+        calculator:     MetricsCalculator for SSIM/PSNR/FID.
+        num_steps:      DDIM inference steps.
+        writer:         TensorBoard SummaryWriter.
+        max_batches:    Maximum batches to evaluate.
+        num_samples:    Number of image grids to save.
+        fid_max_samples: Maximum samples used for FID.
+        fid_min_samples: Minimum samples required to compute FID.
+        prediction_type: ``"v"`` or ``"eps"``.
+        cfg_scale:      Classifier-free guidance scale.
+        is_test:        If True, logs under ``Testing`` prefix and always
+                        attempts FID regardless of sample count.
+
+    Returns:
+        Dict with keys ``ssim_A``, ``psnr_A``, ``ssim_B``, ``psnr_B``
+        (and optionally ``fid_A``, ``fid_B``).
+    """
     ema_model.eval()
     vae.eval()
 
@@ -288,15 +336,39 @@ def train_v3(
     cfg: Optional[UVCGANConfig] = None,
 ):
     """
-    Train v3 latent diffusion model (DiT + condition tokenizer + frozen VAE).
+    Train the v3 CycleDiT latent diffusion model.
+
+    Builds the DiT backbone, frozen VAE, dual ProjectionDiscriminators,
+    DDPM scheduler, and EMA model, then runs the two-stage per-batch loop:
+
+        Stage 1 — diffusion denoising loss (MSE ± Min-SNR ± perceptual).
+        Stage 2 — adversarial + cycle-consistency + identity losses on a
+                   fresh forward pass to allow Stage 1 activations to be
+                   freed before the larger Stage 2 graph is built.
+
+    Discriminators are updated after the generator step using replay
+    buffers and optional R1 gradient penalty.
+
+    Any argument that is not None overrides the corresponding field in cfg
+    before training begins.
 
     Args:
-        epoch_size, num_epochs, model_dir, val_dir, test_size: optional
-            overrides for corresponding config fields.
-        cfg: full ``UVCGANConfig`` configured for model_version=3.
+        epoch_size:         Samples per epoch (overrides cfg.training.epoch_size).
+        num_epochs:         Total epochs (overrides cfg.training.num_epochs).
+        model_dir:          Root output directory for checkpoints and logs.
+        val_dir:            Directory for per-epoch validation image grids.
+        test_size:          Test samples exported at end of training.
+        resume_checkpoint:  Path to a v3 ``.pth`` checkpoint to resume from.
+                            Must contain ``dit_state_dict``.
+        cfg:                UVCGANConfig with model_version=3.  Defaults to
+                            ``get_dit_8gb_config()`` when None.
 
     Returns:
-        tuple: ``(history, dit_model, ema_model, cond_tokenizer)``.
+        tuple: ``(history, dit_model, ema_model, None)``
+            - history:   Full training history reloaded from CSV.
+            - dit_model: Trained CycleDiTGenerator (raw weights).
+            - ema_model: EMA copy of the generator.
+            - None:      Placeholder for API compatibility with v1/v2/v4.
     """
     if cfg is None:
         cfg = get_dit_8gb_config()

@@ -145,6 +145,7 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
             ``"cuda"``.
         model_version (int): ``1`` loads :class:`~model_v1.generator.ViTUNetGenerator`;
             ``2`` loads :class:`~model_v2.generator.ViTUNetGeneratorV2`.
+            For v3 use :func:`load_v3_components`; for v4 use :func:`load_v4_model`.
 
     Returns:
         tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` — both in ``eval()``

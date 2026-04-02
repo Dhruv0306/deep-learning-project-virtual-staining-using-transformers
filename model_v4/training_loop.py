@@ -134,11 +134,17 @@ def _run_validation_v4(
         num_samples: Number of image grids to save.
         calculator:  MetricsCalculator instance for SSIM/PSNR.
         max_batches: Maximum number of batches to evaluate.
+        fid_max_samples: Maximum samples used for FID computation.
+        fid_min_samples: Minimum samples required to compute FID; skipped
+                     if fewer are available (unless ``is_test`` is True).
         writer:      Optional TensorBoard SummaryWriter.
+        is_test:     If True, logs under the ``Testing`` prefix and always
+                     attempts FID regardless of sample count.
 
     Returns:
         Dict with keys ``ssim_A``, ``psnr_A``, ``ssim_B``, ``psnr_B``
-        containing epoch-averaged metric values.
+        (and optionally ``fid_A``, ``fid_B``) containing epoch-averaged
+        metric values.
     """
     G_AB.eval()
     G_BA.eval()
@@ -282,9 +288,14 @@ def train_v4(
 
     Returns:
         tuple: (history, G_AB, G_BA, D_A, D_B)
-            - history: nested dict keyed by epoch → batch index → loss scalars.
-            - G_AB, G_BA: trained generator modules.
+            - history: dict keyed by epoch number, each value is a dict
+              keyed by batch index containing per-batch loss scalars.
+            - G_AB, G_BA: trained generator modules (raw weights).
             - D_A, D_B:   trained discriminator modules.
+
+        EMA weights (if ``cfg.training.use_ema`` is True) are saved in the
+        checkpoint under ``ema_G_AB_state_dict`` / ``ema_G_BA_state_dict``
+        but are not returned directly; use the checkpoint for inference.
     """
     if cfg is None:
         cfg = V4Config()

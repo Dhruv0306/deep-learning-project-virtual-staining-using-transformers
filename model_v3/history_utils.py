@@ -19,7 +19,13 @@ import pandas as pd
 
 
 def save_history_to_csv_v3(history, filename):
-    """Save v3 training history to a CSV file."""
+    """
+    Save the full v3 training history dict to a CSV file (overwrites).
+
+    Args:
+        history:  Nested dict keyed by epoch -> batch -> loss scalars.
+        filename: Output CSV path.
+    """
     flattened = _flatten_history(history)
     df = pd.DataFrame(flattened)
     df.to_csv(filename, index=False)
@@ -27,7 +33,17 @@ def save_history_to_csv_v3(history, filename):
 
 
 def append_history_to_csv_v3(history, filename):
-    """Append v3 training history to a CSV file."""
+    """
+    Append a v3 training history chunk to an existing CSV file.
+
+    Creates the file with a header if it does not yet exist.  Used during
+    training to flush history every N epochs without holding the full
+    history dict in memory.
+
+    Args:
+        history:  Nested dict keyed by epoch -> batch -> loss scalars.
+        filename: CSV path to append to.
+    """
     if not history:
         return
 
@@ -42,7 +58,20 @@ def append_history_to_csv_v3(history, filename):
 
 
 def load_history_from_csv_v3(filename):
-    """Load v3 training history from CSV (Phase 2 schema)."""
+    """
+    Reload a v3 training history dict from a CSV file.
+
+    Reconstructs the nested epoch -> batch -> loss dict from the Phase 2
+    CSV schema.  Missing columns default to 0.0 for backward compatibility
+    with older checkpoints.
+
+    Args:
+        filename: Path to the CSV written by save/append helpers.
+
+    Returns:
+        Nested dict keyed by epoch (int) -> batch (int) -> loss scalars,
+        or an empty dict if the file does not exist or is empty.
+    """
     if not os.path.exists(filename):
         return {}
 
@@ -78,7 +107,18 @@ def load_history_from_csv_v3(filename):
 
 
 def visualize_history_v3(history, model_dir=None):
-    """Plot v3 training history charts and save a PNG."""
+    """
+    Plot v3 training history and save a 3×3 PNG figure.
+
+    Produces one subplot per loss component (denoising A2B/B2A/combined,
+    adversarial, cycle, identity, discriminator A/B, gradient norm).
+    The figure is saved to ``model_dir/training_history.png``.
+
+    Args:
+        history:   Nested dict keyed by epoch -> batch -> loss scalars.
+        model_dir: Output directory.  Defaults to the standard v3 models
+                   path when None.
+    """
     if not history:
         print("No training history to visualize.")
         return
@@ -199,6 +239,12 @@ def visualize_history_v3(history, model_dir=None):
 
 
 def _flatten_history(history):
+    """
+    Flatten a nested epoch -> batch -> loss dict into a list of row dicts.
+
+    Each row contains ``Epoch``, ``Batch``, and all loss scalar keys from
+    the batch dict, suitable for constructing a pandas DataFrame.
+    """
     flattened = []
     for epoch, batches in history.items():
         for batch, losses in batches.items():

@@ -2,123 +2,64 @@
 
 Source of truth: ../../model_v3/history_utils.py
 
-Role: Save, append, reload, and visualize Phase 2 v3 training history.
+Utilities for saving, loading, appending, and visualizing v3 training history.
 
----
+## Public Functions
 
-## Component Structure
+1. `save_history_to_csv_v3`
+2. `append_history_to_csv_v3`
+3. `load_history_from_csv_v3`
+4. `visualize_history_v3`
+5. `_flatten_history`
 
-1. save_history_to_csv_v3
-2. append_history_to_csv_v3
-3. load_history_from_csv_v3
-4. visualize_history_v3
-5. _flatten_history
+## History Schema
 
----
+The current v3 history stores per-batch values for:
 
-## Shared Data Structure
+- `Loss_DiT_A2B`
+- `Loss_DiT_B2A`
+- `Loss_DiT`
+- `Loss_G_Adv`
+- `Loss_Cyc`
+- `Loss_Id`
+- `Loss_D_A`
+- `Loss_D_B`
+- `Lambda_Adv`
+- `Lambda_Id`
+- `Loss_Perceptual`
+- `Loss Total`
+- `GradNorm`
 
-In-memory history:
-- history[epoch][batch] -> dict with keys:
-  - Batch
-   - Loss_DiT_A2B
-   - Loss_DiT_B2A
-   - Loss_DiT
-   - Loss_G_Adv
-   - Loss_Cyc
-   - Loss_Id
-   - Loss_D_A
-   - Loss_D_B
-   - Lambda_Adv
-   - Lambda_Id
-  - Loss_Perceptual
-   - Loss Total
-  - GradNorm
+Each row in the flattened CSV also includes `Epoch` and `Batch`.
 
-Flattened row schema:
-- Epoch, Batch, Loss_DiT_A2B, Loss_DiT_B2A, Loss_DiT, Loss_G_Adv, Loss_Cyc, Loss_Id,
-   Loss_D_A, Loss_D_B, Lambda_Adv, Lambda_Id, Loss_Perceptual, Loss Total, GradNorm
+## `save_history_to_csv_v3`
 
----
+Overwrites the target CSV with the full flattened history.
 
-## 1) save_history_to_csv_v3
+## `append_history_to_csv_v3`
 
-Input:
-- history dict
-- filename
+Appends a history chunk to an existing CSV and writes a header if the file is
+new or empty.
 
-Dataflow:
-1. _flatten_history(history) -> list of row dicts length M
-2. pandas DataFrame from rows -> shape (M,15)
-3. write CSV
+## `load_history_from_csv_v3`
 
-Output:
-- CSV file with Phase 2 columns
+Reconstructs the nested epoch -> batch dictionary from the CSV on disk.
+Missing columns fall back to `0.0` for backward compatibility.
 
----
+## `visualize_history_v3`
 
-## 2) append_history_to_csv_v3
+Builds a 3x3 training plot and saves it to `training_history.png`.
 
-Input:
-- history chunk dict
-- filename
+Plotted series include:
 
-Dataflow:
-1. if history empty -> return
-2. flatten to rows length K
-3. DataFrame shape (K,15)
-4. append mode write, with header only when file missing/empty
+- denoising A2B, B2A, and combined
+- adversarial, cycle, and identity losses
+- discriminator A and B losses
+- perceptual loss
+- total loss
+- gradient norm
 
-Output:
-- CSV appended with K rows
+## `_flatten_history`
 
----
-
-## 3) load_history_from_csv_v3
-
-Input:
-- filename
-
-Dataflow:
-1. read CSV to DataFrame shape (R,15)
-2. iterate each row
-3. rebuild nested structure history[epoch][batch] with all Phase 2 fields
-
-Output:
-- reconstructed history dict
-
----
-
-## 4) visualize_history_v3
-
-Input:
-- history dict
-- optional model_dir
-
-Dataflow:
-1. collect sorted epoch list, length E
-2. per epoch, aggregate batch values for all key losses and grad norm
-3. compute per-epoch means for:
-   - denoising A2B/B2A/combined
-   - generator adversarial, cycle, identity
-   - discriminator A/B
-   - perceptual, total, grad norm
-4. plot 3x3 grid (9 subplots)
-5. save figure as training_history.png
-
-Output:
-- PNG figure saved to model directory
-
----
-
-## 5) _flatten_history
-
-Input:
-- nested history dict
-
-Dataflow:
-1. iterate epochs and batches
-2. build row dict per batch
-
-Output:
-- list of row dicts, length = total batches across all epochs
+Converts the nested dictionary structure into a flat list of row dictionaries
+ready for pandas DataFrame construction.
