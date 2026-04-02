@@ -111,6 +111,8 @@ class MetricsCalculator:
             numpy.ndarray: Feature vectors from InceptionV3.
         """
         with torch.no_grad():
+            # Keep input tensor on the same device/dtype as Inception weights.
+            images = images.to(self.device, dtype=torch.float32, non_blocking=True)
             # Denormalize from [-1, 1] to [0, 1], then normalize for Inception.
             images = (images + 1) / 2.0
             images = self.inception_transform(images)
