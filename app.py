@@ -316,8 +316,8 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     if state_ab is None or state_ba is None:
         raise KeyError("Checkpoint missing v4 generator state dicts.")
 
-    # For legacy checkpoints without a stored config, refine shape-visible fields
-    # from the state dict (base_channels, num_res_blocks, use_transformer_encoder).
+    # For legacy checkpoints without a stored config, infer all shape-visible
+    # fields from the state dict so model construction matches the saved weights.
     if not isinstance(ckpt_config, V4ModelConfig):
         inferred = _infer_v4_kwargs(state_ab, mcfg)
         mcfg = dataclasses.replace(
@@ -326,6 +326,12 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
             num_res_blocks=inferred.get("num_res_blocks", mcfg.num_res_blocks),
             use_transformer_encoder=inferred.get(
                 "use_transformer_encoder", mcfg.use_transformer_encoder
+            ),
+            patch_size=inferred.get("patch_size", mcfg.patch_size),
+            encoder_dim=inferred.get("encoder_dim", mcfg.encoder_dim),
+            encoder_depth=inferred.get("encoder_depth", mcfg.encoder_depth),
+            encoder_mlp_ratio=inferred.get(
+                "encoder_mlp_ratio", mcfg.encoder_mlp_ratio
             ),
         )
 
