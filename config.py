@@ -350,7 +350,7 @@ def get_8gb_config() -> UVCGANConfig:
     cfg = UVCGANConfig(model_version=2)
 
     # --- Gradient checkpointing ---
-    # Disabled based on measured memory headroom to keep training faster.
+    # Enabled to save activation memory during the Transformer backward pass.
     cfg.generator.use_gradient_checkpointing = True
 
     # --- ViT depth ---
@@ -361,10 +361,10 @@ def get_8gb_config() -> UVCGANConfig:
     # Kept at 3 (full multi-scale) for stability/quality.
     cfg.discriminator.num_scales = 3
 
-    # --- Batch size: 4 -> 1, with gradient accumulation to compensate ---
-    # batch_size=1 quarters activation memory. accumulate_grads=4 means the
-    # optimiser steps every 4 batches, so the effective gradient batch is
-    # still 4. Loss scaling is handled in model_v2/training_loop.
+    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
+    # batch_size=2 halves activation memory. accumulate_grads=2 means the
+    # optimiser steps every 2 batches, keeping the effective gradient batch
+    # at 4. Loss scaling is handled in model_v2/training_loop.
     cfg.data.batch_size = 2
     cfg.training.accumulate_grads = 2
 
@@ -417,10 +417,23 @@ def get_dit_config() -> UVCGANConfig:
 
 def get_dit_8gb_config() -> UVCGANConfig:
     """
-    Return a VRAM-optimised config for v3 diffusion training.
+    Return a config for v3 diffusion training tuned for 8 GB GPUs.
 
-    Relative to :func:`get_dit_config`, this profile enables gradient
-    checkpointing for DiT blocks and uses a lighter validation setup.
+    Relative to :func:`get_dit_config`, this profile uses a larger DiT
+    (hidden_dim=512, depth=8, heads=8) but pairs it with gradient
+    checkpointing, AMP, a reduced batch size, and a lightweight validation
+    setup to stay within 8 GB VRAM.
+
+    DiT size notes:
+        hidden_dim=512, depth=8, and heads=8 increase model capacity. Combined
+        with gradient checkpointing this is still trainable on 8 GB; reduce
+        these values if OOM is observed.
+
+    Discriminator notes:
+        disc_use_global=True keeps the global branch active.
+        disc_base_channels=64 matches the default channel width.
+        disc_use_fft=False disables the FFT discriminator, which is the
+        primary memory saving relative to a fully featured setup.
     """
     cfg = UVCGANConfig(model_version=3)
     cfg.diffusion.dit_hidden_dim = 512
@@ -450,16 +463,12 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = (
-        False  # FFT discriminator is memory-intensive; disable for 8 GB
-    )
-    cfg.diffusion.disc_use_global = True  # Disable global branch to save memory
+    cfg.diffusion.disc_use_fft = False  # FFT discriminator is memory-intensive; disable
+    cfg.diffusion.disc_use_global = True  # Keep global discriminator branch active
     cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
-    cfg.diffusion.disc_base_channels = 64  # Reduce base channels further to save memory
-    cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)
-    cfg.diffusion.disc_n_layers = (
-        3  # Reduce layers in each discriminator to save memory
-    )
+    cfg.diffusion.disc_base_channels = 64  # Standard channel width
+    cfg.diffusion.disc_global_base_channels = 16
+    cfg.diffusion.disc_n_layers = 3
 
     return cfg
 

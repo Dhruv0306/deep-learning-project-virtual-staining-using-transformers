@@ -174,10 +174,13 @@ def _run_validation_v4(
             for key, value in batch_metrics.items():
                 metrics[key].append(float(value))
 
-            real_A_list.append(real_A)
-            real_B_list.append(real_B)
-            fake_A_list.append(fake_A)
-            fake_B_list.append(fake_B)
+            # Detach and move to CPU immediately to avoid retaining GPU tensors
+            # for the full validation loop (prevents OOM on long validation runs).
+            if sum(t.shape[0] for t in real_A_list) < fid_max_samples:
+                real_A_list.append(real_A.detach().cpu())
+                real_B_list.append(real_B.detach().cpu())
+                fake_A_list.append(fake_A.detach().cpu())
+                fake_B_list.append(fake_B.detach().cpu())
 
             if i < num_samples:
                 row_A = torch.cat(
@@ -212,29 +215,32 @@ def _run_validation_v4(
     }
 
     # Optional FID (domain A and B) if enough samples are collected.
-    fid_count = min(fid_max_samples, len(real_B_list))
-    if (
-        fid_count >= fid_min_samples
-        or is_test
-        or (fid_count < fid_min_samples and epoch % 10 == 0)
-    ) and fid_count > 0:
-        real_B_tensor = torch.cat(real_B_list[:fid_count])
-        fake_B_tensor = torch.cat(fake_B_list[:fid_count])
-        avg_metrics["fid_B"] = float(
-            calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
-        )
+    # Tensors are already on CPU; concatenate and slice to an exact image count.
+    if real_B_list:
+        real_B_all = torch.cat(real_B_list)[:fid_max_samples]
+        fake_B_all = torch.cat(fake_B_list)[:fid_max_samples]
+        n_B = real_B_all.shape[0]
+        if (
+            n_B >= fid_min_samples
+            or is_test
+            or (n_B < fid_min_samples and epoch % 10 == 0)
+        ):
+            avg_metrics["fid_B"] = float(
+                calculator.evaluate_fid(real_B_all, fake_B_all)
+            )
 
-    fid_count_A = min(fid_max_samples, len(real_A_list))
-    if (
-        fid_count_A >= fid_min_samples
-        or is_test
-        or (fid_count_A < fid_min_samples and epoch % 10 == 0)
-    ) and fid_count_A > 0:
-        real_A_tensor = torch.cat(real_A_list[:fid_count_A])
-        fake_A_tensor = torch.cat(fake_A_list[:fid_count_A])
-        avg_metrics["fid_A"] = float(
-            calculator.evaluate_fid(real_A_tensor, fake_A_tensor)
-        )
+    if real_A_list:
+        real_A_all = torch.cat(real_A_list)[:fid_max_samples]
+        fake_A_all = torch.cat(fake_A_list)[:fid_max_samples]
+        n_A = real_A_all.shape[0]
+        if (
+            n_A >= fid_min_samples
+            or is_test
+            or (n_A < fid_min_samples and epoch % 10 == 0)
+        ):
+            avg_metrics["fid_A"] = float(
+                calculator.evaluate_fid(real_A_all, fake_A_all)
+            )
 
     prefix = "Testing" if is_test else "Validation"
     if writer is not None:
@@ -610,8 +616,8 @@ def train_v4(
                         num_patches=tcfg.nce_num_patches,
                         patch_ids=patch_ids_B,
                     )
-                    loss_nce_AB = nce_criterion(patches_fake_B, patches_real_A)
-                    loss_nce_BA = nce_criterion(patches_fake_A, patches_real_B)
+                    loss_nce_AB = nce_criterion(patches_fake_B, patches_real_A, layer_ids=nce_layers)
+                    loss_nce_BA = nce_criterion(patches_fake_A, patches_real_B, layer_ids=nce_layers)
                     loss_nce = 0.5 * (loss_nce_AB + loss_nce_BA)
 
                 loss_id = torch.tensor(0.0, device=device)

@@ -27,10 +27,13 @@ def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
     """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for sin/cos positional embedding.")
-    omega = torch.arange(embed_dim // 2, device=pos.device, dtype=pos.dtype)
+    # Always compute in float32 for numerical stability; 10000**(k/D) can
+    # underflow/overflow in float16, and sin/cos accuracy degrades under AMP.
+    pos_f32 = pos.float()
+    omega = torch.arange(embed_dim // 2, device=pos.device, dtype=torch.float32)
     omega = 1.0 / (10000 ** (omega / (embed_dim / 2)))
-    out = pos[:, None] * omega[None, :]
-    return torch.cat([torch.sin(out), torch.cos(out)], dim=1)
+    out = pos_f32[:, None] * omega[None, :]
+    return torch.cat([torch.sin(out), torch.cos(out)], dim=1).to(pos.dtype)
 
 
 def _get_2d_sincos_pos_embed(
@@ -54,12 +57,13 @@ def _get_2d_sincos_pos_embed(
     """
     if embed_dim % 2 != 0:
         raise ValueError("embed_dim must be even for 2D sin/cos positional embedding.")
-    grid_h = torch.arange(height, device=device, dtype=dtype)
-    grid_w = torch.arange(width, device=device, dtype=dtype)
+    # Always compute position grids in float32 for numerical stability under AMP.
+    grid_h = torch.arange(height, device=device, dtype=torch.float32)
+    grid_w = torch.arange(width, device=device, dtype=torch.float32)
     grid = torch.meshgrid(grid_h, grid_w, indexing="ij")
     embed_h = _get_1d_sincos_pos_embed(embed_dim // 2, grid[0].reshape(-1))
     embed_w = _get_1d_sincos_pos_embed(embed_dim // 2, grid[1].reshape(-1))
-    return torch.cat([embed_h, embed_w], dim=1)
+    return torch.cat([embed_h, embed_w], dim=1).to(dtype)
 
 
 class PatchEmbed(nn.Module):
@@ -143,7 +147,8 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        normed = self.norm1(x)
+        attn_out, _ = self.attn(normed, normed, normed)
         x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x
