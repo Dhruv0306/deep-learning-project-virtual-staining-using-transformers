@@ -39,6 +39,7 @@ Outputs are written to:
 
 import os
 import math
+import dataclasses
 
 import torch
 import torchvision.transforms as transforms
@@ -262,8 +263,13 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     Load v4 generators from a checkpoint, auto-detecting the architecture.
 
     Prefers EMA weights (``ema_G_AB_state_dict`` / ``ema_G_BA_state_dict``) and
-    falls back to the raw generator weights when EMA is not present.  Architecture
-    hyperparameters are inferred from the state dict via :func:`_infer_v4_kwargs`.
+    falls back to the raw generator weights when EMA is not present.
+
+    Architecture hyperparameters are loaded from the ``"config"`` key stored in
+    the checkpoint (a ``V4ModelConfig`` saved by ``train_v4``).  For older
+    checkpoints that do not contain this key the function falls back to
+    :func:`~config.get_v4_8gb_config` and additionally attempts to infer
+    shape-visible fields via :func:`_infer_v4_kwargs`.
 
     Args:
         checkpoint_path: Path to a ``.pth`` checkpoint saved by ``train_v4``.
@@ -276,11 +282,28 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     Raises:
         KeyError: If neither EMA nor raw generator state dicts are found.
     """
-    from config import get_v4_8gb_config
+    from config import V4ModelConfig, get_v4_8gb_config
     from model_v4.generator import getGeneratorV4
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    cfg = get_v4_8gb_config()
+
+    # Prefer the config saved at training time; fall back to the 8 GB preset for
+    # legacy checkpoints that pre-date config persistence.
+    ckpt_config = checkpoint.get("config")
+    if isinstance(ckpt_config, V4ModelConfig):
+        mcfg = ckpt_config
+    else:
+        if ckpt_config is not None:
+            print(
+                f"[warn] load_v4_model: checkpoint 'config' has unexpected type "
+                f"{type(ckpt_config).__name__!r}; falling back to get_v4_8gb_config()."
+            )
+        else:
+            print(
+                "[warn] load_v4_model: checkpoint has no 'config' key; "
+                "falling back to get_v4_8gb_config() for legacy checkpoint."
+            )
+        mcfg = get_v4_8gb_config().model
 
     def _pick_state(ema_key: str, raw_key: str):
         state = checkpoint.get(ema_key)
@@ -293,46 +316,49 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     if state_ab is None or state_ba is None:
         raise KeyError("Checkpoint missing v4 generator state dicts.")
 
-    inferred = _infer_v4_kwargs(state_ab, cfg.model)
+    # For legacy checkpoints without a stored config, refine shape-visible fields
+    # from the state dict (base_channels, num_res_blocks, use_transformer_encoder).
+    if not isinstance(ckpt_config, V4ModelConfig):
+        inferred = _infer_v4_kwargs(state_ab, mcfg)
+        mcfg = dataclasses.replace(
+            mcfg,
+            base_channels=inferred.get("base_channels", mcfg.base_channels),
+            num_res_blocks=inferred.get("num_res_blocks", mcfg.num_res_blocks),
+            use_transformer_encoder=inferred.get(
+                "use_transformer_encoder", mcfg.use_transformer_encoder
+            ),
+        )
 
     G_AB = getGeneratorV4(
-        input_nc=cfg.model.input_nc,
-        output_nc=cfg.model.output_nc,
-        base_channels=inferred.get("base_channels", cfg.model.base_channels),
-        num_res_blocks=inferred.get("num_res_blocks", cfg.model.num_res_blocks),
-        use_transformer_encoder=inferred.get(
-            "use_transformer_encoder", cfg.model.use_transformer_encoder
-        ),
+        input_nc=mcfg.input_nc,
+        output_nc=mcfg.output_nc,
+        base_channels=mcfg.base_channels,
+        num_res_blocks=mcfg.num_res_blocks,
+        use_transformer_encoder=mcfg.use_transformer_encoder,
         image_size=image_size,
-        patch_size=inferred.get("patch_size", cfg.model.patch_size),
-        encoder_dim=inferred.get("encoder_dim", cfg.model.encoder_dim),
-        encoder_depth=inferred.get("encoder_depth", cfg.model.encoder_depth),
-        encoder_heads=cfg.model.encoder_heads,
-        encoder_mlp_ratio=inferred.get(
-            "encoder_mlp_ratio", cfg.model.encoder_mlp_ratio
-        ),
-        encoder_dropout=cfg.model.encoder_dropout,
+        patch_size=mcfg.patch_size,
+        encoder_dim=mcfg.encoder_dim,
+        encoder_depth=mcfg.encoder_depth,
+        encoder_heads=mcfg.encoder_heads,
+        encoder_mlp_ratio=mcfg.encoder_mlp_ratio,
+        encoder_dropout=mcfg.encoder_dropout,
         use_gradient_checkpointing=False,
         device=torch.device(device),
         run_smoke_test=False,
     )
     G_BA = getGeneratorV4(
-        input_nc=cfg.model.output_nc,
-        output_nc=cfg.model.input_nc,
-        base_channels=inferred.get("base_channels", cfg.model.base_channels),
-        num_res_blocks=inferred.get("num_res_blocks", cfg.model.num_res_blocks),
-        use_transformer_encoder=inferred.get(
-            "use_transformer_encoder", cfg.model.use_transformer_encoder
-        ),
+        input_nc=mcfg.output_nc,
+        output_nc=mcfg.input_nc,
+        base_channels=mcfg.base_channels,
+        num_res_blocks=mcfg.num_res_blocks,
+        use_transformer_encoder=mcfg.use_transformer_encoder,
         image_size=image_size,
-        patch_size=inferred.get("patch_size", cfg.model.patch_size),
-        encoder_dim=inferred.get("encoder_dim", cfg.model.encoder_dim),
-        encoder_depth=inferred.get("encoder_depth", cfg.model.encoder_depth),
-        encoder_heads=cfg.model.encoder_heads,
-        encoder_mlp_ratio=inferred.get(
-            "encoder_mlp_ratio", cfg.model.encoder_mlp_ratio
-        ),
-        encoder_dropout=cfg.model.encoder_dropout,
+        patch_size=mcfg.patch_size,
+        encoder_dim=mcfg.encoder_dim,
+        encoder_depth=mcfg.encoder_depth,
+        encoder_heads=mcfg.encoder_heads,
+        encoder_mlp_ratio=mcfg.encoder_mlp_ratio,
+        encoder_dropout=mcfg.encoder_dropout,
         use_gradient_checkpointing=False,
         device=torch.device(device),
         run_smoke_test=False,

@@ -772,6 +772,7 @@ def train_v4(
             torch.save(
                 {
                     "epoch": epoch + 1,
+                    "config": mcfg,
                     "G_AB_state_dict": G_AB.state_dict(),
                     "G_BA_state_dict": G_BA.state_dict(),
                     "D_A_state_dict": D_A.state_dict(),
