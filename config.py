@@ -226,11 +226,11 @@ class DiffusionConfig:
     lambda_denoising: float = 1.0
     lambda_adv_v3: float = 0.5
     lambda_adv_warmup_steps: int = 3000
-    lambda_cycle_v3: float = 5.0
-    lambda_identity_v3_start: float = 1.0
+    lambda_cycle_v3: float = 10.0
+    lambda_identity_v3_start: float = 5.0
     lambda_identity_v3_end: float = 0.0
     identity_decay_end_ratio: float = 0.3
-    cycle_ddim_steps: int = 10
+    cycle_ddim_steps: int = 4
     cycle_ddim_eta: float = 0.0
     use_r1_penalty: bool = True
     r1_gamma: float = 10.0
@@ -421,9 +421,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
     checkpointing for DiT blocks and uses a lighter validation setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 256
-    cfg.diffusion.dit_depth = 4
-    cfg.diffusion.dit_heads = 4
+    cfg.diffusion.dit_hidden_dim = 512
+    cfg.diffusion.dit_depth = 8
+    cfg.diffusion.dit_heads = 8
     cfg.diffusion.dit_patch_size = 8
     cfg.diffusion.dit_mlp_ratio = 2.0
     cfg.diffusion.use_gradient_checkpointing = True
@@ -441,7 +441,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.data.batch_size = 2
     cfg.training.accumulate_grads = 2
     # Slightly higher worker count helps keep GPU fed on fast local SSDs.
-    cfg.data.num_workers = 2
+    cfg.data.num_workers = 4
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.0
@@ -451,7 +451,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.disc_use_fft = (
         False  # FFT discriminator is memory-intensive; disable for 8 GB
     )
-    cfg.diffusion.disc_use_global = False  # Disable global branch to save memory
+    cfg.diffusion.disc_use_global = True  # Disable global branch to save memory
     cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
     cfg.diffusion.disc_base_channels = 64  # Reduce base channels further to save memory
     cfg.diffusion.disc_global_base_channels = 16  # (unused if global branch disabled)

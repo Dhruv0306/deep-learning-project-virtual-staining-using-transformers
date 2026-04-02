@@ -538,9 +538,31 @@ def train_v3(
                 optimizer_G.zero_grad(set_to_none=True)
 
             # SPEC COMPLIANCE: Per Phase 2 spec, generator step comes before discriminator steps.
-            # Step order: Generator -> Discriminator A -> Discriminator B
+            # Step order: Generator -> Discriminator A -> Discriminator B.
+            # Split the generator update into two fresh forward/backward phases so
+            # diffusion activations can be released before the cycle/identity graph
+            # is constructed. This reduces peak VRAM without changing the number of
+            # optimizer steps per batch.
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
+
+            global_step = epoch * len(train_loader) + i
+            if dcfg.lambda_adv_warmup_steps > 0:
+                warm = min(1.0, global_step / float(dcfg.lambda_adv_warmup_steps))
+            else:
+                warm = 1.0
+            lambda_adv_curr = dcfg.lambda_adv_v3 * warm
+
+            # --- Phase 2: Cycle and Identity Losses ---
+            lambda_identity_curr = _compute_identity_weight(
+                epoch=epoch,
+                num_epochs=tcfg.num_epochs,
+                l_start=dcfg.lambda_identity_v3_start,
+                l_end=dcfg.lambda_identity_v3_end,
+                decay_ratio=dcfg.identity_decay_end_ratio,
+            )
+
+            # Stage 1: diffusion-only objective.
             with autocast("cuda", enabled=use_amp):
                 out_A2B = dit_model(
                     z_t_A,
@@ -572,7 +594,7 @@ def train_v3(
                 lambda_perc=dcfg.lambda_perceptual_v3,
                 prediction_type=dcfg.prediction_type,
                 min_snr_gamma=dcfg.min_snr_gamma,
-                global_step=(epoch * len(train_loader) + i),
+                global_step=global_step,
                 perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
                 perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
@@ -589,7 +611,7 @@ def train_v3(
                 lambda_perc=dcfg.lambda_perceptual_v3,
                 prediction_type=dcfg.prediction_type,
                 min_snr_gamma=dcfg.min_snr_gamma,
-                global_step=(epoch * len(train_loader) + i),
+                global_step=global_step,
                 perceptual_every_n_steps=dcfg.perceptual_every_n_steps,
                 perceptual_batch_fraction=dcfg.perceptual_batch_fraction,
             )
@@ -597,24 +619,41 @@ def train_v3(
             denoise_loss = 0.5 * (loss_A2B + loss_B2A)
             loss_simple = 0.5 * (loss_simple_A2B + loss_simple_B2A)
             loss_perc_val = 0.5 * (loss_perc_A2B + loss_perc_B2A)
+            loss_denoise = dcfg.lambda_denoising * denoise_loss
 
-            global_step = epoch * len(train_loader) + i
-            if dcfg.lambda_adv_warmup_steps > 0:
-                warm = min(1.0, global_step / float(dcfg.lambda_adv_warmup_steps))
-            else:
-                warm = 1.0
-            lambda_adv_curr = dcfg.lambda_adv_v3 * warm
+            if not torch.isfinite(loss_denoise):
+                print(
+                    f"[warn] non-finite diffusion loss at epoch {epoch+1} batch {i}, skipping"
+                )
+                optimizer_G.zero_grad(set_to_none=True)
+                accum_count = 0
+                _set_requires_grad(D_A, True)
+                _set_requires_grad(D_B, True)
+                continue
 
-            # --- Phase 2: Cycle and Identity Losses ---
-            lambda_identity_curr = _compute_identity_weight(
-                epoch=epoch,
-                num_epochs=tcfg.num_epochs,
-                l_start=dcfg.lambda_identity_v3_start,
-                l_end=dcfg.lambda_identity_v3_end,
-                decay_ratio=dcfg.identity_decay_end_ratio,
-            )
+            scaler.scale(loss_denoise / accumulate).backward()
 
+            del out_A2B, out_B2A, loss_A2B, loss_B2A
+
+            # Stage 2: adversarial, cycle, and identity losses on a fresh forward pass.
             with autocast("cuda", enabled=use_amp):
+                out_A2B = dit_model(
+                    z_t_A,
+                    t_A,
+                    real_A,
+                    target_domain=1,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
+                out_B2A = dit_model(
+                    z_t_B,
+                    t_B,
+                    real_B,
+                    target_domain=0,
+                    scheduler=scheduler,
+                    prediction_type=dcfg.prediction_type,
+                )
+
                 # Phase 2 rule: all non-denoising losses use x0 reconstructions.
                 z0_fake_B = out_A2B["x0_pred"]
                 z0_fake_A = out_B2A["x0_pred"]
@@ -631,7 +670,8 @@ def train_v3(
                 loss_cyc = _compute_cycle_loss(
                     model=dit_model,
                     scheduler=scheduler,
-                    vae=vae,
+                    z0_A=z0_A,
+                    z0_B=z0_B,
                     z0_fake_B=z0_fake_B,
                     z0_fake_A=z0_fake_A,
                     noise_A=noise_A,
@@ -654,7 +694,6 @@ def train_v3(
                     loss_id = _compute_identity_loss(
                         model=dit_model,
                         scheduler=scheduler,
-                        vae=vae,
                         z0_A=z0_A,
                         z0_B=z0_B,
                         real_A=real_A,
@@ -663,22 +702,25 @@ def train_v3(
                         prediction_type=dcfg.prediction_type,
                     )
 
-            # Total generator loss: denoising + adversarial + cycle + identity
-            loss = (
-                dcfg.lambda_denoising * denoise_loss
-                + lambda_adv_curr * loss_adv_G
+            aux_loss = (
+                lambda_adv_curr * loss_adv_G
                 + dcfg.lambda_cycle_v3 * loss_cyc
                 + lambda_identity_curr * loss_id
             )
 
-            if not torch.isfinite(loss):
-                print(f"[warn] non-finite loss at epoch {epoch+1} batch {i}, skipping")
+            if not torch.isfinite(aux_loss):
+                print(
+                    f"[warn] non-finite auxiliary loss at epoch {epoch+1} batch {i}, skipping"
+                )
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
+                _set_requires_grad(D_A, True)
+                _set_requires_grad(D_B, True)
                 continue
 
-            loss_scaled = loss / accumulate
-            scaler.scale(loss_scaled).backward()
+            scaler.scale(aux_loss / accumulate).backward()
+
+            loss = loss_denoise + aux_loss
             accum_count += 1
 
             if accum_count == accumulate or (

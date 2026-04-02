@@ -167,7 +167,8 @@ def _ddim_shortcut_from_xt(
 def _compute_cycle_loss(
     model: torch.nn.Module,
     scheduler: DDPMScheduler,
-    vae: VAEWrapper,
+    z0_A: torch.Tensor,
+    z0_B: torch.Tensor,
     z0_fake_B: torch.Tensor,
     z0_fake_A: torch.Tensor,
     noise_A: torch.Tensor,
@@ -187,8 +188,6 @@ def _compute_cycle_loss(
 
     rec_A = G(fake_B.detach(), A, same noise_A, same t_A)
     rec_B = G(fake_A.detach(), B, same noise_B, same t_B)
-
-    Note: clamp is applied to decoded images, not latents.
     """
     z_t_rec_A = scheduler.add_noise(z0_fake_B.detach(), noise_A, t_A)
     z_t_rec_B = scheduler.add_noise(z0_fake_A.detach(), noise_B, t_B)
@@ -216,20 +215,13 @@ def _compute_cycle_loss(
         eta=cycle_ddim_eta,
     )
 
-    # Clamp should be applied to decoded images, not latents.
-    # VAE latents typically range [-4, 4], not [-1, 1].
-    # Clamping latents before decode corrupts the signal.
-    rec_A = vae.decode(z0_rec_A).clamp(-1.0, 1.0).float()
-    rec_B = vae.decode(z0_rec_B).clamp(-1.0, 1.0).float()
-
-    loss_cyc = F.l1_loss(rec_A, real_A) + F.l1_loss(rec_B, real_B)
+    loss_cyc = F.l1_loss(z0_rec_A, z0_A) + F.l1_loss(z0_rec_B, z0_B)
     return loss_cyc
 
 
 def _compute_identity_loss(
     model: torch.nn.Module,
     scheduler: DDPMScheduler,
-    vae: VAEWrapper,
     z0_A: torch.Tensor,
     z0_B: torch.Tensor,
     real_A: torch.Tensor,
@@ -238,7 +230,7 @@ def _compute_identity_loss(
     prediction_type: str,
 ) -> torch.Tensor:
     """
-    Compute identity loss: L_id = ||idt_A - real_A||_1 + ||idt_B - real_B||_1.
+    Compute identity loss in latent space.
 
     Identity at t=0, epsilon=0: model should output minimal change in same domain.
     """
@@ -265,10 +257,7 @@ def _compute_identity_loss(
     z0_idt_A = out_idt_A["x0_pred"] if isinstance(out_idt_A, dict) else out_idt_A
     z0_idt_B = out_idt_B["x0_pred"] if isinstance(out_idt_B, dict) else out_idt_B
 
-    idt_A = vae.decode(z0_idt_A).clamp(-1.0, 1.0)
-    idt_B = vae.decode(z0_idt_B).clamp(-1.0, 1.0)
-
-    loss_idt = F.l1_loss(idt_A, real_A) + F.l1_loss(idt_B, real_B)
+    loss_idt = F.l1_loss(z0_idt_A, z0_A) + F.l1_loss(z0_idt_B, z0_B)
     return loss_idt
 
 
