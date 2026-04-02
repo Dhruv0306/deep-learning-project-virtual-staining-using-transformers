@@ -15,10 +15,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 # Allow very large whole-slide images without PIL raising a DecompressionBombWarning.
 # This is common for whole-slide pathology images, which can be gigapixels.
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+
+
+def get_compute_device():
+    """Return the best available compute device for preprocessing."""
+    if torch is not None and torch.cuda.is_available():
+        return torch.device("cuda")
+    return None
 
 
 def extract_patches_pil(img, patch_size=256, stride=256):
@@ -71,6 +83,31 @@ def estimate_tissue_fraction(patch, white_thresh=220, sat_thresh=0.05):
     return 1.0 - background.mean()
 
 
+def estimate_tissue_fractions_batch(patches, white_thresh=220, sat_thresh=0.05, device=None):
+    """Estimate tissue fractions for a batch of patches, optionally on GPU."""
+    if device is not None and torch is not None:
+        batch = np.stack([np.asarray(patch, dtype=np.float32) for patch in patches], axis=0)
+        batch_tensor = torch.from_numpy(batch).to(device=device, non_blocking=True)
+
+        maxc = batch_tensor.max(dim=3).values
+        minc = batch_tensor.min(dim=3).values
+        sat = (maxc - minc) / (maxc + 1e-6)
+        is_white = (batch_tensor > white_thresh).all(dim=3)
+        is_low_sat = sat < sat_thresh
+        background = is_white | is_low_sat
+        return (1.0 - background.float().mean(dim=(1, 2))).detach().cpu().numpy()
+
+    return np.asarray(
+        [
+            estimate_tissue_fraction(
+                patch, white_thresh=white_thresh, sat_thresh=sat_thresh
+            )
+            for patch in patches
+        ],
+        dtype=np.float32,
+    )
+
+
 def split_filenames(file_list, train_ratio=0.8, seed=42):
     """
     Split a list of filenames into train and test subsets.
@@ -103,6 +140,7 @@ def save_patches(
     background_keep_ratio=0.1,
     white_thresh=220,
     sat_thresh=0.05,
+    batch_size=64,
 ):
     """
     Load an image, extract patches, and write them as PNGs.
@@ -124,26 +162,38 @@ def save_patches(
     img = Image.open(image_path).convert("RGB")
     # Extract tiles directly from the full-resolution slide.
     patches = extract_patches_pil(img, patch_size)
+    compute_device = get_compute_device()
 
     base = os.path.splitext(os.path.basename(image_path))[0]
-    print(f"Processing Patch for image {base}")
+    if compute_device is None:
+        print(f"Processing patches for image {base} on CPU")
+    else:
+        print(f"Processing patches for image {base} on GPU ({compute_device})")
 
     kept_tissue = 0
     kept_background = 0
-    for i, patch in enumerate(patches):
-        tissue_fraction = estimate_tissue_fraction(
-            patch, white_thresh=white_thresh, sat_thresh=sat_thresh
+    for batch_start in range(0, len(patches), batch_size):
+        batch_end = min(batch_start + batch_size, len(patches))
+        batch_patches = patches[batch_start:batch_end]
+        tissue_fractions = estimate_tissue_fractions_batch(
+            batch_patches,
+            white_thresh=white_thresh,
+            sat_thresh=sat_thresh,
+            device=compute_device,
         )
-        is_tissue = tissue_fraction >= tissue_threshold
-        keep_background = np.random.rand() < background_keep_ratio
-        if is_tissue or keep_background:
-            # Keep the patch as 8-bit RGB; normalization is handled during data loading.
-            patch = patch.resize((patch_size, patch_size), Image.Resampling.BICUBIC)
-            patch.save(os.path.join(save_dir, f"{base}_{i}.png"))
-            if is_tissue:
-                kept_tissue += 1
-            else:
-                kept_background += 1
+
+        for offset, patch in enumerate(batch_patches):
+            i = batch_start + offset
+            is_tissue = tissue_fractions[offset] >= tissue_threshold
+            keep_background = np.random.rand() < background_keep_ratio
+            if is_tissue or keep_background:
+                # Keep the patch as 8-bit RGB; normalization is handled during data loading.
+                patch = patch.resize((patch_size, patch_size), Image.Resampling.BICUBIC)
+                patch.save(os.path.join(save_dir, f"{base}_{i}.png"))
+                if is_tissue:
+                    kept_tissue += 1
+                else:
+                    kept_background += 1
     print(
         f"Saved patches for {base}: tissue={kept_tissue} background={kept_background}"
     )
