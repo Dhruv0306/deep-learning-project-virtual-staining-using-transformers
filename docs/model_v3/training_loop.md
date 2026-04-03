@@ -67,6 +67,7 @@ When `resume_checkpoint` is provided, the loop restores:
 - optimizer state
 - scheduler state
 - AMP scaler state when available
+- early-stopping state when available
 - starting epoch
 
 ### Per-Batch Flow
@@ -116,6 +117,15 @@ The history is written to CSV and visualized through `model_v3/history_utils.py`
 
 Validation runs after the configured warmup and uses the averaged SSIM score
 from both domains for early-stopping decisions.
+
+Early-stopping checks are gated by:
+
+- `early_stopping_interval`
+- `early_stopping_warmup`
+- presence of validation metrics for the current epoch
+
+The loss dictionary passed into `EarlyStopping` is `{"DiT": avg_loss}`.
+Early-stopping counters are also logged to TensorBoard.
 
 ### Returned Values
 
@@ -231,6 +241,7 @@ torch.save({
     'lr_scheduler_D_A_state_dict': lr_scheduler_D_A.state_dict(),
     'lr_scheduler_D_B_state_dict': lr_scheduler_D_B.state_dict(),
     'scaler_state_dict': scaler.state_dict(),
+    'early_stopping_state': early_stopping.state_dict(),
     'epoch': epoch,
     ...
 }, checkpoint_path)
@@ -256,7 +267,8 @@ history update with {ssim_B, psnr_B, fid_B}
 
 ```python
 train_v3(resume_checkpoint="models_v3/.../checkpoint_epoch_60.pth")
-# Loads all model states, optimizer states, schedulers, scaler, epoch number
+# Loads all model states, optimizer states, schedulers, scaler,
+# early-stopping state, and epoch number
 # Continues from next epoch
 ```
 

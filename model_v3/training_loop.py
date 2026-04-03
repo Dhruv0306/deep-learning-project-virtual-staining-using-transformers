@@ -1,17 +1,23 @@
 """
-Training loop for the v3 DiT diffusion model.
+model_v3/training_loop.py — v3 training loop for the CycleDiT latent diffusion model.
 
 Component structure:
-    1) LR helper
-    2) grad-norm helper
-    3) validation runner
+    1) LR schedule helper
+    2) Gradient-norm helper
+    3) Validation runner
     4) train_v3 main loop
 
-Core per-batch shape flow:
+Per-batch shape flow:
     real_A:(N,3,256,256), real_B:(N,3,256,256)
-      -> z0 via VAE encode: (N,4,32,32)
-      -> z_t via add_noise:  (N,4,32,32)
-    -> model_pred from DiT: (N,4,32,32)
+      → z0 via VAE encode: (N,4,32,32)
+      → z_t via add_noise: (N,4,32,32)
+      → model_pred from DiT: (N,4,32,32)
+
+Two-stage generator update per batch:
+    Stage 1 — diffusion denoising loss (MSE ± Min-SNR ± perceptual).
+    Stage 2 — adversarial + cycle-consistency + identity losses on a
+               fresh forward pass so Stage 1 activations can be freed
+               before the larger Stage 2 graph is built.
 """
 
 from __future__ import annotations
@@ -84,7 +90,7 @@ def _global_grad_norm(parameters) -> float:
     """
     Compute the global L2 gradient norm across all parameters with a grad.
 
-    Returns a plain Python float for logging (no clipping applied).
+    Returns a plain Python float for logging; no clipping is applied.
     """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
@@ -152,11 +158,9 @@ def _run_validation_v3(
     """
     ema_model.eval()
     vae.eval()
-
-    print(f"[{ 'Testing' if is_test else 'Validation' }] Starting run at epoch {epoch}")
-
-    # Phase 2: track both domain metrics.
-    # Previously only tracked Domain B, now tracks both A and B.
+    print(f"[{'Testing' if is_test else 'Validation'}] Starting run at epoch {epoch}")
+    # Track metrics for both domains; domain A metrics are computed only for
+    # the first num_samples batches where the reverse pass is also run.
     metrics = {"ssim_A": [], "psnr_A": [], "ssim_B": [], "psnr_B": []}
     real_A_list = []
     fake_A_list = []
@@ -190,7 +194,6 @@ def _run_validation_v3(
             )
             fake_B = vae.decode(z0).clamp(-1.0, 1.0)
 
-            # Phase 2: compute metrics for both domains (B and A).
             metrics["ssim_B"].append(calculator.calculate_ssim(real_B, fake_B))
             metrics["psnr_B"].append(calculator.calculate_psnr(real_B, fake_B))
 
@@ -198,7 +201,7 @@ def _run_validation_v3(
             fake_B_list.append(fake_B)
 
             if i < num_samples:
-                # For qualitative grids, also generate reverse direction and cycle reconstructions.
+                # For qualitative grids, also run the reverse direction and cycle reconstructions.
                 uncond_B = torch.zeros_like(real_B)
                 z0_A = sampler.sample(
                     ema_model,
@@ -214,7 +217,6 @@ def _run_validation_v3(
                 )
                 fake_A = vae.decode(z0_A).clamp(-1.0, 1.0)
 
-                # Phase 2: compute domain A metrics (ssim_A, psnr_A).
                 metrics["ssim_A"].append(calculator.calculate_ssim(real_A, fake_A))
                 metrics["psnr_A"].append(calculator.calculate_psnr(real_A, fake_A))
 
@@ -275,7 +277,6 @@ def _run_validation_v3(
             if (i + 1) % 10 == 0:
                 print(f"[{prefix}] Processed {i + 1} batches")
 
-    # Phase 2: compute average metrics for both domains.
     avg_metrics = {
         "ssim_A": float(sum(metrics["ssim_A"]) / max(1, len(metrics["ssim_A"]))),
         "psnr_A": float(sum(metrics["psnr_A"]) / max(1, len(metrics["psnr_A"]))),
@@ -283,7 +284,7 @@ def _run_validation_v3(
         "psnr_B": float(sum(metrics["psnr_B"]) / max(1, len(metrics["psnr_B"]))),
     }
 
-    # Phase 2: early stopping score uses mean of both domains.
+    # Early stopping score is the mean of both domain SSIMs.
     early_stopping_score = 0.5 * (avg_metrics["ssim_A"] + avg_metrics["ssim_B"])
 
     fid_count = min(fid_max_samples, len(real_B_list))
@@ -296,8 +297,7 @@ def _run_validation_v3(
         fake_B_tensor = torch.cat(fake_B_list[:fid_count])
         avg_metrics["fid_B"] = calculator.evaluate_fid(real_B_tensor, fake_B_tensor)
 
-    # Phase 2: compute FID for domain A as well.
-    fid_count_A = min(fid_max_samples, len(real_A_list))
+    fid_count_A = min(fid_max_samples, len(real_A_list))  # FID for domain A
     if (
         fid_count_A >= fid_min_samples
         or is_test
@@ -402,6 +402,7 @@ def train_v3(
     torch.backends.cudnn.allow_tf32 = True
 
     # ---- Data ----
+    # Unpaired loader yields {"A": tensor, "B": tensor} dicts each iteration.
     train_loader, test_loader = getDataLoader(
         epoch_size=tcfg.epoch_size,
         image_size=dtcfg.image_size,
@@ -411,6 +412,7 @@ def train_v3(
     )
 
     # ---- Models ----
+    # VAE is frozen throughout training; only the DiT and discriminators are updated.
     vae = VAEWrapper(dcfg.vae_model_id).to(device)
     vae.eval()
 
@@ -436,7 +438,9 @@ def train_v3(
     scheduler = DDPMScheduler(dcfg.num_timesteps, dcfg.beta_schedule).to(device)
     sampler = DDIMSampler(scheduler)
 
-    # ---- Optimizer ----
+    # ---- Optimizers ----
+    # AdamW for the DiT generator (weight decay stabilises large Transformer models);
+    # standard Adam for discriminators (matching v2 convention).
     optimizer_G = torch.optim.AdamW(
         list(dit_model.parameters()),
         lr=1e-4,
@@ -480,6 +484,8 @@ def train_v3(
     )
 
     # ---- Perceptual loss ----
+    # Only instantiated when lambda_perceptual_v3 > 0 to avoid loading VGG19
+    # when the perceptual term is disabled.
     perceptual_loss = None
     if dcfg.lambda_perceptual_v3 > 0.0:
         perceptual_resize = (
@@ -551,6 +557,9 @@ def train_v3(
         if use_amp and "scaler_state_dict" in checkpoint:
             scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
+        if "early_stopping_state" in checkpoint:
+            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+
         start_epoch = int(checkpoint.get("epoch", 0))
         start_epoch = min(max(0, start_epoch), tcfg.num_epochs)
         print(f"[train_v3] Resume start epoch: {start_epoch + 1}")
@@ -609,12 +618,9 @@ def train_v3(
             if accum_count == 0:
                 optimizer_G.zero_grad(set_to_none=True)
 
-            # SPEC COMPLIANCE: Per Phase 2 spec, generator step comes before discriminator steps.
-            # Step order: Generator -> Discriminator A -> Discriminator B.
-            # Split the generator update into two fresh forward/backward phases so
-            # diffusion activations can be released before the cycle/identity graph
-            # is constructed. This reduces peak VRAM without changing the number of
-            # optimizer steps per batch.
+            # Generator step precedes discriminator steps.
+            # Split into Stage 1 (diffusion) and Stage 2 (adversarial/cycle/identity)
+            # so Stage 1 activations are freed before the larger Stage 2 graph is built.
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
 
@@ -625,7 +631,6 @@ def train_v3(
                 warm = 1.0
             lambda_adv_curr = dcfg.lambda_adv_v3 * warm
 
-            # --- Phase 2: Cycle and Identity Losses ---
             lambda_identity_curr = _compute_identity_weight(
                 epoch=epoch,
                 num_epochs=tcfg.num_epochs,
@@ -634,7 +639,7 @@ def train_v3(
                 decay_ratio=dcfg.identity_decay_end_ratio,
             )
 
-            # Stage 1: diffusion-only objective.
+            # Stage 1: diffusion-only objective (MSE noise prediction).
             with autocast("cuda", enabled=use_amp):
                 out_A2B = dit_model(
                     z_t_A,
@@ -708,6 +713,7 @@ def train_v3(
             del out_A2B, out_B2A, loss_A2B, loss_B2A
 
             # Stage 2: adversarial, cycle, and identity losses on a fresh forward pass.
+            # Recomputing here allows Stage 1 activations to be freed first.
             with autocast("cuda", enabled=use_amp):
                 out_A2B = dit_model(
                     z_t_A,
@@ -726,11 +732,9 @@ def train_v3(
                     prediction_type=dcfg.prediction_type,
                 )
 
-                # Phase 2 rule: all non-denoising losses use x0 reconstructions.
                 z0_fake_B = out_A2B["x0_pred"]
                 z0_fake_A = out_B2A["x0_pred"]
-                # Spec compliance: clamp decoded images before discriminator inputs.
-                # Keep discriminator inputs in fp32 to avoid dtype mismatch in conv layers.
+                # Decode x0 predictions to pixel space; fp32 avoids dtype mismatches in conv layers.
                 fake_B_img = vae.decode(z0_fake_B).clamp(-1.0, 1.0).float()
                 fake_A_img = vae.decode(z0_fake_A).clamp(-1.0, 1.0).float()
                 loss_adv_G_B = _lsgan_gen_loss(D_B(fake_B_img))
@@ -824,8 +828,7 @@ def train_v3(
             _set_requires_grad(D_A, True)
             _set_requires_grad(D_B, True)
 
-            # Spec compliance: replay buffers are applied to discriminator inputs
-            # (not raw current-batch generator outputs) from epoch 1 onward.
+            # Replay buffers mix old and new fakes to stabilise discriminator training.
             fake_A_detached = replay_A.push_and_pop(fake_A_img.detach())
             fake_B_detached = replay_B.push_and_pop(fake_B_img.detach())
 
@@ -934,10 +937,9 @@ def train_v3(
         writer.add_scalar("Loss/DiT", avg_loss, epoch + 1)
         writer.add_scalar("Loss/Perceptual", avg_loss_perc, epoch + 1)
         writer.add_scalar("Diagnostics/GradNorm", avg_grad_norm, epoch + 1)
-        # Epoch-level GAN diagnostics from last batch snapshot.
+        # Log last-batch GAN scalars and epoch-average lambda values.
         if epoch_step:
             last_key = max(epoch_step.keys())
-            # Usability improvement: log epoch-average lambdas in addition to last-batch values.
             lambda_adv_epoch_avg = float(
                 sum(v["Lambda_Adv"] for v in epoch_step.values()) / len(epoch_step)
             )
@@ -959,7 +961,6 @@ def train_v3(
                 lambda_adv_epoch_avg,
                 epoch + 1,
             )
-            # Phase 2: Cycle and Identity losses
             writer.add_scalar("Loss/Cycle", epoch_step[last_key]["Loss_Cyc"], epoch + 1)
             writer.add_scalar(
                 "Loss/Identity", epoch_step[last_key]["Loss_Id"], epoch + 1
@@ -1017,6 +1018,7 @@ def train_v3(
                     "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
                     "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
                     "scaler_state_dict": scaler.state_dict() if use_amp else None,
+                    "early_stopping_state": early_stopping.state_dict(),
                     "config": dcfg,
                 },
                 ckpt_path,
@@ -1088,6 +1090,7 @@ def train_v3(
             "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
             "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
             "scaler_state_dict": scaler.state_dict() if use_amp else None,
+            "early_stopping_state": early_stopping.state_dict(),
             "config": dcfg,
         },
         final_ckpt,

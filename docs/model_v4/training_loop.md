@@ -15,7 +15,7 @@ Train bidirectional generators and discriminators with:
 
 ## Main Public Function
 
-## train_v4(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, cfg=None)
+## train_v4(epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, resume_checkpoint=None, cfg=None)
 
 Returns:
 
@@ -28,7 +28,15 @@ Key setup stages:
 3. construct `G_AB`, `G_BA`, `D_A`, `D_B`
 4. create optimizers and optional LambdaLR schedulers
 5. initialize AMP scaler, EMA models, PatchSampler, PatchNCELoss,
-   MetricsCalculator, replay buffers, TensorBoard writer
+   MetricsCalculator, replay buffers, TensorBoard writer, and EarlyStopping
+
+Resume flow (when `resume_checkpoint` is set):
+
+- loads model/discriminator weights
+- loads EMA weights (or falls back to current generator weights)
+- loads optimizer/scheduler/scaler states when present
+- restores early-stopping state
+- resumes from saved epoch index
 
 ## Helper Functions
 
@@ -73,8 +81,12 @@ For each batch (`real_A`, `real_B`):
 
 - periodic checkpoints every `save_every` epochs
 - validation runs once `epoch >= validation_every`
+- early stopping is checked every `early_stopping_interval` epochs,
+  after `early_stopping_warmup`, and only when validation metrics are available
+- early-stopping score is `0.5 * (ssim_A + ssim_B)`
+- divergence checks use epoch-average losses (`G`, `D_A`, `D_B`)
 - validation/test use EMA generators when enabled
-- final checkpoint is always saved as `final_checkpoint.pth`
+- final checkpoint is saved as `final_checkpoint.pth` with the actual stopped epoch
 - final test export is written under `test_images`
 
 Checkpoint payload includes:
@@ -82,4 +94,6 @@ Checkpoint payload includes:
 - model weights (raw and EMA)
 - optimizer states
 - LR scheduler states
+- AMP scaler state
+- early-stopping state
 - epoch number

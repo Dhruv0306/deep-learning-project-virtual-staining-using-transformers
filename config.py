@@ -349,35 +349,19 @@ def get_8gb_config() -> UVCGANConfig:
     """
     cfg = UVCGANConfig(model_version=2)
 
-    # --- Gradient checkpointing ---
-    # Enabled to save activation memory during the Transformer backward pass.
+    # Recompute ViT activations during backward to save ~30-40% activation VRAM.
     cfg.generator.use_gradient_checkpointing = True
-
-    # --- ViT depth ---
-    # Kept at 4 to preserve capacity; not reduced in this profile.
-    cfg.generator.vit_depth = 4
-
-    # --- Discriminator scales ---
-    # Kept at 3 (full multi-scale) for stability/quality.
-    cfg.discriminator.num_scales = 3
-
-    # --- Batch size: 4 -> 2, with gradient accumulation to compensate ---
-    # batch_size=2 halves activation memory. accumulate_grads=2 means the
-    # optimiser steps every 2 batches, keeping the effective gradient batch
-    # at 4. Loss scaling is handled in model_v2/training_loop.
+    cfg.generator.vit_depth = 4  # full depth; reduce to 2 for more headroom
+    cfg.discriminator.num_scales = 3  # full multi-scale; reduce to 2 to save ~15%
+    # batch_size=2 + accumulate_grads=2 keeps effective batch=4 at half the VRAM cost.
     cfg.data.batch_size = 2
     cfg.training.accumulate_grads = 2
-
-    # --- Perceptual loss resize ---
-    # Set to 180 based on current memory/quality trade-offs.
-    cfg.loss.perceptual_resize = 180
-
-    # --- Everything else stays paper-aligned ---
+    cfg.loss.perceptual_resize = 180  # slightly larger than 128 for better supervision
     cfg.generator.use_cross_domain = True
     cfg.generator.use_layerscale = True
     cfg.loss.use_wgan_gp = False
     cfg.loss.lambda_gp = 0.1
-    cfg.training.use_amp = True  # critical - do not disable
+    cfg.training.use_amp = True  # do not disable — halves activation memory
     cfg.training.n_critic = 1
 
     return cfg
@@ -463,10 +447,10 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = False  # FFT discriminator is memory-intensive; disable
-    cfg.diffusion.disc_use_global = True  # Keep global discriminator branch active
-    cfg.diffusion.disc_use_local = True  # Keep local discriminator for fine details
-    cfg.diffusion.disc_base_channels = 64  # Standard channel width
+    cfg.diffusion.disc_use_fft = False  # FFT branch is memory-intensive; disabled
+    cfg.diffusion.disc_use_global = True  # global branch kept for layout supervision
+    cfg.diffusion.disc_use_local = True  # local PatchGAN kept for texture detail
+    cfg.diffusion.disc_base_channels = 64
     cfg.diffusion.disc_global_base_channels = 16
     cfg.diffusion.disc_n_layers = 3
 
@@ -542,6 +526,12 @@ class V4TrainingConfig:
         lr_decay_start_epoch: Epoch at which linear LR decay begins.
         accumulate_grads:   Gradient accumulation steps before an optimiser step.
         validation_every:   Run validation after this many epochs.
+        early_stopping_patience: Max epochs-without-improvement before stopping.
+        early_stopping_warmup: Earliest epoch at which early stopping is active.
+        early_stopping_interval: Evaluate early stopping every N epochs.
+        early_stopping_min_delta: Minimum SSIM gain required to reset patience.
+        divergence_threshold: Loss explosion ratio vs best loss baseline.
+        divergence_patience: Consecutive divergence checks before hard stop.
         save_every:         Save a checkpoint every N epochs.
     """
 
@@ -561,9 +551,15 @@ class V4TrainingConfig:
     validation_max_batches: int = 50
     validation_fid_samples: int = 200
     validation_fid_min_samples: int = 50
+    early_stopping_patience: int = 40
+    early_stopping_warmup: int = 80
+    early_stopping_interval: int = 10
+    early_stopping_min_delta: float = 1e-5
+    divergence_threshold: float = 5.0
+    divergence_patience: int = 2
     lambda_gan: float = 1.0
     lambda_nce: float = 1.0
-    lambda_identity: float = 5.0
+    lambda_identity: float = 3.0
     nce_layers: tuple[int, ...] = (0, 1, 2)
     nce_num_patches: int = 128
     nce_temperature: float = 0.07
@@ -642,10 +638,10 @@ def get_v4_8gb_config() -> V4Config:
     """
     Return a VRAM-optimised V4Config for 8 GB GPUs.
 
-    Enables gradient checkpointing in the Transformer encoder to reduce
-    peak activation memory at the cost of a slightly slower backward pass.
-    All other settings are identical to :func:`get_v4_config`.
+    Gradient checkpointing is currently disabled (set to False) — enable it
+    by setting ``cfg.model.use_gradient_checkpointing = True`` if OOM is
+    observed.  All other settings are identical to :func:`get_v4_config`.
     """
     cfg = V4Config()
-    cfg.model.use_gradient_checkpointing = True
+    cfg.model.use_gradient_checkpointing = False
     return cfg

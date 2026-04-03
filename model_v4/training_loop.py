@@ -1,8 +1,8 @@
 """
-model_v4/training_loop.py — v4 training loop for CUT + Transformer.
+model_v4/training_loop.py — v4 training loop: GAN + PatchNCE + Transformer encoder.
 
-Adds a Transformer encoder and PatchNCE contrastive loss on top of the
-baseline GAN. PatchNCE is computed on encoder features sampled at shared
+Adds a Transformer encoder and PatchNCE contrastive loss on top of a standard
+LSGAN framework.  PatchNCE is computed on encoder features sampled at shared
 spatial locations between real and generated images.
 
 Data flow:
@@ -10,8 +10,8 @@ Data flow:
     real_B → G_BA → fake_A   (stained   → unstained)
 
 Losses:
-    Generator:     λ_gan * LSGAN + λ_nce * PatchNCE
-    Discriminator: LSGAN — (D(real) − 1)² + D(fake)²
+    Generator:     λ_gan * LSGAN + λ_nce * PatchNCE + λ_identity * L1
+    Discriminator: LSGAN — 0.5 * ((D(real) − 1)² + D(fake)²)
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from config import V4Config
 from shared.data_loader import getDataLoader
+from shared.EarlyStopping import EarlyStopping
 from shared.metrics import MetricsCalculator
 from shared.replay_buffer import ReplayBuffer
 from shared.validation import save_images_with_title
@@ -90,11 +91,7 @@ def _lsgan_gen_loss(pred_fake: torch.Tensor) -> torch.Tensor:
 
 
 def _lsgan_disc_loss(pred_real: torch.Tensor, pred_fake: torch.Tensor) -> torch.Tensor:
-    """
-    LSGAN discriminator loss: E[(D(real) − 1)²] + E[D(fake)²].
-
-    Real target is 1, fake target is 0.
-    """
+    """LSGAN discriminator loss: 0.5 * (E[(D(real) − 1)²] + E[D(fake)²])."""
     loss_real = torch.mean((pred_real - 1.0) ** 2)
     loss_fake = torch.mean(pred_fake**2)
     return loss_real + loss_fake
@@ -274,6 +271,7 @@ def train_v4(
     num_epochs=None,
     model_dir=None,
     val_dir=None,
+    resume_checkpoint: Optional[str] = None,
     cfg: Optional[V4Config] = None,
 ):
     """
@@ -290,6 +288,7 @@ def train_v4(
                     (overrides cfg.model_dir).
         val_dir:    Directory for validation image grids
                     (overrides cfg.val_dir).
+        resume_checkpoint: Path to a v4 ``.pth`` checkpoint for resuming.
         cfg:        V4Config instance.  Defaults to V4Config() if None.
 
     Returns:
@@ -324,7 +323,7 @@ def train_v4(
     torch.backends.cudnn.allow_tf32 = True
 
     # ---- Data ----
-    # Unpaired loader returns {"A": tensor, "B": tensor} dicts each iteration.
+    # Unpaired loader yields {"A": tensor, "B": tensor} dicts each iteration.
     train_loader, test_loader = getDataLoader(
         epoch_size=tcfg.epoch_size,
         image_size=dcfg.image_size,
@@ -335,7 +334,7 @@ def train_v4(
 
     # ---- Models ----
     # G_AB: unstained → stained;  G_BA: stained → unstained.
-    # D_A discriminates real/fake unstained; D_B discriminates real/fake stained.
+    # D_A: real/fake unstained;   D_B: real/fake stained.
     if mcfg.image_size != dcfg.image_size:
         print(
             f"[warn] V4 model image_size ({mcfg.image_size}) does not match "
@@ -428,17 +427,28 @@ def train_v4(
     scaler = GradScaler("cuda", enabled=use_amp)
 
     # ---- EMA ----
-    ema_G_AB = None
-    ema_G_BA = None
-    if tcfg.use_ema:
-        ema_G_AB = copy.deepcopy(G_AB).to(device)
-        ema_G_BA = copy.deepcopy(G_BA).to(device)
-        ema_G_AB.requires_grad_(False)
-        ema_G_BA.requires_grad_(False)
+    # Maintain exponential moving average copies of both generators for
+    # smoother validation outputs.  EMA weights are not used during training.
+    ema_G_AB = copy.deepcopy(G_AB).to(device)
+    ema_G_BA = copy.deepcopy(G_BA).to(device)
+    ema_G_AB.requires_grad_(False)
+    ema_G_BA.requires_grad_(False)
 
     # ---- Metrics / PatchNCE ----
     # Shared SSIM/PSNR calculator reused across validation calls.
+    # early_stopping_interval converts epoch-based patience to check-based patience.
     metrics_calculator = MetricsCalculator(device=device)
+    early_stopping_interval = max(1, tcfg.early_stopping_interval)
+    early_stopping = EarlyStopping(
+        patience=max(
+            1,
+            (tcfg.early_stopping_patience + early_stopping_interval - 1)
+            // early_stopping_interval,
+        ),
+        min_delta=tcfg.early_stopping_min_delta,
+        divergence_threshold=tcfg.divergence_threshold,
+        divergence_patience=tcfg.divergence_patience,
+    )
     idt_loss = torch.nn.L1Loss()
     nce_layers = list(tcfg.nce_layers)
     max_layers = mcfg.encoder_depth if mcfg.use_transformer_encoder else 4
@@ -471,8 +481,74 @@ def train_v4(
     writer = SummaryWriter(log_dir=tb_dir)
 
     history = {}
+    stopped_epoch = tcfg.num_epochs
+    start_epoch = 0
     accumulate = max(1, tcfg.accumulate_grads)
     accum_count = 0
+
+    if resume_checkpoint:
+        if not os.path.exists(resume_checkpoint):
+            raise FileNotFoundError(
+                f"resume_checkpoint does not exist: {resume_checkpoint}"
+            )
+        print(f"[train_v4] Resuming from checkpoint: {resume_checkpoint}")
+        checkpoint = torch.load(resume_checkpoint, map_location=device)
+
+        if "G_AB_state_dict" not in checkpoint or "G_BA_state_dict" not in checkpoint:
+            raise KeyError(
+                "Checkpoint missing generator weights required for v4 resume."
+            )
+
+        G_AB.load_state_dict(checkpoint["G_AB_state_dict"])
+        G_BA.load_state_dict(checkpoint["G_BA_state_dict"])
+
+        if "D_A_state_dict" in checkpoint:
+            D_A.load_state_dict(checkpoint["D_A_state_dict"])
+        if "D_B_state_dict" in checkpoint:
+            D_B.load_state_dict(checkpoint["D_B_state_dict"])
+
+        if tcfg.use_ema and ema_G_AB is not None and ema_G_BA is not None:
+            if checkpoint.get("ema_G_AB_state_dict") is not None:
+                ema_G_AB.load_state_dict(checkpoint["ema_G_AB_state_dict"])
+            else:
+                ema_G_AB.load_state_dict(G_AB.state_dict())
+            if checkpoint.get("ema_G_BA_state_dict") is not None:
+                ema_G_BA.load_state_dict(checkpoint["ema_G_BA_state_dict"])
+            else:
+                ema_G_BA.load_state_dict(G_BA.state_dict())
+
+        if "optimizer_G_state_dict" in checkpoint:
+            optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+        if "optimizer_D_A_state_dict" in checkpoint:
+            optimizer_D_A.load_state_dict(checkpoint["optimizer_D_A_state_dict"])
+        if "optimizer_D_B_state_dict" in checkpoint:
+            optimizer_D_B.load_state_dict(checkpoint["optimizer_D_B_state_dict"])
+
+        if (
+            lr_scheduler_G is not None
+            and checkpoint.get("lr_scheduler_G_state_dict") is not None
+        ):
+            lr_scheduler_G.load_state_dict(checkpoint["lr_scheduler_G_state_dict"])
+        if (
+            lr_scheduler_D_A is not None
+            and checkpoint.get("lr_scheduler_D_A_state_dict") is not None
+        ):
+            lr_scheduler_D_A.load_state_dict(checkpoint["lr_scheduler_D_A_state_dict"])
+        if (
+            lr_scheduler_D_B is not None
+            and checkpoint.get("lr_scheduler_D_B_state_dict") is not None
+        ):
+            lr_scheduler_D_B.load_state_dict(checkpoint["lr_scheduler_D_B_state_dict"])
+
+        if use_amp and checkpoint.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+        if "early_stopping_state" in checkpoint:
+            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+
+        start_epoch = int(checkpoint.get("epoch", 0))
+        start_epoch = min(max(0, start_epoch), tcfg.num_epochs)
+        print(f"[train_v4] Resume start epoch: {start_epoch + 1}")
 
     if accumulate > 1:
         print(
@@ -480,7 +556,7 @@ def train_v4(
             f"(effective batch {accumulate * dcfg.batch_size})"
         )
 
-    for epoch in range(tcfg.num_epochs):
+    for epoch in range(start_epoch, tcfg.num_epochs):
         print()
         G_AB.train()
         G_BA.train()
@@ -509,11 +585,9 @@ def train_v4(
                 print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
                 continue
 
-            # -------------------------
-            # Discriminator steps
-            # -------------------------
-            # Freeze generators so their weights are not updated here;
-            # generate fakes under no_grad to avoid storing the graph.
+            # ---- Discriminator steps ----
+            # Freeze generators to avoid computing their gradients here;
+            # generate fakes under no_grad to skip storing the computation graph.
             _set_requires_grad(D_A, True)
             _set_requires_grad(D_B, True)
             _set_requires_grad(G_AB, False)
@@ -565,9 +639,7 @@ def train_v4(
                 torch.nn.utils.clip_grad_norm_(D_B.parameters(), tcfg.grad_clip_norm)
             optimizer_D_B.step()
 
-            # -------------------------
-            # Generator step
-            # -------------------------
+            # ---- Generator step ----
             # Unfreeze generators, freeze discriminators so D gradients
             # are not computed during the generator backward pass.
             _set_requires_grad(D_A, False)
@@ -616,8 +688,12 @@ def train_v4(
                         num_patches=tcfg.nce_num_patches,
                         patch_ids=patch_ids_B,
                     )
-                    loss_nce_AB = nce_criterion(patches_fake_B, patches_real_A, layer_ids=nce_layers)
-                    loss_nce_BA = nce_criterion(patches_fake_A, patches_real_B, layer_ids=nce_layers)
+                    loss_nce_AB = nce_criterion(
+                        patches_fake_B, patches_real_A, layer_ids=nce_layers
+                    )
+                    loss_nce_BA = nce_criterion(
+                        patches_fake_A, patches_real_B, layer_ids=nce_layers
+                    )
                     loss_nce = 0.5 * (loss_nce_AB + loss_nce_BA)
 
                 loss_id = torch.tensor(0.0, device=device)
@@ -633,7 +709,7 @@ def train_v4(
                 )
                 loss_G_scaled = (
                     loss_G / accumulate
-                )  # scale before backward for correct gradient magnitude
+                )  # normalise for gradient accumulation
 
             if not torch.isfinite(loss_G):
                 print(
@@ -650,7 +726,7 @@ def train_v4(
             accum_count += 1
 
             # Step optimizer once the accumulation window is full or the
-            # loader is exhausted (handles non-divisible dataset sizes).
+            # epoch ends with a partial window.
             if accum_count == accumulate or (
                 i == len(train_loader) and accum_count > 0
             ):
@@ -684,8 +760,7 @@ def train_v4(
             else:
                 grad_norm = 0.0
 
-            # ---- Logging ----
-            # Accumulate per-batch scalars for epoch-level averaging.
+            # ---- Per-batch logging ----
             epoch_step[i] = {
                 "Batch": i,
                 "Loss_G": float(loss_G.item()),
@@ -807,16 +882,19 @@ def train_v4(
                         if lr_scheduler_D_B is not None
                         else None
                     ),
+                    "scaler_state_dict": scaler.state_dict() if use_amp else None,
+                    "early_stopping_state": early_stopping.state_dict(),
                 },
                 ckpt_path,
             )
             print(f"Checkpoint saved: {ckpt_path}")
 
+        val_metrics = None
         if (epoch + 1) >= tcfg.validation_every:
             save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
             val_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
             val_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
-            _run_validation_v4(
+            val_metrics = _run_validation_v4(
                 epoch=epoch + 1,
                 G_AB=val_G_AB,
                 G_BA=val_G_BA,
@@ -832,10 +910,41 @@ def train_v4(
                 is_test=False,
             )
 
+        if (
+            (epoch + 1) % early_stopping_interval == 0
+            and epoch + 1 >= tcfg.early_stopping_warmup
+            and val_metrics is not None
+        ):
+            avg_ssim = 0.5 * (
+                val_metrics.get("ssim_A", 0.0) + val_metrics.get("ssim_B", 0.0)
+            )
+            should_stop = early_stopping(
+                ssim=avg_ssim,
+                losses={
+                    "G": avg_loss_G,
+                    "D_A": avg_loss_D_A,
+                    "D_B": avg_loss_D_B,
+                },
+            )
+            writer.add_scalar("EarlyStopping/ssim", avg_ssim, epoch + 1)
+            writer.add_scalar(
+                "EarlyStopping/counter", early_stopping.counter, epoch + 1
+            )
+            writer.add_scalar(
+                "EarlyStopping/divergence_counter",
+                early_stopping.divergence_counter,
+                epoch + 1,
+            )
+
+            if should_stop:
+                print(f"Early stopping at epoch {epoch + 1}")
+                stopped_epoch = epoch + 1
+                break
+
     final_ckpt = os.path.join(model_dir, "final_checkpoint.pth")
     torch.save(
         {
-            "epoch": tcfg.num_epochs,
+            "epoch": stopped_epoch,
             "G_AB_state_dict": G_AB.state_dict(),
             "G_BA_state_dict": G_BA.state_dict(),
             "D_A_state_dict": D_A.state_dict(),
@@ -858,6 +967,8 @@ def train_v4(
             "lr_scheduler_D_B_state_dict": (
                 lr_scheduler_D_B.state_dict() if lr_scheduler_D_B is not None else None
             ),
+            "scaler_state_dict": scaler.state_dict() if use_amp else None,
+            "early_stopping_state": early_stopping.state_dict(),
         },
         final_ckpt,
     )
@@ -865,11 +976,11 @@ def train_v4(
 
     # ---- Final test-set export ----
     test_dir = os.path.join(model_dir, "test_images")
-    writer.add_scalar("Testing Started", tcfg.num_epochs, tcfg.num_epochs)
+    writer.add_scalar("Testing Started", stopped_epoch, stopped_epoch)
     test_G_AB = ema_G_AB if tcfg.use_ema and ema_G_AB is not None else G_AB
     test_G_BA = ema_G_BA if tcfg.use_ema and ema_G_BA is not None else G_BA
     _run_validation_v4(
-        epoch=tcfg.num_epochs,
+        epoch=stopped_epoch,
         G_AB=test_G_AB,
         G_BA=test_G_BA,
         test_loader=test_loader,
@@ -883,7 +994,7 @@ def train_v4(
         writer=writer,
         is_test=True,
     )
-    writer.add_scalar("Training Completed", tcfg.num_epochs, tcfg.num_epochs)
+    writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
 
     writer.close()
     return history, G_AB, G_BA, D_A, D_B

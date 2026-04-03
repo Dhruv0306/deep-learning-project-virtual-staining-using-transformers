@@ -57,8 +57,21 @@ Validation in `V4Config.__post_init__` enforces `model_version == 4`.
 - `V4ModelConfig`: generator/discriminator architecture (Transformer encoder
   toggles, patch size, encoder depth/width/heads, discriminator width/layers)
 - `V4TrainingConfig`: GAN + PatchNCE + identity weights, NCE layers/patches,
-  replay buffer, EMA, LR schedule, accumulation, validation/save cadence
+  replay buffer, EMA, LR schedule, accumulation, validation/save cadence,
+  and early-stopping controls
 - `V4DataConfig`: image size, batch size, worker count, prefetch factor
+
+#### V4TrainingConfig Early-Stopping Fields
+
+- `early_stopping_patience`
+- `early_stopping_warmup`
+- `early_stopping_interval`
+- `early_stopping_min_delta`
+- `divergence_threshold`
+- `divergence_patience`
+
+These are consumed by `model_v4/training_loop.py` and evaluated on
+validation checks.
 
 ## Factory Functions
 
@@ -84,10 +97,14 @@ Validation in `V4Config.__post_init__` enforces `model_version == 4`.
   - default v4 profile
 
 - `get_v4_8gb_config()`
-  - v4 profile with Transformer gradient checkpointing enabled
+  - v4 profile tuned for 8 GB with current default
+    `model.use_gradient_checkpointing = False`
+  - can be toggled to True manually when additional memory savings are needed
 
 ## Practical Guidance
 
 - Use `get_8gb_config()` for v2 on constrained VRAM.
 - Use `get_dit_8gb_config()` for v3 on constrained VRAM.
 - Use `get_v4_8gb_config()` for v4 on constrained VRAM.
+- For v4, early stopping is configured in `V4TrainingConfig` and uses
+  validation SSIM and divergence checks from `shared/EarlyStopping.py`.

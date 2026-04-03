@@ -1,91 +1,70 @@
-# `shared/EarlyStopping.py` — Early Stopping
+# shared/EarlyStopping.py
 
-**Shared by:** Both v1 and v2  
-**Role:** Monitors validation SSIM and loss divergence across training epochs and decides when to stop training to prevent wasted compute or model degradation.
+Source of truth: ../../shared/EarlyStopping.py
 
----
+Shared early-stopping utility used by training loops to stop on either:
 
-## Class: `EarlyStopping`
+1. SSIM plateau.
+2. Repeated multi-loss divergence.
 
-Tracks two independent stopping criteria:
+## Constructor
 
-1. **SSIM plateau** — stops training if validation SSIM has not improved by at least `min_delta` for `patience` consecutive checks.
-2. **Loss divergence** — stops training if all monitored losses simultaneously exceed `divergence_threshold × best_ever_value` for `divergence_patience` consecutive checks.
+EarlyStopping accepts:
 
-### `__init__(patience, min_delta, divergence_threshold, divergence_patience)`
+- patience: checks without SSIM improvement before stopping.
+- min_delta: minimum SSIM gain required to reset patience.
+- divergence_threshold: ratio used to detect loss explosions.
+- divergence_patience: consecutive all-loss divergence checks before hard stop.
+- divergence_floor: minimum baseline used in divergence ratio checks.
 
-| Parameter | Default | Description |
-|---|---|---|
-| `patience` | 10 | Number of validation checks without SSIM improvement before stopping. One check occurs every `early_stopping_interval` epochs in the training loop |
-| `min_delta` | 0.001 | Minimum increase in SSIM to count as an improvement |
-| `divergence_threshold` | 5.0 | A loss is considered diverging if its current value exceeds `best_value × divergence_threshold` |
-| `divergence_patience` | 2 | Number of consecutive divergence checks before stopping |
+The divergence floor prevents false positives when the best loss becomes very close to zero.
 
-**Internal state:**
+## Stop Logic
 
-| Attribute | Initial value | Description |
-|---|---|---|
-| `best_ssim` | `-inf` | Best SSIM seen so far |
-| `counter` | 0 | Number of consecutive checks without SSIM improvement |
-| `best_losses` | `{}` | Per-key best (lowest) loss value seen so far |
-| `divergence_counter` | 0 | Consecutive checks where all losses diverged |
+On each call, the class:
 
----
-
-### `__call__(ssim, losses)`
-
-Called once per validation check. Updates internal state and returns `True` if training should stop.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `ssim` | `float` | Current validation SSIM value |
-| `losses` | `dict` or `float` | Current loss values. A plain float is wrapped as `{'loss': value}` |
-
-**SSIM check:**
-```
-if ssim > best_ssim + min_delta:
-    best_ssim = ssim
-    counter   = 0          ← reset on improvement
-else:
-    counter  += 1
-```
-
-**Divergence check (per loss key):**
-```
-for each (name, value) in losses:
-    if value > best_losses[name] × divergence_threshold:
-        count as diverged
-
-if ALL losses are diverged:
-    divergence_counter += 1
-else:
-    divergence_counter  = 0    ← reset if any loss recovers
-```
-
-**Stop conditions:**
-```
-return True  if divergence_counter >= divergence_patience
-return True  if counter >= patience
-return False otherwise
-```
-
----
-
-## Integration in the Training Loop
+1. Updates SSIM best/counter.
+2. Normalizes losses to a dict.
+3. Tracks per-loss best (minimum) values.
+4. Marks each loss as diverged when:
 
 ```python
-early_stopping = EarlyStopping(patience=40, divergence_patience=2)
-
-# Called every early_stopping_interval epochs (after early_stopping_warmup):
-should_stop = early_stopping(
-    ssim=avg_metrics['ssim_B'],
-    losses={'G': loss_G_epoch, 'D_A': loss_D_A_epoch, 'D_B': loss_D_B_epoch}
-)
-
-if should_stop:
-    print("Early stopping triggered.")
-    break
+value > max(abs(best), divergence_floor) * divergence_threshold
 ```
 
-The training loop in both v1 and v2 enforces a `warmup` period before early stopping can trigger, regardless of what `EarlyStopping` returns. This prevents stopping before the model has had time to converge from its random initialisation.
+5. Increments divergence counter only when all tracked losses diverge in the same check.
+
+Training should stop if either:
+
+- divergence_counter >= divergence_patience, or
+- counter >= patience.
+
+## State Persistence
+
+The class supports checkpoint persistence via:
+
+- state_dict()
+- load_state_dict(state)
+
+Saved fields include:
+
+- best_ssim
+- counter
+- best_losses
+- divergence_counter
+- divergence_floor
+- threshold/patience/min_delta values
+
+This allows resumed training to keep the same early-stopping history.
+
+## Typical Integration
+
+```python
+should_stop = early_stopping(
+    ssim=avg_ssim,
+    losses={"G": avg_loss_G, "D_A": avg_loss_D_A, "D_B": avg_loss_D_B},
+)
+```
+
+Warmup/interval gating is handled in each training loop, not inside this class.
 
