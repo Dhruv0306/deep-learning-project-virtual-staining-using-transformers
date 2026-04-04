@@ -467,6 +467,16 @@ class V4ModelConfig:
     """
     Architecture hyperparameters for the v4 generator and discriminator.
 
+    IMPROVED (v4.1) settings:
+    - Generator base_channels increased from 128→192 for richer feature representation
+    - num_res_blocks increased from 9→15 for deeper bottleneck processing
+    - Transformer encoder_dim increased from 224→384 for higher capacity encoding
+    - encoder_depth increased from 4→6 for complex feature transformation
+    - encoder_heads increased from 4→8 for multi-scale attention patterns
+    - encoder_mlp_ratio increased from 3.0→4.0 for stronger non-linearities
+    - Discriminator channels increased from 64→128 for finer feature discrimination
+    - disc_n_layers increased from 3→4 for deeper receptive field analysis
+
     Generator fields:
         input_nc / output_nc:   Input and output image channels.
         base_channels:          Base feature-map width for the CNN decoder.
@@ -490,17 +500,17 @@ class V4ModelConfig:
 
     input_nc: int = 3
     output_nc: int = 3
-    base_channels: int = 64
-    num_res_blocks: int = 6
-    disc_base_channels: int = 64
-    disc_n_layers: int = 3
+    base_channels: int = 192
+    num_res_blocks: int = 15
+    disc_base_channels: int = 128
+    disc_n_layers: int = 4
     use_transformer_encoder: bool = True
     image_size: int = 256
     patch_size: int = 8
-    encoder_dim: int = 224
-    encoder_depth: int = 4
-    encoder_heads: int = 4
-    encoder_mlp_ratio: float = 3.0
+    encoder_dim: int = 384
+    encoder_depth: int = 6
+    encoder_heads: int = 8
+    encoder_mlp_ratio: float = 4.0
     encoder_dropout: float = 0.0
     use_gradient_checkpointing: bool = False
 
@@ -557,11 +567,11 @@ class V4TrainingConfig:
     early_stopping_min_delta: float = 1e-5
     divergence_threshold: float = 5.0
     divergence_patience: int = 2
-    lambda_gan: float = 1.0
-    lambda_nce: float = 1.0
-    lambda_identity: float = 3.0
-    nce_layers: tuple[int, ...] = (0, 1, 2)
-    nce_num_patches: int = 128
+    lambda_gan: float = 5.0
+    lambda_nce: float = 2.0
+    lambda_identity: float = 5.0
+    nce_layers: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    nce_num_patches: int = 256
     nce_temperature: float = 0.07
     nce_proj_dim: int = 256
     use_replay_buffer: bool = True
@@ -643,5 +653,5 @@ def get_v4_8gb_config() -> V4Config:
     observed.  All other settings are identical to :func:`get_v4_config`.
     """
     cfg = V4Config()
-    cfg.model.use_gradient_checkpointing = False
+    cfg.model.use_gradient_checkpointing = True
     return cfg
