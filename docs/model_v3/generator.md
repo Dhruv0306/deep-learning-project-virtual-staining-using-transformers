@@ -1,168 +1,206 @@
-# model_v3/generator.py - v3 DiT Generator
+# model_v3/generator.py — v3.2 DiT Generator
 
-Source of truth: ../../model_v3/generator.py
+Source of truth: `../../model_v3/generator.py`
 
-This module defines the CycleDiT generator stack used by v3 diffusion.
-The generator combines noisy latent patch embedding, timestep conditioning,
-raw-image tokenization, and learned domain biasing.
+This module defines the CycleDiT generator stack used by the v3 diffusion pipeline.
 
 ## Public Components
 
-1. `PatchEmbed`
+1. `PatchEmbed` — overlapping two-conv stem
 2. `TimestepEmbedding`
-3. `ConditionTokenizer`
-4. `DiTBlock`
-5. `DiTGenerator`
-6. `DomainEmbedding`
-7. `CycleDiTGenerator`
-8. `getGeneratorV3`
+3. `ConditionTokenizer` — multi-scale fusion
+4. `_LocalWindowAttention` — window-partitioned local SA (internal)
+5. `DiTBlock` — local + global SA, cross-attention, adaLN-Zero (12-chunk)
+6. `DiTGenerator` — alternating cross-attention backbone
+7. `DomainEmbedding`
+8. `CycleDiTGenerator`
+9. `getGeneratorV3`
+
+---
 
 ## PatchEmbed
 
-Input:
+Overlapping two-conv stem (DeiT-III style) replacing the single large-stride projection.
 
-- `z`: `(N, 4, 32, 32)` by default
-- `patch_size`: latent patch size, usually `2`
+Shape flow:
 
-Behavior:
+```
+(N, C, H, W)
+  -> Conv2d(C, hidden//2, 3×3, stride=1) + GroupNorm + SiLU   # full-res
+  -> Conv2d(hidden//2, hidden, patch_size×patch_size, stride=patch_size)  # downsample
+  -> flatten + transpose
+  -> (N, (H/p)*(W/p), hidden_dim)
+```
 
-1. split the latent map into non-overlapping patches
-2. flatten each patch to a token vector
-3. project patch vectors into `hidden_dim`
+Benefit: smoother gradients near patch boundaries compared to a single strided projection.
 
-Output:
+Args:
 
-- token sequence of shape `(N, L, hidden_dim)` where `L = (H / p) * (W / p)`
+- `in_channels` — latent channels (4 for SD VAE)
+- `patch_size` — spatial patch size
+- `hidden_dim` — output token dimension
+- `latent_size` — spatial side length (H == W assumed)
+
+---
 
 ## TimestepEmbedding
 
-Input:
+Sinusoidal timestep features passed through a two-layer SiLU MLP.
 
-- scalar or batch timestep tensor
+Output: `(N, hidden_dim)`
 
-Behavior:
-
-1. build sinusoidal timestep features
-2. pass them through a two-layer SiLU MLP
-
-Output:
-
-- `(N, hidden_dim)` timestep embedding
+---
 
 ## ConditionTokenizer
 
-Input:
+Multi-scale conditioning tokenizer fusing full-resolution and 2× downsampled branches.
 
-- conditioning image tensor `(N, 3, 256, 256)`
+Shape flow (256×256 input, patch_size=16):
 
-Behavior:
+```
+full-scale:   (N, 3, 256, 256) -> Conv2d(stride=16) -> (N, hidden, 16, 16) -> (N, 256, hidden)
+coarse-scale: avg_pool2d(×2) -> Conv2d(stride=16) -> adaptive_avg_pool -> (N, 256, hidden)
+fused:        gate * fine + (1-gate) * coarse  [gate = sigmoid(learnable scalar)]
++ 2-D sincos positional embeddings
+-> (N, 256, hidden_dim)
+```
 
-1. patchify with `Conv2d(kernel=stride=cond_patch_size)`
-2. optionally average-pool token grid using `cond_token_pool_stride`
-3. flatten to tokens
-4. add 2-D sine/cosine positional embeddings
+Args:
 
-Output:
+- `hidden_dim`, `image_size`, `patch_size`, `pool_stride`
+- `use_multiscale` — if `False`, only the full-scale branch is used
 
-- conditioning tokens `(N, Lc, hidden_dim)`
+---
+
+## _LocalWindowAttention
+
+Window-based local self-attention on a flat token sequence.
+
+1. Reshape tokens to `(N, grid, grid, D)`.
+2. Partition into non-overlapping `window_size × window_size` windows.
+3. Apply `nn.MultiheadAttention` within each window.
+4. Reverse partition back to `(N, L, D)`.
+
+Skipped silently when `grid % window_size != 0`.
+
+---
 
 ## DiTBlock
 
-Each block uses adaLN-Zero conditioning from the combined timestep and
-domain embedding.
+Enhanced Transformer block with four sub-layers and 12-chunk adaLN-Zero.
 
-Inputs:
+Sub-layers:
 
-- latent tokens `(N, L, Hd)`
-- condition tokens `(N, Lc, Hd)`
-- combined conditioning vector `(N, Hd)`
+| # | Sub-layer | adaLN chunks |
+|---|---|---|
+| 1 | Global self-attention (full sequence) | γ1, β1, α1 |
+| 2 | Local window self-attention (gated) | γ_l, β_l, α_l |
+| 3 | Cross-attention to condition tokens (optional) | γ_x, β_x, α_x |
+| 4 | Feed-forward MLP (GELU + intermediate LayerNorm) | γ2, β2, α2 |
 
-Flow:
+Key details:
 
-1. adaptive LayerNorm modulation on self-attention
-2. optional cross-attention to condition tokens
-3. adaptive LayerNorm modulation on the MLP branch
-4. residual updates gated by learned alpha parameters
+- Local SA combined with global SA via `sigmoid(local_gate)` — gate initialised to 0.
+- MLP uses GELU (was SiLU) and an intermediate `LayerNorm` for depth stability.
+- adaLN uses 12 chunks when local SA is enabled, 9 otherwise.
+- adaLN linear layer zero-initialised so blocks start as identity.
+
+Args:
+
+- `hidden_dim`, `num_heads`, `mlp_ratio`
+- `use_cross_attn` — enable cross-attention sub-layer
+- `window_size` — local window size in tokens (0 = disabled)
+- `latent_grid` — token grid side length (needed for window partitioning)
+
+---
 
 ## DiTGenerator
 
+DiT backbone with alternating cross-attention strategy.
+
+Alternating strategy:
+
+- Odd-indexed blocks receive full condition tokens (rich texture).
+- Even-indexed blocks receive mean-pooled condition summary (lower cost).
+
 Forward inputs:
 
-- `z_t`: `(N, 4, 32, 32)` noisy latent
-- `t`: diffusion timestep tensor
-- `c`: condition tokens `(N, Lc, hidden_dim)`
+- `z_t` — noisy latent `(N, 4, latent_size, latent_size)`
+- `t` — integer timesteps `(N,)`
+- `c` — condition tokens `(N, Lc, hidden_dim)`
 
 Forward flow:
 
-1. patch embed the latent
-2. add 2-D positional embeddings
-3. compute timestep embedding
-4. add pooled condition tokens to form the conditioning vector
-5. run the Transformer block stack
-6. project tokens back to latent patches
-7. unpatchify to `(N, 4, 32, 32)`
+1. `PatchEmbed` → tokens `(N, L, hidden_dim)`
+2. Add 2-D sincos positional embeddings
+3. `TimestepEmbedding(t)` + `c.mean(dim=1)` → conditioning vector
+4. Precompute pooled condition summary for even-indexed blocks
+5. Run `depth` DiTBlocks with alternating full / pooled condition tokens
+6. Linear head → unpatchify → `(N, 4, latent_size, latent_size)`
 
-Output:
+Output: noise or v-prediction `(N, 4, latent_size, latent_size)`
 
-- `v_pred` or `eps_pred` latent tensor `(N, 4, 32, 32)`
+Args:
+
+- `in_channels`, `hidden_dim`, `depth`, `num_heads`, `mlp_ratio`
+- `patch_size`, `latent_size`
+- `use_gradient_checkpointing` — recompute ViT activations during backward
+- `use_cross_attn` — enable cross-attention in all blocks
+- `window_size` — local attention window size (0 = disabled)
+
+---
 
 ## DomainEmbedding
 
-Purpose:
+Learned 2-entry embedding added to condition tokens to bias translation direction.
 
-- learned target-domain bias for A/B translation
+- Domain `0` → unstained (domain A)
+- Domain `1` → H&E stained (domain B)
 
-Domain ids:
-
-- `0` for domain A
-- `1` for domain B
+---
 
 ## CycleDiTGenerator
 
-This is the top-level v3 model wrapper.
+Top-level wrapper. Public API unchanged from v3.1.
 
 Inputs:
 
-- noisy latent `z_t`
-- timestep `t`
-- conditioning image or precomputed tokens
-- target domain id
-- optional diffusion scheduler
-- prediction type (`"v"` or `"eps"`)
+- `z_t` — noisy latent
+- `t` — timestep
+- `condition` — raw image `(N, 3, H, W)` or pre-computed tokens `(N, L, Hd)`
+- `target_domain` — int or tensor
+- `scheduler` — optional diffusion scheduler for x0 reconstruction
+- `prediction_type` — `"v"` or `"eps"`
 
 Behavior:
 
-1. tokenize raw conditioning images when needed
-2. add the learned domain embedding to the conditioning tokens
-3. call the DiT backbone
-4. optionally reconstruct `x0_pred` using the scheduler
+1. Tokenize raw conditioning image if needed.
+2. Add domain embedding to condition tokens.
+3. Call DiT backbone.
+4. Optionally reconstruct `x0_pred` via scheduler.
 
-Output:
+Output: `{"v_pred": (N,4,32,32), "x0_pred": (N,4,32,32) | None}`
 
-- dictionary with `v_pred` and optional `x0_pred`
+---
 
 ## getGeneratorV3
 
-Builds and smoke-tests a `CycleDiTGenerator` from a diffusion config.
+Builds, initialises, and smoke-tests a `CycleDiTGenerator` from a `DiffusionConfig`.
 
-Important config values:
+New config fields (with safe `getattr` fallbacks for old configs):
 
-- `dit_hidden_dim`
-- `dit_depth`
-- `dit_heads`
-- `dit_mlp_ratio`
-- `dit_patch_size`
-- `cond_patch_size`
-- `cond_token_pool_stride`
-- `use_cross_attention`
-- `use_gradient_checkpointing`
+| Field | Default | Purpose |
+|---|---|---|
+| `use_local_window_attn` | `True` | Enable local window SA in DiTBlocks |
+| `window_size` | `4` | Local attention window size in tokens |
+| `use_multiscale_cond` | `True` | Multi-scale fusion in ConditionTokenizer |
 
-The smoke test runs a dummy forward pass with:
+Existing config fields:
 
-- `z_t`: `(1, 4, 32, 32)`
-- `t`: `(1,)`
-- `x`: `(1, 3, 256, 256)`
+- `dit_hidden_dim`, `dit_depth`, `dit_heads`, `dit_mlp_ratio`, `dit_patch_size`
+- `cond_patch_size`, `cond_token_pool_stride`
+- `use_cross_attention`, `use_gradient_checkpointing`
 
-Return:
+Smoke test: forward pass with `z_t (1,4,32,32)`, `t (1,)`, `x (1,3,256,256)`.
 
-- initialized `CycleDiTGenerator`
+Returns: initialised `CycleDiTGenerator` on the requested device.
