@@ -1,6 +1,6 @@
 # Documentation Index
 
-Reference documentation for all key source files in the UVCGAN v2 histology stain/unstain translation project.
+Reference documentation for all key source files in the histology stain/unstain translation project (v1 Hybrid UVCGAN + CycleGAN, v2 True UVCGAN, v3 CycleDiT diffusion, v4 CUT + Transformer).
 
 ---
 
@@ -29,21 +29,21 @@ Reference documentation for all key source files in the UVCGAN v2 histology stai
 | File | Documentation | Description |
 |---|---|---|
 | `model_v3/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v3/dataflow_pipeline.md) | End-to-end v3 overview with the latent diffusion and adversarial dataflow pipeline |
-| `model_v3/generator.py` | [generator.md](model_v3/generator.md) | CycleDiT generator: ConditionTokenizer + domain embedding + DiT backbone |
-| `model_v3/discriminator.py` | [discriminator.md](model_v3/discriminator.md) | Three-branch ProjectionDiscriminator (local PatchGAN + global + spectral FFT) |
+| `model_v3/generator.py` | [generator.md](model_v3/generator.md) | v3.2 CycleDiTGenerator: overlapping PatchEmbed stem, multi-scale ConditionTokenizer, local+global SA DiTBlocks with 12-chunk adaLN-Zero, alternating cross-attention |
+| `model_v3/discriminator.py` | [discriminator.md](model_v3/discriminator.md) | v3.2 ProjectionDiscriminator: LocalPatchBranchWithMBStd + GlobalBranch with self-attention + color-aware 4-channel FFT branch + learnable branch weights |
 | `model_v3/noise_scheduler.py` | [noise_scheduler.md](model_v3/noise_scheduler.md) | DDPM scheduler and DDIM sampler |
 | `model_v3/vae_wrapper.py` | [vae_wrapper.md](model_v3/vae_wrapper.md) | SD VAE wrapper for latent diffusion |
 | `model_v3/training_loop.py` | [training_loop.md](model_v3/training_loop.md) | Adversarial diffusion training with cycle + identity losses, EMA, and AMP |
 | `model_v3/losses.py` | [losses.md](model_v3/losses.md) | Diffusion loss + LSGAN + R1 penalty + cycle consistency + identity constraints |
-| `model_v3/history_utils.py` | [history_utils.md](model_v3/history_utils.md) | v3 training history CSV/plots (no discriminator terms) |
+| `model_v3/history_utils.py` | [history_utils.md](model_v3/history_utils.md) | v3 training history CSV/plots — denoising, adversarial, cycle, identity, discriminator, gradient-norm terms |
 
 ## Model V4 - CUT + Transformer
 
 | File | Documentation | Description |
 |---|---|---|
 | `model_v4/dataflow_pipeline.md` | [dataflow_pipeline.md](model_v4/dataflow_pipeline.md) | End-to-end v4 overview with the CUT + Transformer and PatchNCE dataflow pipeline |
-| `model_v4/generator.py` | [generator.md](model_v4/generator.md) | v4 generators: ResNet baseline and Transformer encoder + CNN decoder |
-| `model_v4/discriminator.py` | [discriminator.md](model_v4/discriminator.md) | v4 discriminator: N-layer 70x70 PatchGAN |
+| `model_v4/generator.py` | [generator.md](model_v4/generator.md) | v4.2 generators: ResnetGenerator (SE-gated blocks + bottleneck SpatialSelfAttention) or TransformerGeneratorV4 (pre-norm + DW-Conv EnhancedTransformerBlock + TextureRefinementHead) |
+| `model_v4/discriminator.py` | [discriminator.md](model_v4/discriminator.md) | v4.2 PatchGANDiscriminator: spectral norm on all convs, auxiliary multi-scale head, MinibatchStdDev, merged forward() and forward_multiscale() |
 | `model_v4/transformer_blocks.py` | [transformer_blocks.md](model_v4/transformer_blocks.md) | Patch embedding and Transformer blocks used by v4 generator |
 | `model_v4/patch_sampler.py` | [patch_sampler.md](model_v4/patch_sampler.md) | Random spatial patch sampler for PatchNCE |
 | `model_v4/nce_loss.py` | [nce_loss.md](model_v4/nce_loss.md) | PatchNCE contrastive loss with per-layer projection heads |
@@ -55,7 +55,7 @@ The v1, v2, v3, and v4 folders now include folder-level dataflow pipeline pages 
 
 | File | Documentation | Description |
 |---|---|---|
-| `config.py` | [config.md](config.md) | Config reference for v1/v2/v3 (`UVCGANConfig`) and v4 (`V4Config`) |
+| `config.py` | [config.md](config.md) | Full config reference: `UVCGANConfig` (v1/v2/v3) with `GeneratorConfig`, `DiscriminatorConfig`, `LossConfig`, `TrainingConfig`, `DataConfig`, `DiffusionConfig`; `V4Config` (v4) with `V4ModelConfig`, `V4TrainingConfig`, `V4DataConfig`; all six factory functions with active-setting notes |
 | `shared/data_loader.py` | [data_loader.md](shared/data_loader.md) | Unpaired dataset class, transform pipeline, `getDataLoader` factory, and `denormalize` helper |
 | `shared/replay_buffer.py` | [replay_buffer.md](shared/replay_buffer.md) | Fixed-size pool of past fake images for discriminator stabilisation |
 | `shared/metrics.py` | [metrics.md](shared/metrics.md) | SSIM, PSNR, and FID metrics via `MetricsCalculator`. InceptionV3 feature extraction |
