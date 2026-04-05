@@ -500,7 +500,7 @@ class V4ModelConfig:
 
     input_nc: int = 3
     output_nc: int = 3
-    base_channels: int = 192
+    base_channels: int = 128
     num_res_blocks: int = 15
     disc_base_channels: int = 128
     disc_n_layers: int = 4

@@ -1,51 +1,105 @@
-# model_v4/discriminator.py
+# model_v4/discriminator.py — v4.2
 
-Source of truth: ../../model_v4/discriminator.py
+Source of truth: `../../model_v4/discriminator.py`
 
-Defines the v4 discriminator as a standard N-layer PatchGAN with optional
-depth/width control.
+Enhanced multi-scale PatchGAN discriminator for the v4 CUT + Transformer pipeline.
 
-## Building Block
+## Public Components
 
-## _conv_block(in_channels, out_channels, stride=2, use_norm=True)
+1. `MinibatchStdDev`
+2. `PatchGANDiscriminator`
+3. `init_weights_v4`
+4. `getDiscriminatorV4`
 
-Each block is:
+`_sn_conv_block` is an internal helper.
 
-- `Conv2d(kernel=4, padding=1, stride=stride)`
-- optional `InstanceNorm2d`
-- `LeakyReLU(0.2)`
+---
 
-Per PatchGAN convention, the first block disables normalization.
+## _sn_conv_block (internal)
+
+Single spectral-norm Conv2d → [InstanceNorm2d] → LeakyReLU(0.2) block.
+
+- Spectral norm applied to all convolutions (new in v4.2).
+- First layer disables InstanceNorm per PatchGAN convention (`use_norm=False`).
+
+---
+
+## MinibatchStdDev
+
+Minibatch standard-deviation channel appended before the final score head.
+
+Computes average std-dev across groups of `group_size` samples and tiles it as
+an extra channel. Gives the discriminator a diversity signal to detect
+mode-collapsed generators producing repetitive stain patterns.
+
+Args: `group_size` (default 4, clamped to batch size).
+
+Output: `(N, C+1, H, W)`
+
+---
 
 ## PatchGANDiscriminator
 
-Architecture:
+Enhanced multi-scale PatchGAN with spectral norm, auxiliary head, and MinibatchStdDev.
 
-1. first downsampling block (no norm)
-2. `n_layers - 1` additional stride-2 downsampling blocks
-3. one stride-1 refinement block
-4. final `Conv2d(..., out_channels=1)` score-map head
+Architecture (n_layers=3 example):
 
-Key points:
+```
+Input (N, 3, 256, 256)
+  -> down_layers[0]: SN-Conv(stride=2, no IN)
+  -> down_layers[1]: SN-Conv(stride=2, IN)   <- aux head tapped here (n_layers//2 = 1)
+       -> aux_head: SN-Conv(4×4, stride=1) -> aux score map
+  -> down_layers[2]: SN-Conv(stride=2, IN)
+  -> penultimate:    SN-Conv(stride=1, IN)
+  -> MinibatchStdDev                          <- appends 1 diversity channel
+  -> final_conv:     SN-Conv(4×4, stride=1) -> main score map
+```
 
-- outputs a spatial realism map (not a single scalar)
-- default settings (`base_channels=64`, `n_layers=3`) match typical
-  CycleGAN/CUT-style 70x70 PatchGAN behavior
+The auxiliary head tap point is determined by a CPU dry-run probe to avoid
+brittle static channel arithmetic.
 
-## Initialization and Factory
+Forward methods:
 
-## init_weights_v4(net)
+- `forward(x)` — returns a single merged score map `(N, 1, H', W')`.
+  The aux map is bilinearly interpolated to match main's spatial size, then
+  averaged: `0.5 * (main + aux)`. Compatible with existing LSGAN helpers.
+- `forward_multiscale(x)` — returns `(main, aux)` separately for callers
+  that want per-scale supervision.
 
-- Conv / ConvTranspose: Normal(0, 0.02)
-- InstanceNorm scale: Normal(1, 0.02), bias 0
+Args:
 
-## getDiscriminatorV4(...)
+| Arg | Default | Description |
+|---|---|---|
+| `input_nc` | 3 | Input image channels |
+| `base_channels` | 64 | Feature width of first conv |
+| `n_layers` | 3 | Strided downsampling layers |
+| `mbstd_group` | 4 | MinibatchStdDev group size (0 = disable) |
 
-- builds `PatchGANDiscriminator`
-- applies `init_weights_v4`
-- auto-selects CUDA/CPU if `device` is omitted
-- optional smoke test prints output shape for random 256x256 input
+---
 
-Return value:
+## init_weights_v4
 
-- initialized discriminator on target device
+Weight initialisation policy:
+
+- `Conv2d` / `ConvTranspose2d`: Normal(0, 0.02)
+- `InstanceNorm2d` scale: Normal(1, 0.02), bias = 0
+
+---
+
+## getDiscriminatorV4
+
+Build, initialise, and smoke-test a `PatchGANDiscriminator`.
+
+New arg in v4.2:
+
+- `mbstd_group` (int, default 4) — MinibatchStdDev group size; 0 = disabled.
+
+Smoke test verifies three output shapes:
+
+```
+[getDiscriminatorV4] merged output: (N, 1, H', W')
+[getDiscriminatorV4] main   output: (N, 1, H', W')
+[getDiscriminatorV4] aux    output: (N, 1, H'', W'')
+```
+
+Returns: initialised `PatchGANDiscriminator` on the requested device.
