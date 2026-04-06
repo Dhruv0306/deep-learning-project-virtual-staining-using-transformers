@@ -420,9 +420,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
         primary memory saving relative to a fully featured setup.
     """
     cfg = UVCGANConfig(model_version=3)
-    cfg.diffusion.dit_hidden_dim = 512
+    cfg.diffusion.dit_hidden_dim = 768
     cfg.diffusion.dit_depth = 8
-    cfg.diffusion.dit_heads = 8
+    cfg.diffusion.dit_heads = 12
     cfg.diffusion.dit_patch_size = 8
     cfg.diffusion.dit_mlp_ratio = 2.0
     cfg.diffusion.use_gradient_checkpointing = True
@@ -450,9 +450,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.disc_use_fft = False  # FFT branch is memory-intensive; disabled
     cfg.diffusion.disc_use_global = True  # global branch kept for layout supervision
     cfg.diffusion.disc_use_local = True  # local PatchGAN kept for texture detail
-    cfg.diffusion.disc_base_channels = 64
-    cfg.diffusion.disc_global_base_channels = 16
-    cfg.diffusion.disc_n_layers = 3
+    cfg.diffusion.disc_base_channels = 128
+    cfg.diffusion.disc_global_base_channels = 32
+    cfg.diffusion.disc_n_layers = 4
 
     return cfg
 
