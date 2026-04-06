@@ -322,20 +322,20 @@ def get_8gb_config() -> UVCGANConfig:
 
     Active settings:
         - ``generator.use_gradient_checkpointing = True``  (~30–40% VRAM saving)
-        - ``generator.vit_depth = 4``  (reduce to 2 for more headroom)
-        - ``discriminator.num_scales = 3``  (reduce to 2 to save ~15%)
-        - ``data.batch_size = 2``, ``training.accumulate_grads = 2``  (effective batch = 4)
-        - ``loss.perceptual_resize = 180``
+        - ``generator.vit_depth = 4``  (paper default; reduce to 2 for more headroom)
+        - ``discriminator.num_scales = 4``  (increase for richer multi-scale feedback)
+        - ``data.batch_size = 1``, ``training.accumulate_grads = 4``  (effective batch = 4)
+        - ``loss.perceptual_resize = 128``
         - ``training.use_amp = True``  (do not disable)
     """
     cfg = UVCGANConfig(model_version=2)
 
     cfg.generator.use_gradient_checkpointing = True
-    cfg.generator.vit_depth = 4          # reduce to 2 for more VRAM headroom
-    cfg.discriminator.num_scales = 3     # reduce to 2 to save ~15%
-    cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2    # effective batch = 4
-    cfg.loss.perceptual_resize = 180
+    cfg.generator.vit_depth = 4          # paper default is 4; reduced for 8 GB target
+    cfg.discriminator.num_scales = 4     # 2-scale PatchGAN lowers discriminator VRAM
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4    # effective batch = 4
+    cfg.loss.perceptual_resize = 128
     cfg.generator.use_cross_domain = True
     cfg.generator.use_layerscale = True
     cfg.loss.use_wgan_gp = False

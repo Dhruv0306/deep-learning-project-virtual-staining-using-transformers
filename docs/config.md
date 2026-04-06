@@ -255,9 +255,9 @@ v4.1 improved defaults.
 | Function | Returns | Notes |
 |---|---|---|
 | `get_default_config(model_version=2)` | `UVCGANConfig` | Full-VRAM defaults; v1 overrides applied when `model_version=1` |
-| `get_8gb_config()` | `UVCGANConfig` | v2 tuned for 8 GB: `batch_size=2`, `accumulate_grads=2`, gradient checkpointing on |
+| `get_8gb_config()` | `UVCGANConfig` | v2 tuned for 8 GB: `batch_size=1`, `accumulate_grads=4`, gradient checkpointing on |
 | `get_dit_config()` | `UVCGANConfig` | v3 baseline: `hidden_dim=256`, `depth=4`, `heads=4` |
-| `get_dit_8gb_config()` | `UVCGANConfig` | v3 for 8 GB: `hidden_dim=512`, `depth=8`, `heads=8`, checkpointing on, FFT branch off |
+| `get_dit_8gb_config()` | `UVCGANConfig` | v3 for 8 GB: `hidden_dim=768`, `depth=8`, `heads=12`, checkpointing on, FFT branch off |
 | `get_v4_config()` | `V4Config` | v4 full-capacity defaults |
 | `get_v4_8gb_config()` | `V4Config` | v4 for 8 GB: gradient checkpointing on |
 
@@ -265,16 +265,18 @@ v4.1 improved defaults.
 
 - `generator.use_gradient_checkpointing = True`
 - `generator.vit_depth = 4` (reduce to 2 for more headroom)
-- `discriminator.num_scales = 3` (reduce to 2 to save ~15%)
-- `data.batch_size = 2`, `training.accumulate_grads = 2` (effective batch = 4)
-- `loss.perceptual_resize = 180`
+- `discriminator.num_scales = 4`
+- `data.batch_size = 1`, `training.accumulate_grads = 4` (effective batch = 4)
+- `loss.perceptual_resize = 128`
 - `training.use_amp = True` (do not disable)
 
 ### get_dit_8gb_config() active settings
 
-- `dit_hidden_dim=768`, `dit_depth=8`, `dit_heads=12`, `dit_patch_size=8`
+- `dit_hidden_dim=768`, `dit_depth=8`, `dit_heads=12`, `dit_patch_size=8`, `dit_mlp_ratio=2.0`
 - `use_gradient_checkpointing=True`, `use_cross_attention=False`
-- `cond_patch_size=32`, `cond_token_pool_stride=4`
-- `disc_use_fft=False` (memory saving), `disc_use_global=True`, `disc_use_local=True`
+- `cond_patch_size=32`, `cond_token_pool_stride=4`, `cfg_scale=1.0`
+- `disc_use_fft=False` (memory-intensive; disabled on 8 GB), `disc_use_global=True`, `disc_use_local=True`
 - `disc_base_channels=128`, `disc_global_base_channels=32`, `disc_n_layers=4`
-- `data.batch_size=2`, `training.accumulate_grads=2`
+- `data.batch_size=2`, `training.accumulate_grads=2` (effective batch = 4)
+- `loss.perceptual_resize=256`, `lambda_perceptual_v3=0.0`
+- `training.validation_size=20`, `training.validation_fid_samples=600`

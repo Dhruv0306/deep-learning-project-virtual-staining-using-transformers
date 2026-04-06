@@ -126,6 +126,16 @@ def _global_grad_norm(parameters) -> float:
     return float(torch.norm(torch.stack([g.norm() for g in grads])))
 
 
+def _snapshot_module_to_cpu(module: torch.nn.Module) -> dict:
+    """
+    Create a CPU snapshot of a module state_dict for lightweight rollback.
+
+    The copy is detached from autograd and moved to CPU to avoid pinning extra
+    GPU memory between training steps.
+    """
+    return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
@@ -288,6 +298,12 @@ def train_v2(
     stopped_epoch = num_epochs
     accumulate = max(1, tcfg.accumulate_grads)
     accum_count = 0
+    nonfinite_g_streak = 0
+
+    # Keep a last-known-good generator snapshot so we can recover if Loss_G
+    # becomes non-finite for many consecutive batches.
+    last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
+    last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
 
     if accumulate > 1:
         print(
@@ -432,18 +448,28 @@ def train_v2(
 
             loss_G_val = loss_G.item()
             if not torch.isfinite(loss_G):
+                nonfinite_g_streak += 1
                 print(
-                    f"[warn] non-finite Loss_G at epoch {epoch+1} batch {i}, skipping G step"
+                    f"[warn] non-finite Loss_G at epoch {epoch+1} batch {i}, rolling back G to last good state (streak={nonfinite_g_streak})"
                 )
+                G_AB.load_state_dict(last_good_G_AB_state, strict=True)
+                G_BA.load_state_dict(last_good_G_BA_state, strict=True)
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
+                if use_amp:
+                    scaler.update(new_scale=max(1.0, scaler.get_scale() / 2.0))
                 continue
             if not (torch.isfinite(fake_A).all() and torch.isfinite(fake_B).all()):
+                nonfinite_g_streak += 1
                 print(
-                    f"[warn] non-finite generator output at epoch {epoch+1} batch {i}, skipping G step"
+                    f"[warn] non-finite generator output at epoch {epoch+1} batch {i}, rolling back G to last good state (streak={nonfinite_g_streak})"
                 )
+                G_AB.load_state_dict(last_good_G_AB_state, strict=True)
+                G_BA.load_state_dict(last_good_G_BA_state, strict=True)
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
+                if use_amp:
+                    scaler.update(new_scale=max(1.0, scaler.get_scale() / 2.0))
                 continue
             scaler.scale(loss_G_scaled).backward()
             accum_count += 1
@@ -469,6 +495,10 @@ def train_v2(
                         f"[warn] AMP scaler scale dropped below 1.0 ({current_scale}) at epoch {epoch+1} batch {i} — persistent overflow, check VGG/OOM"
                     )
 
+                # Successful optimiser step: refresh rollback snapshot.
+                last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
+                last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
+                nonfinite_g_streak = 0
                 accum_count = 0
             else:
                 grad_norm_G = 0.0  # not stepping this batch
