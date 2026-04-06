@@ -13,6 +13,7 @@ Scaling convention:
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, cast
 import warnings
 
@@ -43,19 +44,70 @@ class VAEWrapper(nn.Module):
                   (default ``"stabilityai/sd-vae-ft-mse"``).
     """
 
-    def __init__(self, model_id: str = "stabilityai/sd-vae-ft-mse"):
+    def __init__(
+        self,
+        model_id: str = "stabilityai/sd-vae-ft-mse",
+        cache_dir: Optional[str] = None,
+        offline_first: bool = True,
+    ):
         super().__init__()
         self.model_id = model_id
+        self.cache_dir = cache_dir
+        self.offline_first = offline_first
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
                 message="The `local_dir_use_symlinks` argument is deprecated",
                 category=UserWarning,
             )
-            self.vae = AutoencoderKL.from_pretrained(model_id)
+            self.vae = self._load_vae()
         self.vae.requires_grad_(False)
         self.vae.eval()
         self.latent_scale = 0.18215
+
+    def _load_vae(self) -> AutoencoderKL:
+        """
+        Load VAE weights with offline-first behavior.
+
+        Strategy:
+            1) If ``model_id`` is a local path, load from that path only.
+            2) If ``offline_first`` is enabled, try HuggingFace cache only
+               (``local_files_only=True``).
+            3) If not found in cache, fall back to online download.
+        """
+        common_kwargs: dict[str, Any] = {}
+        if self.cache_dir:
+            common_kwargs["cache_dir"] = self.cache_dir
+
+        if os.path.isdir(self.model_id):
+            return AutoencoderKL.from_pretrained(
+                self.model_id,
+                local_files_only=True,
+                **common_kwargs,
+            )
+
+        cached_exc: Optional[Exception] = None
+        if self.offline_first:
+            try:
+                return AutoencoderKL.from_pretrained(
+                    self.model_id,
+                    local_files_only=True,
+                    **common_kwargs,
+                )
+            except Exception as exc:
+                cached_exc = exc
+
+        try:
+            return AutoencoderKL.from_pretrained(self.model_id, **common_kwargs)
+        except Exception as exc:
+            if cached_exc is not None:
+                raise RuntimeError(
+                    "Could not load VAE from local HuggingFace cache, and online "
+                    "download also failed. If you are offline, connect once to "
+                    "download the model or provide a local model directory path "
+                    f"for model_id. model_id={self.model_id!r}"
+                ) from exc
+            raise
 
     def encode(self, x: Tensor) -> Tensor:
         """
