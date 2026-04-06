@@ -1,14 +1,12 @@
 """
-VAE wrapper for the v3 latent diffusion pipeline.
+Frozen Stable Diffusion VAE wrapper for the v3 latent diffusion pipeline.
 
-Component structure:
-    1) pretrained AutoencoderKL loader
-    2) encode helper (image -> latent)
-    3) decode helper (latent -> image)
+Components:
+    VAEWrapper  — loads AutoencoderKL, freezes weights, exposes encode/decode.
 
 Scaling convention:
-    Stable Diffusion latent scaling factor 0.18215 is applied on encode
-    and undone on decode.
+    Latents are multiplied by 0.18215 on encode and divided by 0.18215 on
+    decode, matching the original Stable Diffusion training setup.
 """
 
 from __future__ import annotations
@@ -30,18 +28,18 @@ except ImportError as exc:  # pragma: no cover - import guard
 
 class VAEWrapper(nn.Module):
     """
-    Frozen Stable Diffusion VAE wrapper for latent diffusion.
+    Frozen Stable Diffusion VAE for latent diffusion encode/decode.
 
-    Downloads and caches the AutoencoderKL checkpoint from HuggingFace on
-    first use (~335 MB).  All VAE parameters are frozen; the wrapper is
-    always in eval mode.
+    Downloads and caches ``AutoencoderKL`` from HuggingFace on first use
+    (~335 MB).  All parameters are frozen; the module stays in eval mode.
 
-    Scaling convention: SD latents are multiplied by 0.18215 on encode and
-    divided by 0.18215 on decode, matching the original SD training setup.
+    Scaling: latents are multiplied by 0.18215 on encode and divided on
+    decode, matching the original SD convention.
 
     Args:
-        model_id: HuggingFace model ID for the VAE
-                  (default ``"stabilityai/sd-vae-ft-mse"``).
+        model_id       : HuggingFace model ID or local directory path.
+        cache_dir      : Optional HuggingFace cache directory override.
+        offline_first  : Try local cache before downloading (default True).
     """
 
     def __init__(
@@ -67,13 +65,15 @@ class VAEWrapper(nn.Module):
 
     def _load_vae(self) -> AutoencoderKL:
         """
-        Load VAE weights with offline-first behavior.
+        Load VAE weights with offline-first fallback.
 
-        Strategy:
-            1) If ``model_id`` is a local path, load from that path only.
-            2) If ``offline_first`` is enabled, try HuggingFace cache only
-               (``local_files_only=True``).
-            3) If not found in cache, fall back to online download.
+        Order:
+            1. Local path — if ``model_id`` is an existing directory.
+            2. HuggingFace cache — ``local_files_only=True`` when ``offline_first``.
+            3. Online download — fallback if not found in cache.
+
+        Raises:
+            RuntimeError: If both cache and online download fail.
         """
         common_kwargs: dict[str, Any] = {}
         if self.cache_dir:

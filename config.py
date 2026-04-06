@@ -1,22 +1,20 @@
 """
-Centralized configuration manager for training and inference presets.
+Centralised configuration for all four model families.
 
-Provides dataclasses for generator, discriminator, loss, training, data, and
-diffusion hyperparameters. The top-level ``model_version`` switch supports:
-    - v1: Hybrid CycleGAN/UVCGAN baseline
-    - v2: True UVCGAN v2
-    - v3: DiT diffusion pipeline
-    - v4: CUT baseline (GAN + PatchNCE + Transformer)
+Each model version has a dedicated factory function:
+    - v1/v2/v3 : ``get_default_config``, ``get_8gb_config``,
+                 ``get_dit_config``, ``get_dit_8gb_config``  → :class:`UVCGANConfig`
+    - v4       : ``get_v4_config``, ``get_v4_8gb_config``    → :class:`V4Config`
 
 v2 defaults are paper-aligned (Prokopenko et al., UVCGAN v2, 2023):
-  - GAN objective  : LSGAN, NOT Wasserstein
-  - Gradient penalty: one-sided, gamma=100, lambda_gp=0.1
-  - n_critic        : 1 (LSGAN does not need multi-step D updates)
-  - Adam betas      : (0.5, 0.999), lr=2e-4  (standard LSGAN/CycleGAN values)
-  - lambda_contrastive / lambda_spectral: 0.0 initially; enable once stable
+    GAN objective    : LSGAN (not Wasserstein)
+    Gradient penalty : one-sided, gamma=100, lambda_gp=0.1
+    n_critic         : 1
+    Adam             : lr=2e-4, betas=(0.5, 0.999)
+    Optional losses  : lambda_contrastive / lambda_spectral default to 0.0;
+                       enable once training is stable.
 
-For 8 GB VRAM, prefer ``get_8gb_config()`` for v2 and
-``get_dit_8gb_config()`` for v3.
+For 8 GB VRAM use ``get_8gb_config()`` (v2) or ``get_dit_8gb_config()`` (v3).
 """
 
 import os
@@ -27,18 +25,13 @@ from typing import Optional
 @dataclass
 class GeneratorConfig:
     """
-    Hyperparameters for the UVCGAN v2 generator.
+    Architecture hyperparameters for the UVCGAN v1/v2 generator.
 
-    Memory-relevant attributes (8 GB tips in parentheses):
-        base_channels : Feature channels at the first encoder level.
-                        Quadruples peak activation memory. Keep at 64.
-        vit_depth     : Number of Transformer blocks in the ViT bottleneck.
-                        Each block stores activations for backprop.
-                        Reduce from 4 → 2 to save ~15% generator VRAM.
-        use_gradient_checkpointing: Trade compute for memory by recomputing
-                        activations during backprop instead of storing them.
-                        Saves ~30-40% generator activation memory with
-                        ~20% slower backward pass. Best single option for 8 GB.
+    Memory notes:
+        base_channels              : Quadruples peak activation memory; keep at 64.
+        vit_depth                  : Reduce 4→2 to save ~15% generator VRAM.
+        use_gradient_checkpointing : Recomputes ViT activations during backward
+                                     (~30–40% VRAM saving, ~20% slower backward).
     """
 
     input_nc: int = 3
@@ -51,21 +44,17 @@ class GeneratorConfig:
     use_layerscale: bool = True
     layerscale_init: float = 1e-4
     use_cross_domain: bool = True
-    # Memory optimisation: recompute activations during backward instead of
-    # storing them.  Reduces generator activation VRAM by ~30-40%.
-    # Optional for 8 GB GPUs when additional memory headroom is needed.
-    use_gradient_checkpointing: bool = False
+    use_gradient_checkpointing: bool = False  # ~30–40% VRAM saving; ~20% slower backward
 
 
 @dataclass
 class DiscriminatorConfig:
     """
-    Hyperparameters for the spectral-norm multi-scale discriminator.
+    Hyperparameters for the spectral-norm multi-scale PatchGAN discriminator.
 
-    Memory-relevant attributes:
-        num_scales: 3 scales = 3 independent PatchGAN forward passes per step.
-                   Reduce from 3 → 2 to save ~15% discriminator VRAM with
-                   minor quality impact (coarsest scale is least useful).
+    Memory note:
+        num_scales : 3 independent forward passes per step.
+                     Reduce 3→2 to save ~15% discriminator VRAM.
     """
 
     input_nc: int = 3
@@ -78,12 +67,11 @@ class DiscriminatorConfig:
 @dataclass
 class LossConfig:
     """
-    Loss function weights and settings.
+    Loss weights and settings for v1/v2 training.
 
-    Memory-relevant attributes:
-        perceptual_resize: VGG19 input resolution. Lower = less VRAM.
-                          64 instead of 128 saves ~200 MB with minor quality
-                          loss on the perceptual terms only.
+    Memory note:
+        perceptual_resize : VGG19 input resolution; lower = less VRAM
+                            (64 instead of 128 saves ~200 MB).
     """
 
     lambda_cycle: float = 10.0
@@ -101,17 +89,14 @@ class LossConfig:
 @dataclass
 class TrainingConfig:
     """
-    Training loop hyperparameters.
+    Optimiser, scheduler, and loop hyperparameters for v1/v2/v3 training.
 
-    Memory-relevant attributes:
-        use_amp          : Mixed precision (float16 activations). Already True
-                          by default. Cuts activation memory roughly in half.
-                          Do NOT disable this on 8 GB.
-        accumulate_grads : Gradient accumulation steps. Simulates a larger
-                          effective batch size without increasing peak VRAM.
-                          accumulate_grads=2 with batch_size=2 is equivalent
-                          to batch_size=4 in terms of gradient statistics,
-                          but only 2 samples live in VRAM at once.
+    Memory notes:
+        use_amp          : Float16 activations; halves activation VRAM.
+                           Do not disable on 8 GB GPUs.
+        accumulate_grads : Gradient accumulation steps. ``accumulate_grads=2``
+                           with ``batch_size=2`` gives effective batch=4 at
+                           half the VRAM cost.
     """
 
     num_epochs: int = 200
@@ -131,10 +116,7 @@ class TrainingConfig:
     use_amp: bool = True
     replay_buffer_size: int = 50
     n_critic: int = 1
-    # Gradient accumulation: accumulate gradients over this many batches
-    # before stepping the optimiser.  Effective batch = batch_size * this.
-    # Set to 2 when batch_size=2 to keep effective batch = 4.
-    accumulate_grads: int = 1
+    accumulate_grads: int = 1  # effective batch = batch_size × accumulate_grads
     validation_warmup_epochs: int = 10
     validation_size: int = 100
     validation_fid_samples: int = 200
@@ -144,19 +126,16 @@ class TrainingConfig:
 @dataclass
 class DataConfig:
     """
-    Data loading configuration.
+    Data loading configuration for v1/v2/v3.
 
     Fields:
-        data_root (str): Root directory of the preprocessed CycleGAN dataset
-            (must contain ``trainA/``, ``trainB/``, ``testA/``, ``testB/``).
-        image_size (int): Spatial size to which every patch is resized
-            during loading.  Must match the patch size used in
-            ``preprocess_data.py`` (default 256).
-        batch_size (int): Number of sample pairs per training mini-batch.
-        num_workers (int): DataLoader worker processes.  Set to 0 to
-            disable multiprocessing (useful for debugging on Windows).
-        augment (bool): Reserved for future augmentation support.
-            Currently unused.
+        data_root      : Dataset root; must contain ``trainA/``, ``trainB/``,
+                         ``testA/``, ``testB/``.
+        image_size     : Patch resize target; must match ``preprocess_data.py``.
+        batch_size     : Samples per mini-batch.
+        num_workers    : DataLoader workers (0 = main process, useful on Windows).
+        prefetch_factor: Batches prefetched per worker.
+        augment        : Reserved for future augmentation; currently unused.
     """
 
     data_root: str = os.path.join(
@@ -307,16 +286,14 @@ class UVCGANConfig:
 
 def get_default_config(model_version: int = 2) -> UVCGANConfig:
     """
-    Return a default UVCGANConfig for the requested model version.
-    Assumes sufficient VRAM (roughly 12+ GB).
+    Return a full-VRAM UVCGANConfig for the requested model version (12+ GB).
 
     Args:
         model_version: ``1`` (hybrid baseline), ``2`` (true UVCGAN v2),
             or ``3`` (DiT diffusion).
 
-    Notes:
-        Explicit architecture overrides are applied only for ``model_version=1``
-        to keep legacy behavior aligned with the v1 training loop.
+    For v1, legacy-aligned overrides are applied (single-scale PatchGAN,
+    no LayerScale, no cross-domain fusion, two-sided GP).
     """
     cfg = UVCGANConfig(model_version=model_version)
 
@@ -341,27 +318,29 @@ def get_default_config(model_version: int = 2) -> UVCGANConfig:
 
 def get_8gb_config() -> UVCGANConfig:
     """
-    Return a user-tuned UVCGANConfig for 8 GB GPUs.
+    Return a v2 UVCGANConfig tuned for 8 GB GPUs.
 
-    NOTE: These values reflect current memory testing and are not the
-    original VRAM-minimizing profile. Comments below describe the
-    active settings.
+    Active settings:
+        - ``generator.use_gradient_checkpointing = True``  (~30–40% VRAM saving)
+        - ``generator.vit_depth = 4``  (reduce to 2 for more headroom)
+        - ``discriminator.num_scales = 3``  (reduce to 2 to save ~15%)
+        - ``data.batch_size = 2``, ``training.accumulate_grads = 2``  (effective batch = 4)
+        - ``loss.perceptual_resize = 180``
+        - ``training.use_amp = True``  (do not disable)
     """
     cfg = UVCGANConfig(model_version=2)
 
-    # Recompute ViT activations during backward to save ~30-40% activation VRAM.
     cfg.generator.use_gradient_checkpointing = True
-    cfg.generator.vit_depth = 4  # full depth; reduce to 2 for more headroom
-    cfg.discriminator.num_scales = 3  # full multi-scale; reduce to 2 to save ~15%
-    # batch_size=2 + accumulate_grads=2 keeps effective batch=4 at half the VRAM cost.
+    cfg.generator.vit_depth = 4          # reduce to 2 for more VRAM headroom
+    cfg.discriminator.num_scales = 3     # reduce to 2 to save ~15%
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
-    cfg.loss.perceptual_resize = 180  # slightly larger than 128 for better supervision
+    cfg.training.accumulate_grads = 2    # effective batch = 4
+    cfg.loss.perceptual_resize = 180
     cfg.generator.use_cross_domain = True
     cfg.generator.use_layerscale = True
     cfg.loss.use_wgan_gp = False
     cfg.loss.lambda_gp = 0.1
-    cfg.training.use_amp = True  # do not disable — halves activation memory
+    cfg.training.use_amp = True
     cfg.training.n_critic = 1
 
     return cfg
@@ -369,10 +348,10 @@ def get_8gb_config() -> UVCGANConfig:
 
 def get_dit_config() -> UVCGANConfig:
     """
-    Return a default config for v3 diffusion training.
+    Return a baseline v3 DiT diffusion config (sufficient VRAM).
 
-    The returned profile enables gradient checkpointing and uses the
-    standard v3 architecture settings defined in :class:`DiffusionConfig`.
+    Uses a lightweight DiT (hidden_dim=256, depth=4, heads=4) with gradient
+    checkpointing enabled.  Effective batch = 4 via accumulation.
     """
     cfg = UVCGANConfig(model_version=3)
     cfg.diffusion.dit_hidden_dim = 256
@@ -390,9 +369,8 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.lambda_perceptual_v3 = 0.0
     cfg.diffusion.perceptual_every_n_steps = 4
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
+    cfg.training.accumulate_grads = 2    # effective batch = 4
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -401,23 +379,17 @@ def get_dit_config() -> UVCGANConfig:
 
 def get_dit_8gb_config() -> UVCGANConfig:
     """
-    Return a config for v3 diffusion training tuned for 8 GB GPUs.
+    Return a v3 DiT diffusion config tuned for 8 GB GPUs.
 
-    Relative to :func:`get_dit_config`, this profile uses a larger DiT
-    (hidden_dim=512, depth=8, heads=8) but pairs it with gradient
-    checkpointing, AMP, a reduced batch size, and a lightweight validation
-    setup to stay within 8 GB VRAM.
+    Uses a larger DiT than :func:`get_dit_config` (hidden_dim=768, depth=8,
+    heads=12) paired with gradient checkpointing, AMP, batch_size=2, and
+    a lightweight validation setup to stay within 8 GB VRAM.
 
-    DiT size notes:
-        hidden_dim=512, depth=8, and heads=8 increase model capacity. Combined
-        with gradient checkpointing this is still trainable on 8 GB; reduce
-        these values if OOM is observed.
-
-    Discriminator notes:
-        disc_use_global=True keeps the global branch active.
-        disc_base_channels=64 matches the default channel width.
-        disc_use_fft=False disables the FFT discriminator, which is the
-        primary memory saving relative to a fully featured setup.
+    Key differences from get_dit_config:
+        - Larger DiT (768-dim, 12 heads); reduce if OOM.
+        - ``use_cross_attention=False`` to save attention VRAM.
+        - ``disc_use_fft=False`` — FFT branch disabled (primary memory saving).
+        - ``cond_patch_size=32``, ``cond_token_pool_stride=4`` for fewer cond tokens.
     """
     cfg = UVCGANConfig(model_version=3)
     cfg.diffusion.dit_hidden_dim = 768
@@ -436,10 +408,8 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    # Batch/accumulation: keep effective batch = 4 while lowering step overhead.
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2
-    # Slightly higher worker count helps keep GPU fed on fast local SSDs.
+    cfg.training.accumulate_grads = 2    # effective batch = 4
     cfg.data.num_workers = 4
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
@@ -447,9 +417,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.training.validation_size = 20
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = False  # FFT branch is memory-intensive; disabled
-    cfg.diffusion.disc_use_global = True  # global branch kept for layout supervision
-    cfg.diffusion.disc_use_local = True  # local PatchGAN kept for texture detail
+    cfg.diffusion.disc_use_fft = False       # memory-intensive; disabled on 8 GB
+    cfg.diffusion.disc_use_global = True     # kept for global layout supervision
+    cfg.diffusion.disc_use_local = True      # kept for local texture detail
     cfg.diffusion.disc_base_channels = 128
     cfg.diffusion.disc_global_base_channels = 32
     cfg.diffusion.disc_n_layers = 4
@@ -467,35 +437,25 @@ class V4ModelConfig:
     """
     Architecture hyperparameters for the v4 generator and discriminator.
 
-    IMPROVED (v4.1) settings:
-    - Generator base_channels increased from 128→192 for richer feature representation
-    - num_res_blocks increased from 9→15 for deeper bottleneck processing
-    - Transformer encoder_dim increased from 224→384 for higher capacity encoding
-    - encoder_depth increased from 4→6 for complex feature transformation
-    - encoder_heads increased from 4→8 for multi-scale attention patterns
-    - encoder_mlp_ratio increased from 3.0→4.0 for stronger non-linearities
-    - Discriminator channels increased from 64→128 for finer feature discrimination
-    - disc_n_layers increased from 3→4 for deeper receptive field analysis
-
     Generator fields:
-        input_nc / output_nc:   Input and output image channels.
-        base_channels:          Base feature-map width for the CNN decoder.
-        num_res_blocks:         ResNet bottleneck depth (ResnetGenerator only).
-        use_transformer_encoder: If True, use TransformerGeneratorV4;
-                                 otherwise use ResnetGenerator.
-        image_size:             Square input image size.
-        patch_size:             Transformer patch size (power of 2).
-        encoder_dim:            Transformer token embedding dimension.
-        encoder_depth:          Number of Transformer blocks.
-        encoder_heads:          Attention heads per Transformer block.
-        encoder_mlp_ratio:      MLP hidden-dim multiplier in Transformer blocks.
-        encoder_dropout:        Dropout inside Transformer blocks.
-        use_gradient_checkpointing: Recompute Transformer activations during
-                                backward to reduce peak VRAM.
+        input_nc / output_nc        : Input and output image channels.
+        base_channels               : Base feature-map width for the CNN decoder.
+        num_res_blocks              : ResNet bottleneck depth (ResnetGenerator only).
+        use_transformer_encoder     : Use TransformerGeneratorV4 when True,
+                                      ResnetGenerator when False.
+        image_size                  : Square input image size.
+        patch_size                  : Transformer patch size (must be power of 2).
+        encoder_dim                 : Token embedding dimension.
+        encoder_depth               : Number of Transformer blocks.
+        encoder_heads               : Attention heads per block.
+        encoder_mlp_ratio           : MLP hidden-dim multiplier.
+        encoder_dropout             : Dropout inside Transformer blocks.
+        use_gradient_checkpointing  : Recompute activations during backward
+                                      to reduce peak VRAM.
 
     Discriminator fields:
-        disc_base_channels:     Base feature-map width for PatchGAN.
-        disc_n_layers:          Number of strided downsampling layers.
+        disc_base_channels : Base feature-map width for PatchGAN.
+        disc_n_layers      : Number of strided downsampling layers.
     """
 
     input_nc: int = 3
@@ -636,21 +596,19 @@ class V4Config:
 
 def get_v4_config() -> V4Config:
     """
-    Return a default V4Config with full-capacity settings.
+    Return a full-capacity V4Config (12+ GB VRAM).
 
-    Suitable for GPUs with 12+ GB VRAM.  Gradient checkpointing is disabled
-    for maximum training speed.
+    Gradient checkpointing is disabled for maximum training speed.
     """
     return V4Config()
 
 
 def get_v4_8gb_config() -> V4Config:
     """
-    Return a VRAM-optimised V4Config for 8 GB GPUs.
+    Return a V4Config with gradient checkpointing enabled for 8 GB GPUs.
 
-    Gradient checkpointing is currently disabled (set to False) — enable it
-    by setting ``cfg.model.use_gradient_checkpointing = True`` if OOM is
-    observed.  All other settings are identical to :func:`get_v4_config`.
+    All other settings are identical to :func:`get_v4_config`.
+    Set ``cfg.model.use_gradient_checkpointing = False`` to trade VRAM for speed.
     """
     cfg = V4Config()
     cfg.model.use_gradient_checkpointing = True

@@ -264,15 +264,17 @@ v4.1 improved defaults.
 ### get_8gb_config() active settings
 
 - `generator.use_gradient_checkpointing = True`
-- `generator.vit_depth = 4` (full; reduce to 2 for more headroom)
-- `discriminator.num_scales = 3` (full; reduce to 2 to save ~15%)
+- `generator.vit_depth = 4` (reduce to 2 for more headroom)
+- `discriminator.num_scales = 3` (reduce to 2 to save ~15%)
 - `data.batch_size = 2`, `training.accumulate_grads = 2` (effective batch = 4)
 - `loss.perceptual_resize = 180`
+- `training.use_amp = True` (do not disable)
 
 ### get_dit_8gb_config() active settings
 
-- `dit_hidden_dim=512`, `dit_depth=8`, `dit_heads=8`, `dit_patch_size=8`
+- `dit_hidden_dim=768`, `dit_depth=8`, `dit_heads=12`, `dit_patch_size=8`
 - `use_gradient_checkpointing=True`, `use_cross_attention=False`
 - `cond_patch_size=32`, `cond_token_pool_stride=4`
 - `disc_use_fft=False` (memory saving), `disc_use_global=True`, `disc_use_local=True`
+- `disc_base_channels=128`, `disc_global_base_channels=32`, `disc_n_layers=4`
 - `data.batch_size=2`, `training.accumulate_grads=2`
