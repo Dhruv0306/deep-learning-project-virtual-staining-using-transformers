@@ -460,16 +460,16 @@ class V4ModelConfig:
 
     input_nc: int = 3
     output_nc: int = 3
-    base_channels: int = 128
+    base_channels: int = 256
     num_res_blocks: int = 15
     disc_base_channels: int = 128
     disc_n_layers: int = 4
     use_transformer_encoder: bool = True
     image_size: int = 256
     patch_size: int = 8
-    encoder_dim: int = 384
-    encoder_depth: int = 6
-    encoder_heads: int = 8
+    encoder_dim: int = 512
+    encoder_depth: int = 8
+    encoder_heads: int = 16
     encoder_mlp_ratio: float = 4.0
     encoder_dropout: float = 0.0
     use_gradient_checkpointing: bool = False
@@ -611,5 +611,8 @@ def get_v4_8gb_config() -> V4Config:
     Set ``cfg.model.use_gradient_checkpointing = False`` to trade VRAM for speed.
     """
     cfg = V4Config()
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2    # effective batch = 4
+
     cfg.model.use_gradient_checkpointing = True
     return cfg
