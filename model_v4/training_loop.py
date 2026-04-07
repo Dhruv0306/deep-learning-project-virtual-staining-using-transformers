@@ -389,6 +389,12 @@ def train_v4(
         run_smoke_test=False,
     )
 
+    # ---- Print model parameters ----
+    print(f"[train_v4] G_AB params: {sum(p.numel() for p in G_AB.parameters()) / 1e6:.2f}M")
+    print(f"[train_v4] G_BA params: {sum(p.numel() for p in G_BA.parameters()) / 1e6:.2f}M")
+    print(f"[train_v4] D_A params:  {sum(p.numel() for p in D_A.parameters()) / 1e6:.2f}M")
+    print(f"[train_v4] D_B params:  {sum(p.numel() for p in D_B.parameters()) / 1e6:.2f}M")
+
     # ---- Optimizers ----
     # Single Adam for both generators so their gradients accumulate together.
     optimizer_G = torch.optim.Adam(

@@ -316,6 +316,9 @@ def getDiscriminatorV4(
             print(f"[getDiscriminatorV4] main   output: {tuple(main.shape)}")
             print(f"[getDiscriminatorV4] aux    output: {tuple(aux.shape)}")
 
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"[getDiscriminatorV4] D params: {n_params:.2f}M")
+
     return model
 
 

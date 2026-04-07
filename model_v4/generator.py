@@ -720,6 +720,9 @@ def getGeneratorV4(
             y = model(x)
             print(f"[getGeneratorV4] output shape: {y.shape}")
 
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"[getGeneratorV4] G params: {n_params:.2f}M")
+
     return model
 
 
