@@ -1,30 +1,34 @@
 """
-Improved training loop for the UVCGAN v2 pipeline.
+UVCGAN v2 training loop (Prokopenko et al., 2023).
 
-Paper-aligned implementation (Prokopenko et al., UVCGAN v2, 2023):
-  - GAN objective  : LSGAN -- all losses are >= 0, always stable.
-  - Gradient penalty: one-sided, gamma=100, lambda=0.1 (see LSGANGradientPenalty).
-  - n_critic        : 1 -- standard for LSGAN, no multi-step D updates needed.
-  - Adam betas      : (0.5, 0.999), lr=2e-4.
-  - AMP safety      : GP is always computed in float32 outside autocast.
-  - Cross-domain    : generator_loss() activates forward_with_cross_domain()
-                      automatically when both generators support it.
+Design decisions
+----------------
+GAN objective   : LSGAN — losses are always >= 0, numerically stable.
+Gradient penalty: one-sided GP, gamma=100, lambda=0.1 (UVCGANLoss).
+n_critic        : 1 — standard for LSGAN; no multi-step D updates.
+Adam betas      : (0.5, 0.999), lr=2e-4.
+AMP safety      : GP always runs in float32; autocast is disabled inside
+                  UVCGANLoss.discriminator_loss regardless of use_amp.
+Cross-domain    : generator_loss() calls forward_with_cross_domain()
+                  automatically when both generators support it.
 
-Additional engineering improvements (kept from previous version):
-  - Warm-up + linear decay LR schedule.
-  - Gradient clipping.
-  - EarlyStopping based on SSIM + loss divergence.
-    NOTE: With LSGAN all losses are >= 0, so the divergence check works
-    correctly without any sign correction (no _abs_losses wrapper needed).
-  - Replay buffer for discriminator stabilisation.
-  - TensorBoard logging of losses, LR, and grad norms.
-  - Periodic CSV history flush and epoch checkpoints.
+Engineering additions
+---------------------
+- Three-phase LR schedule: linear warm-up → constant → linear decay.
+- Gradient clipping on G and D.
+- EarlyStopping on SSIM + loss-divergence detection.
+  LSGAN losses are always >= 0, so divergence check needs no sign fix.
+- Replay buffer for discriminator stabilisation.
+- Last-known-good G snapshot for non-finite loss rollback.
+- TensorBoard logging: losses, LR, grad norms, early-stopping counters.
+- Periodic CSV history flush and epoch checkpoints every 20 epochs.
 
 Entry point: train_v2().
 """
 
 import math
 import os
+import copy
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
@@ -54,39 +58,25 @@ from shared.validation import calculate_metrics, run_validation
 
 def _make_lr_lambda(warmup: int, decay_start: int, total: int):
     """
-    Build a ``LambdaLR`` callable that implements a three-phase LR schedule.
+    Return a LambdaLR callable implementing a three-phase LR schedule.
 
-    Phase 1 — linear warm-up (epochs ``[0, warmup)``):
-        LR scales from nearly 0 up to 1.  A floor of ``1e-8`` is used so
-        that the LR is never exactly 0, preventing zero gradients on the
-        very first step.
+    Phase 1 — warm-up  [0, warmup):        linear ramp from ~0 to 1.
+    Phase 2 — plateau  [warmup, decay_start): constant at 1.
+    Phase 3 — decay    [decay_start, total):  linear decay from 1 to 0.
 
-    Phase 2 — constant plateau (epochs ``[warmup, decay_start)``):
-        LR is held at 1 × base LR.
-
-    Phase 3 — linear decay (epochs ``[decay_start, total)``):
-        LR decays from 1 down to 0 linearly.
+    A floor of 1e-8 in phase 1 prevents an exactly-zero LR on step 0.
 
     Args:
-        warmup (int): Number of warm-up epochs.
+        warmup (int): Warm-up duration in epochs.
         decay_start (int): First epoch of the linear decay phase.
-        total (int): Total number of training epochs.
+        total (int): Total training epochs.
 
     Returns:
-        Callable[[int], float]: A function ``lr_lambda(epoch) -> float``
-        that returns the multiplicative factor for ``LambdaLR``.
+        Callable[[int], float]: Multiplicative factor for LambdaLR.
     """
 
     def lr_lambda(epoch: int) -> float:
-        """
-        Compute the LR multiplicative factor for the current epoch.
-
-        Args:
-            epoch (int): Current epoch index (0-based).
-
-        Returns:
-            float: Multiplicative scaling factor applied to the base LR.
-        """
+        """Return the LR multiplier for *epoch* (0-based)."""
         if epoch < warmup:
             return max(1e-8, epoch / max(1, warmup))
         if epoch < decay_start:
@@ -106,19 +96,10 @@ def _make_lr_lambda(warmup: int, decay_start: int, total: int):
 
 def _global_grad_norm(parameters) -> float:
     """
-    Compute the global L2 gradient norm across a collection of parameters.
+    Return the global L2 gradient norm across *parameters* as a float.
 
-    Equivalent to ``torch.nn.utils.clip_grad_norm_`` with no clipping, but
-    returns the pre-clip norm as a plain Python float for logging.
-
-    Args:
-        parameters (Iterable[nn.Parameter]): Model parameters whose
-            ``.grad`` attributes should be included.  Parameters with
-            ``None`` gradient are silently skipped.
-
-    Returns:
-        float: Global L2 norm of all gradient tensors, or ``0.0`` if no
-        parameter has a gradient.
+    Parameters with None gradients are skipped. Returns 0.0 when no
+    parameter has a gradient. Equivalent to clip_grad_norm_ with no clip.
     """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
@@ -128,12 +109,21 @@ def _global_grad_norm(parameters) -> float:
 
 def _snapshot_module_to_cpu(module: torch.nn.Module) -> dict:
     """
-    Create a CPU snapshot of a module state_dict for lightweight rollback.
+    Return a detached CPU copy of *module*'s state_dict for rollback.
 
-    The copy is detached from autograd and moved to CPU to avoid pinning extra
-    GPU memory between training steps.
+    Tensors are moved to CPU to avoid holding extra GPU memory between steps.
     """
     return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
+
+
+def _snapshot_optimizer_state(optimizer: torch.optim.Optimizer) -> dict:
+    """Deep-copy optimizer state for rollback independent of live tensors."""
+    return copy.deepcopy(optimizer.state_dict())
+
+
+def _snapshot_scaler_state(scaler: GradScaler) -> dict:
+    """Deep-copy AMP GradScaler state for rollback."""
+    return copy.deepcopy(scaler.state_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -150,19 +140,19 @@ def train_v2(
     cfg: Optional[UVCGANConfig] = None,
 ):
     """
-    Train the UVCGAN v2 generators and multi-scale discriminators.
+    Train UVCGAN v2 generators and multi-scale discriminators.
 
     Args:
-        epoch_size  : Max samples per epoch (overrides cfg).
-        num_epochs  : Number of epochs to train (overrides cfg).
-        model_dir   : Directory for checkpoints and logs (overrides cfg).
-        val_dir     : Directory for validation images (overrides cfg).
-        test_size   : Number of test samples to export (overrides cfg).
-        cfg         : UVCGANConfig with all hyperparameters.
-                      A default v2 config is created when None.
+        epoch_size: Max samples drawn per epoch (overrides cfg.training.epoch_size).
+        num_epochs: Total training epochs (overrides cfg.training.num_epochs).
+        model_dir:  Output directory for checkpoints and logs (overrides cfg.model_dir).
+        val_dir:    Directory for validation images (overrides cfg.val_dir).
+        test_size:  Number of test samples to export (overrides cfg.training.test_size).
+        cfg:        UVCGANConfig instance. Defaults to get_default_config(model_version=2).
 
     Returns:
-        tuple: (history, G_AB, G_BA, D_A, D_B)
+        tuple[dict, nn.Module, nn.Module, nn.Module, nn.Module]:
+            (history, G_AB, G_BA, D_A, D_B)
     """
     if cfg is None:
         cfg = get_default_config(model_version=2)
@@ -239,9 +229,8 @@ def train_v2(
     )
 
     # ---- AMP ----
-    # Generator step uses AMP when available.
-    # Discriminator step (including GP) always runs in float32 -- the
-    # autocast(enabled=False) in UVCGANLoss.discriminator_loss handles this.
+    # G step uses AMP when available; D step (including GP) always runs in
+    # float32 — autocast(enabled=False) inside discriminator_loss handles this.
     use_amp = tcfg.use_amp and device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
 
@@ -300,10 +289,11 @@ def train_v2(
     accum_count = 0
     nonfinite_g_streak = 0
 
-    # Keep a last-known-good generator snapshot so we can recover if Loss_G
-    # becomes non-finite for many consecutive batches.
+    # Last-known-good G snapshot: restored when Loss_G becomes non-finite.
     last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
     last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
+    last_good_optimizer_G_state = _snapshot_optimizer_state(optimizer_G)
+    last_good_scaler_state = _snapshot_scaler_state(scaler)
 
     if accumulate > 1:
         print(
@@ -336,7 +326,7 @@ def train_v2(
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
 
-            # Defensive NaN/Inf and near-uniform input checks.
+            # Skip batches with non-finite values; warn on near-uniform patches.
             if not (real_A.isfinite().all() and real_B.isfinite().all()):
                 print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
                 continue
@@ -348,13 +338,10 @@ def train_v2(
                 if warn_near_uniform % 100 == 0:
                     print(
                         f"[warn] near-uniform input detected at epoch {epoch+1} batch {i} "
-                        f"(A std: {real_A_std}, B std: {real_B_std}), skipping"
+                        f"(A std: {real_A_std}, B std: {real_B_std})"
                     )
 
-            # ==================================================
-            # Discriminator step(s)  (n_critic times per G step)
-            # For LSGAN n_critic=1, matching the standard CycleGAN protocol.
-            # ==================================================
+            # --- Discriminator step (n_critic=1 for LSGAN) ---
             for p in G_AB.parameters():
                 p.requires_grad_(False)
             for p in G_BA.parameters():
@@ -373,9 +360,7 @@ def train_v2(
                     fake_B_d = G_AB(real_A)
                     fake_A_d = G_BA(real_B)
 
-                # Discriminator loss call includes the one-sided GP.
-                # UVCGANLoss.discriminator_loss internally disables autocast
-                # for the GP computation -- safe regardless of use_amp.
+                # GP is computed in float32 inside discriminator_loss.
                 optimizer_D_A.zero_grad(set_to_none=True)
                 optimizer_D_B.zero_grad(set_to_none=True)
                 loss_D_A = loss_fn.discriminator_loss(
@@ -420,12 +405,7 @@ def train_v2(
             loss_D_A_val = loss_D_A_accum / n_critic
             loss_D_B_val = loss_D_B_accum / n_critic
 
-            # ==================================================
-            # Generator step  (with gradient accumulation)
-            # Gradients are accumulated over `accumulate` batches before
-            # the optimiser steps, so the effective batch size is
-            # batch_size * accumulate without increasing peak VRAM.
-            # ==================================================
+            # --- Generator step (gradient accumulation over `accumulate` batches) ---
             for p in G_AB.parameters():
                 p.requires_grad_(True)
             for p in G_BA.parameters():
@@ -435,7 +415,7 @@ def train_v2(
             for p in D_B.parameters():
                 p.requires_grad_(False)
 
-            # Zero gradients only at the start of an accumulation window.
+            # Zero grads only at the start of each accumulation window.
             if accum_count == 0:
                 optimizer_G.zero_grad(set_to_none=True)
 
@@ -443,7 +423,7 @@ def train_v2(
                 loss_G, fake_A, fake_B = loss_fn.generator_loss(
                     real_A, real_B, G_AB, G_BA, D_A, D_B, epoch, num_epochs
                 )
-                # Scale loss so gradients are equivalent to a single large batch.
+                # Divide by accumulate so gradients match a single large batch.
                 loss_G_scaled = loss_G / accumulate
 
             loss_G_val = loss_G.item()
@@ -454,6 +434,8 @@ def train_v2(
                 )
                 G_AB.load_state_dict(last_good_G_AB_state, strict=True)
                 G_BA.load_state_dict(last_good_G_BA_state, strict=True)
+                optimizer_G.load_state_dict(last_good_optimizer_G_state)
+                scaler.load_state_dict(last_good_scaler_state)
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
                 if use_amp:
@@ -466,6 +448,8 @@ def train_v2(
                 )
                 G_AB.load_state_dict(last_good_G_AB_state, strict=True)
                 G_BA.load_state_dict(last_good_G_BA_state, strict=True)
+                optimizer_G.load_state_dict(last_good_optimizer_G_state)
+                scaler.load_state_dict(last_good_scaler_state)
                 optimizer_G.zero_grad(set_to_none=True)
                 accum_count = 0
                 if use_amp:
@@ -474,7 +458,7 @@ def train_v2(
             scaler.scale(loss_G_scaled).backward()
             accum_count += 1
 
-            # Step optimiser only when the accumulation window is complete.
+            # Step only when the accumulation window is complete.
             if accum_count == accumulate or (
                 i == len(train_loader) and accum_count > 0
             ):
@@ -495,15 +479,17 @@ def train_v2(
                         f"[warn] AMP scaler scale dropped below 1.0 ({current_scale}) at epoch {epoch+1} batch {i} — persistent overflow, check VGG/OOM"
                     )
 
-                # Successful optimiser step: refresh rollback snapshot.
+                # Refresh rollback snapshot after a successful step.
                 last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
                 last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
+                last_good_optimizer_G_state = _snapshot_optimizer_state(optimizer_G)
+                last_good_scaler_state = _snapshot_scaler_state(scaler)
                 nonfinite_g_streak = 0
                 accum_count = 0
             else:
-                grad_norm_G = 0.0  # not stepping this batch
+                grad_norm_G = 0.0  # accumulating; no step this batch
 
-            # ---- Book-keeping ----
+            # ---- Per-batch book-keeping ----
             loss_D_A_val = loss_D_A_val if math.isfinite(loss_D_A_val) else 0.0
             loss_D_B_val = loss_D_B_val if math.isfinite(loss_D_B_val) else 0.0
 
@@ -560,12 +546,12 @@ def train_v2(
             f"LR_G: {current_lr_G:.6f}"
         )
 
-        # ---- Periodic CSV flush ----
+        # ---- Flush history to CSV every 5 epochs ----
         if (epoch + 1) % 5 == 0:
             append_history_to_csv(history, history_csv_path)
             history.clear()
 
-        # ---- Checkpoint every 20 epochs ----
+        # ---- Periodic checkpoint (every 20 epochs) ----
         if (epoch + 1) % 20 == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
@@ -583,7 +569,7 @@ def train_v2(
             )
             print(f"Checkpoint saved: {ckpt_path}")
 
-        # ---- Periodic validation + early stopping ----
+        # ---- Validation + early stopping ----
         if (epoch + 1) > tcfg.validation_warmup_epochs:
             save_dir = os.path.join(val_dir, f"epoch_{epoch + 1}")
             run_validation(
@@ -593,7 +579,7 @@ def train_v2(
                 test_loader=test_loader,
                 device=device,
                 save_dir=save_dir,
-                num_samples=10,  # keep validation quick by default
+                num_samples=10,
                 writer=writer,
             )
 
@@ -615,8 +601,7 @@ def train_v2(
                 val_metrics.get("ssim_A", 0.0) + val_metrics.get("ssim_B", 0.0)
             ) / 2.0
 
-            # With LSGAN all losses are >= 0, so the divergence check works
-            # correctly without any sign correction.
+            # LSGAN losses are always >= 0; divergence check needs no sign fix.
             should_stop = early_stopping(
                 ssim=avg_ssim,
                 losses={
@@ -643,7 +628,7 @@ def train_v2(
 
     print("\n")
 
-    # ---- Final metrics on test set ----
+    # ---- Finalization ----
     calculate_metrics(
         calculator=metrics_calculator,
         G_AB=G_AB,
@@ -654,7 +639,7 @@ def train_v2(
         epoch=stopped_epoch,
     )
 
-    # ---- Final test-set inference ----
+    # Test-set inference.
     test_dir = os.path.join(model_dir, "test_images")
     writer.add_scalar("Testing Started", stopped_epoch, stopped_epoch)
     run_testing(
@@ -668,7 +653,7 @@ def train_v2(
         num_samples=tcfg.test_size,
     )
 
-    # ---- Final checkpoint ----
+    # Final checkpoint.
     writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
     final_ckpt = os.path.join(model_dir, f"final_checkpoint_epoch_{stopped_epoch}.pth")
     torch.save(
@@ -691,4 +676,3 @@ def train_v2(
 
     writer.close()
     return history, G_AB, G_BA, D_A, D_B
-
