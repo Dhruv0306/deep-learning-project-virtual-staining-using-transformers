@@ -1,29 +1,27 @@
 """
-Projection discriminator for the v3 CycleDiT training pipeline.
+Projection discriminator for the v3 CycleDiT training pipeline (v3.2).
 
-UPGRADES (v3.2):
-    - LocalPatchBranch: Added a 4th strided layer (n_layers=4 by default)
-      for a larger 142×142 receptive field, better covering mid-frequency
-      stain texture. Spectral norm on all convs.
-    - GlobalDiscriminatorBranch: Added a dense self-attention layer on the
-      flattened 4×4 feature map to capture global layout dependencies that
-      pooling alone misses.
-    - FFTDiscriminatorBranch: Expanded to also process the full-color 3-channel
-      FFT magnitude in addition to grayscale — staining artifacts often
-      differ strongly across color channels (hematoxylin vs. eosin).
-    - MinibatchStdDev: Added to the local branch before the final score map.
-      This classic ProGAN technique leaks diversity statistics into the
-      discriminator, making it harder for the generator to produce repetitive
-      textures / mode collapse.
-    - ProjectionDiscriminator: Learnable branch weights (instead of plain
-      average) so training can automatically up-weight the most informative
-      branch for this particular staining task.
+Three complementary branches cover different frequency bands and spatial
+scales of the H&E staining signal:
 
-Public API (unchanged):
+    LocalPatchBranchWithMBStd  -- spectral-norm PatchGAN + MinibatchStdDev;
+                                  targets mid-frequency stain texture and
+                                  penalises mode-collapsed generators.
+    GlobalDiscriminatorBranch  -- stride-4 CNN + self-attention on 4×4 tokens;
+                                  captures full-image color balance and tissue
+                                  layout.
+    FFTDiscriminatorBranch     -- log-magnitude spectra (gray + R/G/B);
+                                  detects periodic decode artifacts and
+                                  per-channel stain imbalance.
+
+Public API:
     SpectralNormDiscriminator  -- re-exported from model_v2.
-    GlobalDiscriminatorBranch  -- full-image receptive field.
-    FFTDiscriminatorBranch     -- frequency-domain branch (now color-aware).
-    ProjectionDiscriminator    -- composite with learnable branch weights.
+    MinibatchStdDev            -- ProGAN diversity layer.
+    LocalPatchBranchWithMBStd  -- Branch 1.
+    GlobalDiscriminatorBranch  -- Branch 2.
+    FFTDiscriminatorBranch     -- Branch 3.
+    ProjectionDiscriminator    -- composite discriminator with learnable
+                                  softmax branch weights.
     getDiscriminatorsV3        -- factory returning (D_A, D_B).
 """
 
@@ -83,16 +81,15 @@ class MinibatchStdDev(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         n, c, h, w = x.shape
-        g = min(self.group_size, n)
+        g = min(self.group_size, n)  # actual group size (clamped to batch)
         f = self.num_features
-        # Reshape: (g, -1, f, c//f, h, w)
+        # Split batch into groups: (g, n//g, f, c//f, h, w)
         y = x.reshape(g, -1, f, c // f, h, w).float()
-        # Std across group dim
+        # Std over the group dimension → (n//g, f, c//f, h, w)
         y = torch.sqrt(y.var(dim=0, unbiased=False) + 1e-8)
-        # Average across remaining spatial dims
-        y = y.mean(dim=[2, 3, 4], keepdim=True)  # (B//g, f, 1, 1, 1)
-        y = y.squeeze(2)  # (B//g, f, 1, 1)
-        y = y.repeat(g, 1, h, w)  # (N, f, h, w)
+        # Collapse feature/spatial dims to one scalar per (group, f): (n//g, f, 1, 1)
+        y = y.mean(dim=[2, 3, 4], keepdim=True).squeeze(2)
+        y = y.repeat(g, 1, h, w)  # tile back to full batch: (n, f, h, w)
         return torch.cat([x, y.to(x.dtype)], dim=1)
 
 
@@ -133,17 +130,16 @@ class LocalPatchBranchWithMBStd(nn.Module):
         )
         self.mbstd = MinibatchStdDev(group_size=group_size)
 
-        # Determine the actual channel count produced by all-but-last body
-        # layers via a CPU dry-run (avoids brittle static channel arithmetic
-        # that breaks when SpectralNormDiscriminator uses a different layout).
-        body_layers = list(self.body.model.children())
-        with torch.no_grad():
+        # Probe the body (down → penultimate) on CPU to get the true channel
+        # count before the final conv, without brittle static arithmetic.
+        # Compatible with both SpectralNormDiscriminator layouts
+        # (legacy self.model Sequential and current down/penultimate split).
+        with torch.inference_mode():
             probe = torch.zeros(max(group_size, 2), input_nc, 256, 256)
-            for layer in body_layers[:-1]:
-                probe = layer(probe)
-        # probe shape: (N, C, H, W) — C is the true pre-final channel count
+            probe = self.body.down(probe)
+            probe = self.body.penultimate(probe)
         actual_ch = probe.shape[1]
-        extra = 1  # MinibatchStdDev appends 1 channel
+        extra = 1  # MinibatchStdDev appends num_features=1 channel
         self.final_conv = spectral_norm(
             nn.Conv2d(
                 actual_ch + extra, 1, kernel_size=4, stride=1, padding=1, bias=True
@@ -151,14 +147,13 @@ class LocalPatchBranchWithMBStd(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Run all but the last layer of the inner discriminator body
-        # by using the model's Sequential minus the last element.
-        feats = x
-        body_layers = list(self.body.model.children())
-        for layer in body_layers[:-1]:
-            feats = layer(feats)
-        feats = self.mbstd(feats)
-        return self.final_conv(feats)
+        # down → penultimate, bypassing body.out_conv so we can insert MBStd.
+        # The shortcut branch is intentionally skipped: its spatial size differs
+        # from penultimate (4×4 kernel shrinks by 1 px), causing a shape mismatch.
+        feats = self.body.down(x)
+        feats = self.body.penultimate(feats)
+        feats = self.mbstd(feats)  # appends 1 diversity channel
+        return self.final_conv(feats)  # → patch logit map
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +171,15 @@ class GlobalDiscriminatorBranch(nn.Module):
     spatial co-occurrences in the global feature map (e.g., stain balance
     across the tissue).
 
-    Shape flow for 256×256 inputs:
-        (N, 3, 256, 256) -> (N, 64, 64, 64) -> (N, 128, 16, 16)
-        -> (N, 256, 4, 4) -> self-attn -> (N, 1, 1, 1) -> (N, 1)
+    Shape flow for 256×256 inputs::
+
+        (N,   3, 256, 256)  stride-4 conv + LReLU
+        (N,  64,  64,  64)  stride-4 conv + IN + LReLU
+        (N, 128,  16,  16)  stride-4 conv + IN + LReLU
+        (N, 256,   4,   4)  flatten → (N, 16, 256) tokens
+                            MultiheadAttention(heads=4) + LayerNorm
+                            reshape → (N, 256, 4, 4)
+        (N,   1,   1,   1)  4×4 conv head  →  view  →  (N, 1)
     """
 
     def __init__(self, input_nc: int = 3, base_channels: int = 64):
@@ -194,7 +195,7 @@ class GlobalDiscriminatorBranch(nn.Module):
             nn.InstanceNorm2d(c * 4),
             nn.LeakyReLU(0.2, inplace=True),
         )
-        # Lightweight self-attention on 4×4=16 spatial tokens
+        # Self-attention over 4×4 = 16 spatial tokens (global layout reasoning)
         self.attn = nn.MultiheadAttention(c * 4, num_heads=4, batch_first=True)
         self.attn_norm = nn.LayerNorm(c * 4)
         # Final score head
@@ -205,11 +206,10 @@ class GlobalDiscriminatorBranch(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = self.net(x)  # (N, C, 4, 4)
         n, c, h, w = feat.shape
-        # Self-attention on spatial tokens
         tokens = feat.flatten(2).transpose(1, 2)  # (N, 16, C)
         attn_out, _ = self.attn(tokens, tokens, tokens)
-        tokens = self.attn_norm(tokens + attn_out)
-        feat = tokens.transpose(1, 2).reshape(n, c, h, w)
+        tokens = self.attn_norm(tokens + attn_out)  # residual + LN
+        feat = tokens.transpose(1, 2).reshape(n, c, h, w)  # (N, C, 4, 4)
         out = self.head(feat)  # (N, 1, 1, 1)
         return out.view(n, 1)
 
@@ -301,20 +301,20 @@ class FFTDiscriminatorBranch(nn.Module):
 
 class ProjectionDiscriminator(nn.Module):
     """
-    Four-branch discriminator suited for DiT-generated histology images.
+    Three-branch discriminator for DiT-generated H&E histology images.
 
-    Branches:
-        - Local PatchGAN + MinibatchStdDev: texture, stain granularity,
-          diversity penalty.
-        - Global branch + self-attention: color balance, tissue layout.
-        - Color-aware FFT branch: periodic decode artifacts, channel imbalance.
+    Branches (each individually toggleable):
+        local  -- LocalPatchBranchWithMBStd: mid-frequency texture + diversity.
+        global -- GlobalDiscriminatorBranch: full-image color balance + layout.
+        fft    -- FFTDiscriminatorBranch: periodic artifacts + channel imbalance.
 
-    Learnable branch weights allow the training signal to automatically
-    emphasise the most informative branch. Weights are softmax-normalised
-    and logged during training for interpretability.
+    ``branch_logweights`` (nn.Parameter, shape (n_branches,)) are
+    softmax-normalised at forward time, letting training automatically
+    up-weight the most informative branch.  All three are enabled by default.
 
-    Forward output is a list of logit tensors compatible with the LSGAN
-    helpers (list outputs are averaged).
+    Returns a list of weighted logit tensors (one per enabled branch).
+    The LSGAN helpers sum/average across the list, making this equivalent
+    to a learned weighted-average adversarial loss.
     """
 
     def __init__(
@@ -335,7 +335,7 @@ class ProjectionDiscriminator(nn.Module):
         self.use_global = use_global
         self.use_fft = use_fft
 
-        # Branch modules
+        # Conditionally instantiate branches so disabled ones add no parameters.
         if use_local:
             self.local_branch = LocalPatchBranchWithMBStd(
                 input_nc=input_nc,
@@ -354,7 +354,7 @@ class ProjectionDiscriminator(nn.Module):
                 base_channels=fft_base_channels,
             )
 
-        # Learnable log-weights — initialised to equal weighting
+        # Learnable branch weights; zeros → equal softmax weighting at init.
         n_branches = int(use_local) + int(use_global) + int(use_fft)
         self.branch_logweights = nn.Parameter(torch.zeros(n_branches))
 
@@ -381,7 +381,7 @@ class ProjectionDiscriminator(nn.Module):
         if self.use_fft:
             raw.append(self.fft_branch(x))
 
-        weights = torch.softmax(self.branch_logweights, dim=0)
+        weights = torch.softmax(self.branch_logweights, dim=0)  # sums to 1
         return [w * out for w, out in zip(weights, raw)]
 
 
@@ -445,9 +445,9 @@ def getDiscriminatorsV3(
     D_A.apply(init_weights)
     D_B.apply(init_weights)
 
-    # Smoke test
+    # Smoke test — verify shapes and catch construction errors early.
     x = torch.randn(max(mbstd_group_size, 2), input_nc, 256, 256, device=device)
-    with torch.no_grad():
+    with torch.inference_mode():
         out_A = D_A(x)
         out_B = D_B(x)
 
