@@ -126,6 +126,11 @@ def _snapshot_scaler_state(scaler: GradScaler) -> dict:
     return copy.deepcopy(scaler.state_dict())
 
 
+def _module_parameters_are_finite(module: torch.nn.Module) -> bool:
+    """Return True if all parameters in *module* are finite."""
+    return all(torch.isfinite(p).all() for p in module.parameters())
+
+
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
@@ -288,12 +293,17 @@ def train_v2(
     accumulate = max(1, tcfg.accumulate_grads)
     accum_count = 0
     nonfinite_g_streak = 0
+    nonfinite_d_streak = 0
 
     # Last-known-good G snapshot: restored when Loss_G becomes non-finite.
     last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
     last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
     last_good_optimizer_G_state = _snapshot_optimizer_state(optimizer_G)
     last_good_scaler_state = _snapshot_scaler_state(scaler)
+    last_good_D_A_state = _snapshot_module_to_cpu(D_A)
+    last_good_D_B_state = _snapshot_module_to_cpu(D_B)
+    last_good_optimizer_D_A_state = _snapshot_optimizer_state(optimizer_D_A)
+    last_good_optimizer_D_B_state = _snapshot_optimizer_state(optimizer_D_B)
 
     if accumulate > 1:
         print(
@@ -370,9 +380,14 @@ def train_v2(
                     D_B, real_B, fake_B_d, loss_fn.fake_B_buffer
                 )
                 if not (torch.isfinite(loss_D_A) and torch.isfinite(loss_D_B)):
+                    nonfinite_d_streak += 1
                     print(
-                        f"[warn] non-finite discriminator loss at epoch {epoch+1} batch {i}, skipping batch"
+                        f"[warn] non-finite discriminator loss at epoch {epoch+1} batch {i}, rolling back D to last good state (streak={nonfinite_d_streak})"
                     )
+                    D_A.load_state_dict(last_good_D_A_state, strict=True)
+                    D_B.load_state_dict(last_good_D_B_state, strict=True)
+                    optimizer_D_A.load_state_dict(last_good_optimizer_D_A_state)
+                    optimizer_D_B.load_state_dict(last_good_optimizer_D_B_state)
                     optimizer_D_A.zero_grad(set_to_none=True)
                     optimizer_D_B.zero_grad(set_to_none=True)
                     skip_batch = True
@@ -391,6 +406,30 @@ def train_v2(
                         D_B.parameters(), tcfg.grad_clip_norm
                     )
                 optimizer_D_B.step()
+
+                if not (
+                    _module_parameters_are_finite(D_A)
+                    and _module_parameters_are_finite(D_B)
+                ):
+                    nonfinite_d_streak += 1
+                    print(
+                        f"[warn] non-finite discriminator params after step at epoch {epoch+1} batch {i}, rolling back D to last good state (streak={nonfinite_d_streak})"
+                    )
+                    D_A.load_state_dict(last_good_D_A_state, strict=True)
+                    D_B.load_state_dict(last_good_D_B_state, strict=True)
+                    optimizer_D_A.load_state_dict(last_good_optimizer_D_A_state)
+                    optimizer_D_B.load_state_dict(last_good_optimizer_D_B_state)
+                    optimizer_D_A.zero_grad(set_to_none=True)
+                    optimizer_D_B.zero_grad(set_to_none=True)
+                    skip_batch = True
+                    break
+
+                # Refresh D rollback snapshots only after a validated finite step.
+                last_good_D_A_state = _snapshot_module_to_cpu(D_A)
+                last_good_D_B_state = _snapshot_module_to_cpu(D_B)
+                last_good_optimizer_D_A_state = _snapshot_optimizer_state(optimizer_D_A)
+                last_good_optimizer_D_B_state = _snapshot_optimizer_state(optimizer_D_B)
+                nonfinite_d_streak = 0
 
                 loss_D_A_item = loss_D_A.item()
                 loss_D_B_item = loss_D_B.item()
@@ -479,7 +518,25 @@ def train_v2(
                         f"[warn] AMP scaler scale dropped below 1.0 ({current_scale}) at epoch {epoch+1} batch {i} — persistent overflow, check VGG/OOM"
                     )
 
-                # Refresh rollback snapshot after a successful step.
+                if not (
+                    _module_parameters_are_finite(G_AB)
+                    and _module_parameters_are_finite(G_BA)
+                ):
+                    nonfinite_g_streak += 1
+                    print(
+                        f"[warn] non-finite generator params after step at epoch {epoch+1} batch {i}, rolling back G to last good state (streak={nonfinite_g_streak})"
+                    )
+                    G_AB.load_state_dict(last_good_G_AB_state, strict=True)
+                    G_BA.load_state_dict(last_good_G_BA_state, strict=True)
+                    optimizer_G.load_state_dict(last_good_optimizer_G_state)
+                    scaler.load_state_dict(last_good_scaler_state)
+                    optimizer_G.zero_grad(set_to_none=True)
+                    accum_count = 0
+                    if use_amp:
+                        scaler.update(new_scale=max(1.0, scaler.get_scale() / 2.0))
+                    continue
+
+                # Refresh G rollback snapshots only after finite loss/output and finite params.
                 last_good_G_AB_state = _snapshot_module_to_cpu(G_AB)
                 last_good_G_BA_state = _snapshot_module_to_cpu(G_BA)
                 last_good_optimizer_G_state = _snapshot_optimizer_state(optimizer_G)
