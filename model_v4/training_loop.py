@@ -396,12 +396,20 @@ def train_v4(
     print(f"[train_v4] D_B params:  {sum(p.numel() for p in D_B.parameters()) / 1e6:.2f}M")
 
     # ---- Optimizers ----
-    # Single Adam for both generators so their gradients accumulate together.
-    optimizer_G = torch.optim.Adam(
-        list(G_AB.parameters()) + list(G_BA.parameters()),
-        lr=tcfg.lr,
-        betas=(tcfg.beta1, tcfg.beta2),
-    )
+    # Single optimizer for both generators so their gradients accumulate together.
+    if mcfg.use_transformer_encoder:
+        optimizer_G = torch.optim.AdamW(
+            list(G_AB.parameters()) + list(G_BA.parameters()),
+            lr=tcfg.lr,
+            betas=(tcfg.beta1, tcfg.beta2),
+            weight_decay=0.01,
+        )
+    else:
+        optimizer_G = torch.optim.Adam(
+            list(G_AB.parameters()) + list(G_BA.parameters()),
+            lr=tcfg.lr,
+            betas=(tcfg.beta1, tcfg.beta2),
+        )
     optimizer_D_A = torch.optim.Adam(
         D_A.parameters(), lr=tcfg.lr, betas=(tcfg.beta1, tcfg.beta2)
     )

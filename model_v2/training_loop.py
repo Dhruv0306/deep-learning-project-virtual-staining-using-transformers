@@ -252,10 +252,11 @@ def train_v2(
     )
 
     # ---- Optimisers ----
-    optimizer_G = optim.Adam(
+    optimizer_G = optim.AdamW(
         list(G_AB.parameters()) + list(G_BA.parameters()),
         lr=tcfg.lr,
         betas=(tcfg.beta1, tcfg.beta2),
+        weight_decay=0.01,
     )
     optimizer_D_A = optim.Adam(
         D_A.parameters(), lr=tcfg.lr, betas=(tcfg.beta1, tcfg.beta2)

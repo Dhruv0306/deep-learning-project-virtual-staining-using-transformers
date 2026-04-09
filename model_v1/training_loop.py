@@ -97,11 +97,15 @@ def train(
     D_A = D_A.to(device)
     D_B = D_B.to(device)
 
-    # Optimizers share the standard CycleGAN hyperparameters.
+    # Optimizers share the standard CycleGAN hyperparameters; AdamW for the
+    # Transformer-based generator, Adam for discriminators.
     lr = 0.0002
     beta1 = 0.5
-    optimizer_G = optim.Adam(
-        list(G_AB.parameters()) + list(G_BA.parameters()), lr=lr, betas=(beta1, 0.999)
+    optimizer_G = optim.AdamW(
+        list(G_AB.parameters()) + list(G_BA.parameters()),
+        lr=lr,
+        betas=(beta1, 0.999),
+        weight_decay=0.01,
     )
     optimizer_D_A = optim.Adam(D_A.parameters(), lr=lr, betas=(beta1, 0.999))
     optimizer_D_B = optim.Adam(D_B.parameters(), lr=lr, betas=(beta1, 0.999))

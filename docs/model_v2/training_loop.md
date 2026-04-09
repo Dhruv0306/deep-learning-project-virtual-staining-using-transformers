@@ -103,7 +103,7 @@ Dataflow:
 7. Instantiate `UVCGANLoss`.
 8. Configure `GradScaler` (disabled when not CUDA).
 9. Configure `MetricsCalculator` and `EarlyStopping`.
-10. Configure Adam optimizers for G, D_A, D_B.
+10. Configure AdamW optimizer for G (Transformer bottleneck) and Adam for D_A, D_B.
 11. Configure `LambdaLR` schedulers for G, D_A, D_B.
 12. Create output dirs, `SummaryWriter`, history CSV.
 13. Initialize last-known-good G snapshots via `_snapshot_module_to_cpu`,

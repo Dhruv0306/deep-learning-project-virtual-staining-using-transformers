@@ -89,7 +89,7 @@ Logging:
 
 Optimizers:
 
-- optimizer_G: Adam over G_AB + G_BA parameters
+- optimizer_G: AdamW over G_AB + G_BA parameters (Transformer bottleneck)
 - optimizer_D_A: Adam over D_A
 - optimizer_D_B: Adam over D_B
 
@@ -97,6 +97,7 @@ Hardcoded optimizer params:
 
 - lr = 2e-4
 - betas = (0.5, 0.999)
+- weight_decay = 0.01 (generator only)
 
 Schedulers:
 

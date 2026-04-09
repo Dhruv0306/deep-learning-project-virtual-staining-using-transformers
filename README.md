@@ -220,7 +220,7 @@ Standard 70×70 PatchGAN. One discriminator per domain.
 | Perceptual identity | λ=0.1 |
 | Two-sided gradient penalty | λ=10.0 |
 
-**Training** — Adam `lr=2e-4`, betas `(0.5, 0.999)`, linear LR decay from epoch 100, AMP, early stopping after warmup of 80 epochs.
+**Training** — AdamW for generator (`weight_decay=0.01`), Adam for discriminators; `lr=2e-4`, betas `(0.5, 0.999)`, linear LR decay from epoch 100, AMP, early stopping after warmup of 80 epochs.
 
 ---
 
@@ -255,7 +255,7 @@ Cross-domain skip fusion runs both generators simultaneously and fuses skip feat
 | NT-Xent contrastive | λ=0.0 (off by default) |
 | Spectral frequency | λ=0.0 (off by default) |
 
-**Training** — Adam `lr=2e-4`, warm-up + constant + linear decay LR, gradient clipping, gradient accumulation, AMP (GP always in float32).
+**Training** — AdamW for generator (`weight_decay=0.01`), Adam for discriminators; `lr=2e-4`, warm-up + constant + linear decay LR, gradient clipping, gradient accumulation, AMP (GP always in float32).
 
 ---
 
@@ -343,7 +343,7 @@ Spectral-norm PatchGAN with:
 
 Per-layer lazy MLP projection heads (2-layer, ReLU). Queries and keys are L2-normalised; InfoNCE cross-entropy with diagonal positives. Projectors are keyed by true layer index for checkpoint stability.
 
-**Training** — Adam `lr=2e-4`, linear warmup + linear decay LR for G and both Ds; EMA generators (decay=0.999); replay buffers; gradient clipping; AMP; early stopping on SSIM.
+**Training** — AdamW for generator when Transformer encoder is enabled (`weight_decay=0.01`), Adam otherwise; Adam for discriminators; `lr=2e-4`, linear warmup + linear decay LR; EMA generators (decay=0.999); replay buffers; gradient clipping; AMP; early stopping on SSIM.
 
 ---
 
