@@ -33,10 +33,12 @@ stitching artifacts.
   - loads DiT, VAE wrapper, DDPM scheduler, DDIM sampler
   - uses checkpoint `config` if available, else `get_dit_config().diffusion`
 
-- `load_v4_model(checkpoint_path, device, image_size)`
-  - prefers EMA weights when present
-  - infers generator architecture from saved weights via `_infer_v4_kwargs`
+- `load_v4_components(checkpoint_path, device, image_size)`
+  - prefers EMA weights (`ema_G_AB_state_dict` / `ema_G_BA_state_dict`) when present
+  - loads `V4ModelConfig` from checkpoint `config` key; falls back to `get_v4_8gb_config()`
+  - infers shape-visible architecture fields from saved weights via `_infer_v4_kwargs`
   - supports both Transformer and ResNet v4 checkpoints
+  - returns `(G_AB, G_BA, mcfg)`; use `load_v4_model` for the legacy two-value return
 
 ## Patch Pipeline
 
@@ -61,13 +63,16 @@ stitching artifacts.
 ## Direction Behavior by Version
 
 - v1/v2: bidirectional (`A -> B` and `B -> A`)
-- v3: currently unstained-to-stained path in patch diffusion function
+- v3: A→B only (unstained→stained) via DDIM sampling with `target_domain=1`
 - v4: bidirectional (`A -> B` and `B -> A`)
 
 ## Outputs
 
-- `data/reconstructed_stained_output.png`
-- `data/reconstructed_unstained_output.png` (v1/v2/v4)
+Stained output (all versions):
+- `data/E_Staining_DermaRepo/H_E-Staining_dataset/<model_dir>/V_Stained/<input_filename>`
+
+Unstained output (v1/v2/v4 only):
+- `data/reconstructed_unstained_output.png`
 
 ## CLI Usage
 

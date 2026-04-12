@@ -1,10 +1,10 @@
 """
 Inference script for whole-slide stain / unstain translation.
 
-Loads a trained CycleGAN checkpoint and translates arbitrarily large
-histology images by splitting them into 256×256 patches, running each
-patch through the appropriate generator, and then blending overlapping
-patches back into a seamless full-resolution output image.
+Loads a trained checkpoint and translates arbitrarily large histology
+images by splitting them into 256×256 patches, running each patch through
+the appropriate generator, and then blending overlapping patches back into
+a seamless full-resolution output image.
 
 Both model versions are supported:
   - v1 (``ViTUNetGenerator``)   — loaded when ``model_version=1``
@@ -12,10 +12,16 @@ Both model versions are supported:
   - v3 (``DiTGenerator``)       — loaded when ``model_version=3``
   - v4 (``TransformerGeneratorV4``) — loaded when ``model_version=4``
 
-For v2 the architecture hyperparameters (``vit_depth``, ``use_cross_domain``)
-are auto-detected from the checkpoint state dict, so the loaded model always
-matches whatever was saved — regardless of which config was used at training
-time.
+Loader helpers are provided for each version so the saved config can be
+retrieved alongside the model components:
+
+    - ``load_v1_components``
+    - ``load_v2_components``
+    - ``load_v3_components``
+    - ``load_v4_components``
+
+For v2 and v4 the architecture hyperparameters are also inferred from the
+checkpoint state dict so the instantiated model matches the saved weights.
 
 CLI usage::
 
@@ -29,7 +35,7 @@ You will be prompted for:
 
 Model-version behavior:
     - v1/v2 run bidirectional translation using ``G_AB`` and ``G_BA``.
-    - v3 runs bidirectional translation (unstained <-> stained) via diffusion sampling with domain conditioning.
+    - v3 runs A→B only (unstained→stained) via DDIM sampling with ``target_domain=1``.
     - v4 runs bidirectional translation using the Transformer + PatchNCE generators.
 
 Outputs are written to:
@@ -40,6 +46,7 @@ Outputs are written to:
 import os
 import math
 import dataclasses
+from typing import Optional
 
 import torch
 import torchvision.transforms as transforms
@@ -51,6 +58,23 @@ Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
+def _load_checkpoint(checkpoint_path: str, map_location):
+    """
+    Load a local trusted checkpoint across PyTorch versions.
+
+    PyTorch 2.6 changed torch.load default to weights_only=True, which breaks
+    checkpoints that include config dataclasses. We explicitly disable that
+    default for trusted local checkpoints, and fall back for older versions
+    that do not support the weights_only argument.
+    """
+    try:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+
+
 def is_v3_checkpoint(ckpt: dict) -> bool:
     """
     Return True when a checkpoint dictionary appears to follow v3 schema.
@@ -58,6 +82,31 @@ def is_v3_checkpoint(ckpt: dict) -> bool:
     The current heuristic checks for ``dit_state_dict``.
     """
     return "dit_state_dict" in ckpt
+
+
+def _load_uvcgan_config(checkpoint: dict, model_version: int):
+    """
+    Load a UVCGAN config object from a checkpoint or fall back to defaults.
+
+    Older v1/v2 checkpoints may not persist a config object, so this helper
+    always returns a valid config for the requested model version.
+    """
+    from config import UVCGANConfig, get_default_config
+
+    ckpt_config = checkpoint.get("config")
+    if (
+        isinstance(ckpt_config, UVCGANConfig)
+        and ckpt_config.model_version == model_version
+    ):
+        return ckpt_config
+
+    if ckpt_config is not None:
+        print(
+            f"[warn] checkpoint config has unexpected type {type(ckpt_config).__name__!r} "
+            f"for model_version={model_version}; falling back to get_default_config()."
+        )
+
+    return get_default_config(model_version)
 
 
 def load_v3_components(checkpoint_path: str, device: str):
@@ -78,7 +127,7 @@ def load_v3_components(checkpoint_path: str, device: str):
     from model_v3.noise_scheduler import DDPMScheduler, DDIMSampler
     from model_v3.vae_wrapper import VAEWrapper
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = _load_checkpoint(checkpoint_path, map_location=device)
     diff_cfg = checkpoint.get("config")
     if diff_cfg is None:
         diff_cfg = get_dit_config().diffusion
@@ -100,6 +149,94 @@ def load_v3_components(checkpoint_path: str, device: str):
 
     cond_encoder = None
     return dit_model, cond_encoder, vae, sampler, diff_cfg
+
+
+def load_v1_components(checkpoint_path: str, device: str = "cpu"):
+    """
+    Load v1 generators together with the saved or default UVCGAN config.
+
+    Older v1 checkpoints do not persist a config object, so the loader falls
+    back to ``get_default_config(1)``.
+    """
+    from model_v1.generator import ViTUNetGenerator
+
+    checkpoint = _load_checkpoint(checkpoint_path, map_location=device)
+    cfg = _load_uvcgan_config(checkpoint, model_version=1)
+
+    G_AB = ViTUNetGenerator().to(device)
+    G_BA = ViTUNetGenerator().to(device)
+    G_AB.load_state_dict(checkpoint["G_AB"])
+    G_BA.load_state_dict(checkpoint["G_BA"])
+    G_AB.eval()
+    G_BA.eval()
+
+    return G_AB, G_BA, cfg
+
+
+def load_v2_components(checkpoint_path: str, device: str = "cpu"):
+    """
+    Load v2 generators together with the saved or default UVCGAN config.
+
+    The generator architecture is reconstructed from the checkpoint state dict
+    so the loaded model always matches the saved weights.
+    """
+    from model_v2.generator import ViTUNetGeneratorV2
+
+    checkpoint = _load_checkpoint(checkpoint_path, map_location=device)
+    cfg = _load_uvcgan_config(checkpoint, model_version=2)
+
+    kwargs = _infer_v2_kwargs(checkpoint["G_AB"])
+    G_AB = ViTUNetGeneratorV2(**kwargs).to(device)
+    G_BA = ViTUNetGeneratorV2(**kwargs).to(device)
+
+    def _load_v2_state_with_compat(model, state_dict: dict, tag: str):
+        """
+        Load v2 weights with a legacy fallback for older checkpoint schemas.
+
+        Newer ``ViTUNetGeneratorV2`` checkpoints should load strictly. For older
+        v2 checkpoints (pre-v2.2) we remap known renamed keys and then load only
+        shape-compatible tensors with ``strict=False``.
+        """
+        try:
+            model.load_state_dict(state_dict)
+            return
+        except RuntimeError as exc:
+            print(
+                f"[warn] {tag}: strict v2 load failed, trying compatibility fallback."
+            )
+
+            remapped = {}
+            for key, value in state_dict.items():
+                new_key = key
+                # Older v2 checkpoints used `res_bot.*`; newer model splits this
+                # into pre/post bottleneck residual blocks.
+                if key.startswith("res_bot."):
+                    new_key = "res_bot_pre." + key[len("res_bot.") :]
+                remapped[new_key] = value
+
+            model_state = model.state_dict()
+            compatible = {
+                key: value
+                for key, value in remapped.items()
+                if key in model_state and model_state[key].shape == value.shape
+            }
+
+            model.load_state_dict(compatible, strict=False)
+
+            loaded_count = len(compatible)
+            total_count = len(model_state)
+            print(
+                f"[warn] {tag}: loaded {loaded_count}/{total_count} tensors via compatibility mode. "
+                "Missing newer layers are left at init values."
+            )
+            print(f"[warn] {tag}: original strict-load error: {exc}")
+
+    _load_v2_state_with_compat(G_AB, checkpoint["G_AB"], tag="G_AB")
+    _load_v2_state_with_compat(G_BA, checkpoint["G_BA"], tag="G_BA")
+    G_AB.eval()
+    G_BA.eval()
+
+    return G_AB, G_BA, cfg
 
 
 def _infer_v2_kwargs(state_dict: dict) -> dict:
@@ -144,7 +281,7 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
             ``"cuda"``.
         model_version (int): ``1`` loads :class:`~model_v1.generator.ViTUNetGenerator`;
             ``2`` loads :class:`~model_v2.generator.ViTUNetGeneratorV2`.
-            For v3 use :func:`load_v3_components`; for v4 use :func:`load_v4_model`.
+            For v3 use :func:`load_v3_components`; for v4 use :func:`load_v4_components`.
 
     Returns:
         tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` — both in ``eval()``
@@ -157,30 +294,12 @@ def load_model(checkpoint_path=None, device="cpu", model_version=2):
     if checkpoint_path is None:
         raise ValueError("Checkpoint_path is required")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
     if model_version == 1:
-        from model_v1.generator import ViTUNetGenerator
-
-        G_AB = ViTUNetGenerator().to(device)
-        G_BA = ViTUNetGenerator().to(device)
-
+        G_AB, G_BA, _ = load_v1_components(checkpoint_path, device=device)
     elif model_version == 2:
-        from model_v2.generator import ViTUNetGeneratorV2
-
-        # Infer the exact architecture that was used when this checkpoint was saved.
-        kwargs = _infer_v2_kwargs(checkpoint["G_AB"])
-        G_AB = ViTUNetGeneratorV2(**kwargs).to(device)
-        G_BA = ViTUNetGeneratorV2(**kwargs).to(device)
-
+        G_AB, G_BA, _ = load_v2_components(checkpoint_path, device=device)
     else:
         raise ValueError(f"model_version must be 1 or 2, got {model_version!r}")
-
-    G_AB.load_state_dict(checkpoint["G_AB"])
-    G_BA.load_state_dict(checkpoint["G_BA"])
-
-    G_AB.eval()
-    G_BA.eval()
 
     return G_AB, G_BA
 
@@ -258,15 +377,17 @@ def _infer_v4_kwargs(state_dict: dict, fallback_cfg) -> dict:
     )
 
 
-def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
+def load_v4_components(
+    checkpoint_path: str, device: str, image_size: Optional[int] = None
+):
     """
-    Load v4 generators from a checkpoint, auto-detecting the architecture.
+    Load v4 generators together with the saved or default V4 model config.
 
     Prefers EMA weights (``ema_G_AB_state_dict`` / ``ema_G_BA_state_dict``) and
     falls back to the raw generator weights when EMA is not present.
 
     Architecture hyperparameters are loaded from the ``"config"`` key stored in
-    the checkpoint (a ``V4ModelConfig`` saved by ``train_v4``).  For older
+    the checkpoint (a ``V4ModelConfig`` saved by ``train_v4``). For older
     checkpoints that do not contain this key the function falls back to
     :func:`~config.get_v4_8gb_config` and additionally attempts to infer
     shape-visible fields via :func:`_infer_v4_kwargs`.
@@ -277,7 +398,7 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
         image_size:      Square input image size used to configure patch embedding.
 
     Returns:
-        tuple[nn.Module, nn.Module]: ``(G_AB, G_BA)`` in ``eval()`` mode.
+        tuple[nn.Module, nn.Module, V4ModelConfig]: ``(G_AB, G_BA, mcfg)``.
 
     Raises:
         KeyError: If neither EMA nor raw generator state dicts are found.
@@ -285,7 +406,7 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
     from config import V4ModelConfig, get_v4_8gb_config
     from model_v4.generator import getGeneratorV4
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = _load_checkpoint(checkpoint_path, map_location=device)
 
     # Prefer the config saved at training time; fall back to the 8 GB preset for
     # legacy checkpoints that pre-date config persistence.
@@ -330,10 +451,10 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
             patch_size=inferred.get("patch_size", mcfg.patch_size),
             encoder_dim=inferred.get("encoder_dim", mcfg.encoder_dim),
             encoder_depth=inferred.get("encoder_depth", mcfg.encoder_depth),
-            encoder_mlp_ratio=inferred.get(
-                "encoder_mlp_ratio", mcfg.encoder_mlp_ratio
-            ),
+            encoder_mlp_ratio=inferred.get("encoder_mlp_ratio", mcfg.encoder_mlp_ratio),
         )
+
+    resolved_image_size = image_size if image_size is not None else mcfg.image_size
 
     G_AB = getGeneratorV4(
         input_nc=mcfg.input_nc,
@@ -341,7 +462,7 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
         base_channels=mcfg.base_channels,
         num_res_blocks=mcfg.num_res_blocks,
         use_transformer_encoder=mcfg.use_transformer_encoder,
-        image_size=image_size,
+        image_size=resolved_image_size,
         patch_size=mcfg.patch_size,
         encoder_dim=mcfg.encoder_dim,
         encoder_depth=mcfg.encoder_depth,
@@ -358,7 +479,7 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
         base_channels=mcfg.base_channels,
         num_res_blocks=mcfg.num_res_blocks,
         use_transformer_encoder=mcfg.use_transformer_encoder,
-        image_size=image_size,
+        image_size=resolved_image_size,
         patch_size=mcfg.patch_size,
         encoder_dim=mcfg.encoder_dim,
         encoder_depth=mcfg.encoder_depth,
@@ -370,10 +491,52 @@ def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
         run_smoke_test=False,
     )
 
-    G_AB.load_state_dict(state_ab)
-    G_BA.load_state_dict(state_ba)
+    def _load_v4_state_with_compat(model, state_dict: dict, tag: str):
+        """
+        Load v4 weights with a compatibility fallback for older checkpoints.
+
+        Newer checkpoints should load strictly. For older checkpoints that
+        predate added layers (e.g. local attention gate/texture head), load
+        only shape-compatible tensors with ``strict=False``.
+        """
+        try:
+            model.load_state_dict(state_dict)
+            return
+        except RuntimeError as exc:
+            print(
+                f"[warn] {tag}: strict v4 load failed, trying compatibility fallback."
+            )
+
+            model_state = model.state_dict()
+            compatible = {
+                key: value
+                for key, value in state_dict.items()
+                if key in model_state and model_state[key].shape == value.shape
+            }
+            model.load_state_dict(compatible, strict=False)
+
+            loaded_count = len(compatible)
+            total_count = len(model_state)
+            print(
+                f"[warn] {tag}: loaded {loaded_count}/{total_count} tensors via compatibility mode. "
+                "Missing newer layers are left at init values."
+            )
+            print(f"[warn] {tag}: original strict-load error: {exc}")
+
+    _load_v4_state_with_compat(G_AB, state_ab, tag="G_AB")
+    _load_v4_state_with_compat(G_BA, state_ba, tag="G_BA")
     G_AB.eval()
     G_BA.eval()
+    return G_AB, G_BA, mcfg
+
+
+def load_v4_model(checkpoint_path: str, device: str, image_size: int) -> tuple:
+    """
+    Backward-compatible wrapper that returns only the v4 generator pair.
+    """
+    G_AB, G_BA, _ = load_v4_components(
+        checkpoint_path=checkpoint_path, device=device, image_size=image_size
+    )
     return G_AB, G_BA
 
 
@@ -611,7 +774,7 @@ def translate_image_from_patches(
     6. Crop back to the original image dimensions.
     7. Save to ``output_path`` with ``torchvision.utils.save_image``.
 
-    A progress message is printed every 10 patches.
+    A progress message is printed every 100 patches.
 
     Args:
         input_image_path (str): Path to the source whole-slide image.
@@ -644,7 +807,10 @@ def translate_image_from_patches(
             translated_patch = model(patch_tensor).cpu().squeeze(0)
             translated_patches.append(translated_patch)
 
-            if translated_patches.__len__() % 10 == 0:
+            if (
+                translated_patches.__len__() % 100 == 0
+                or translated_patches.__len__() == input_patches.__len__()
+            ):
                 print(
                     f"Processed {translated_patches.__len__()} / {input_patches.__len__()} patches"
                 )
@@ -747,7 +913,9 @@ def translate_image_from_patches_v3(
             for j in range(fake_B.size(0)):
                 translated_patches.append(fake_B[j].cpu())
 
-            if len(translated_patches) % 10 == 0:
+            if len(translated_patches) % 100 == 0 or len(translated_patches) == len(
+                input_patches
+            ):
                 print(
                     f"Processed {len(translated_patches)} / {len(input_patches)} patches"
                 )
@@ -771,6 +939,17 @@ def translate_image_from_patches_v3(
     return original_size, padded_image.size, len(input_patches), output_path
 
 
+def _build_transform(patch_size: int):
+    """Return the standard RGB normalisation transform for a patch size."""
+    return transforms.Compose(
+        [
+            transforms.Resize((patch_size, patch_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -781,16 +960,6 @@ if __name__ == "__main__":
         )
     )
 
-    patch_size = 256
-    stride = patch_size // 2
-    transform = transforms.Compose(
-        [
-            transforms.Resize((patch_size, patch_size)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
 
     if model_version == 3:
@@ -799,6 +968,9 @@ if __name__ == "__main__":
         dit_model, cond_encoder, vae, sampler, diff_cfg = load_v3_components(
             model_path, device=device
         )
+        patch_size = 256
+        stride = patch_size // 2
+        transform = _build_transform(patch_size)
 
         unstained_image_path = input("Provide Path to Unstained Image: ")
         unstained_image_path = (
@@ -811,6 +983,11 @@ if __name__ == "__main__":
             else os.path.normpath(unstained_image_path)
         )
         print(f"Unstained Image Path: {unstained_image_path}")
+        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
+        model_dir_name = os.path.basename(os.path.dirname(model_path))
+        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+        os.makedirs(output_path, exist_ok=True)
+        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
 
         batch_size = 4 if device == "cuda" else 1
         original_size, padded_size, num_patches, stained_output_path = (
@@ -821,7 +998,7 @@ if __name__ == "__main__":
                 vae=vae,
                 sampler=sampler,
                 transform=transform,
-                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                output_path=output_path,
                 patch_size=patch_size,
                 stride=stride,
                 device=device,
@@ -840,9 +1017,12 @@ if __name__ == "__main__":
     elif model_version == 4:
         if not model_path or not model_path.strip():
             raise ValueError("Checkpoint_path is required")
-        G_AB, G_BA = load_v4_model(
-            checkpoint_path=model_path, device=device, image_size=patch_size
+        G_AB, G_BA, v4_cfg = load_v4_components(
+            checkpoint_path=model_path, device=device
         )
+        patch_size = v4_cfg.image_size
+        stride = patch_size // 2
+        transform = _build_transform(patch_size)
 
         unstained_image_path = input("Provide Path to Unstained Image: ")
         stained_image_path = input("Provide Path to Stained Image: ")
@@ -865,6 +1045,12 @@ if __name__ == "__main__":
             else os.path.normpath(stained_image_path)
         )
 
+        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
+        model_dir_name = os.path.basename(os.path.dirname(model_path))
+        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+        os.makedirs(output_path, exist_ok=True)
+        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
+
         print(f"Unstained Image Path: {unstained_image_path}")
         print(f"Stained Image Path: {stained_image_path}")
 
@@ -874,7 +1060,7 @@ if __name__ == "__main__":
                 input_image_path=unstained_image_path,
                 model=G_AB,
                 transform=transform,
-                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                output_path=output_path,
                 patch_size=patch_size,
                 stride=stride,
                 device=device,
@@ -907,12 +1093,17 @@ if __name__ == "__main__":
         )
         print(f"[Unstain/v4] Patch stride: {stride}")
     elif model_version in (1, 2):
-        # Load the model
-        G_AB, G_BA = load_model(
-            checkpoint_path=model_path, device=device, model_version=model_version
-        )
+        if not model_path or not model_path.strip():
+            raise ValueError("Checkpoint_path is required")
+        if model_version == 1:
+            G_AB, G_BA, uv_cfg = load_v1_components(model_path, device=device)
+        else:
+            G_AB, G_BA, uv_cfg = load_v2_components(model_path, device=device)
 
-        # Image paths
+        patch_size = uv_cfg.data.image_size
+        stride = patch_size // 2
+        transform = _build_transform(patch_size)
+
         unstained_image_path = input("Provide Path to Unstained Image: ")
         stained_image_path = input("Provide Path to Stained Image: ")
         unstained_image_path = (
@@ -933,6 +1124,11 @@ if __name__ == "__main__":
             if not stained_image_path
             else os.path.normpath(stained_image_path)
         )
+        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
+        model_dir_name = os.path.basename(os.path.dirname(model_path))
+        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+        os.makedirs(output_path, exist_ok=True)
+        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
 
         print(f"Unstained Image Path: {unstained_image_path}")
         print(f"Stained Image Path: {stained_image_path}")
@@ -943,7 +1139,7 @@ if __name__ == "__main__":
                 input_image_path=unstained_image_path,
                 model=G_AB,
                 transform=transform,
-                output_path=os.path.join("data", "reconstructed_stained_output.png"),
+                output_path=output_path,
                 patch_size=patch_size,
                 stride=stride,
                 device=device,
