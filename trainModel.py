@@ -17,7 +17,7 @@ from datetime import datetime
 
 from shared.history_utils import save_history_to_csv, visualize_history
 from model_v1.training_loop import train_v1
-from config import get_8gb_config, get_v4_8gb_config
+from config import get_8gb_config, get_v4_8gb_config, get_default_config
 from model_v2.training_loop import train_v2
 from model_v4.training_loop import train_v4
 
@@ -79,6 +79,11 @@ def main():
         os.makedirs(val_dir, exist_ok=True)
         print(f"Validation image directory: {val_dir}")
         cfg = get_8gb_config()
+        cfg.training.save_checkpoint_every = (
+            20
+            if cfg.training.save_checkpoint_every <= 0
+            else cfg.training.save_checkpoint_every
+        )  # Default to saving every 20 epochs if not set
         history, G_AB, G_BA, D_A, D_B = train_v2(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
@@ -101,6 +106,11 @@ def main():
         os.makedirs(val_dir, exist_ok=True)
         print(f"Validation image directory: {val_dir}")
         cfg = get_dit_8gb_config()
+        cfg.training.save_checkpoint_every = (
+            20
+            if cfg.training.save_checkpoint_every <= 0
+            else cfg.training.save_checkpoint_every
+        )  # Default to saving every 20 epochs if not set
         history, dit_model, ema_model, cond_encoder = train_v3(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
@@ -125,6 +135,11 @@ def main():
         print(f"Validation image directory: {val_dir}")
         cfg = get_v4_8gb_config()
         cfg.training.test_size = test_size
+        cfg.training.save_checkpoint_every = (
+            20
+            if cfg.training.save_checkpoint_every <= 0
+            else cfg.training.save_checkpoint_every
+        )  # Default to saving every 20 epochs if not set
         history, G_AB, G_BA, D_A, D_B = train_v4(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
@@ -132,7 +147,7 @@ def main():
             val_dir=val_dir,
             cfg=cfg,
         )
-    else:
+    elif model_version == 1:
         # Create a timestamped model directory so each run is isolated.
         model_dir = os.path.join(
             dataset_root,
@@ -144,13 +159,25 @@ def main():
         val_dir = os.path.join(model_dir, "validation_images")
         os.makedirs(val_dir, exist_ok=True)
         print(f"Validation image directory: {val_dir}")
+        cfg = get_default_config(
+            model_version=model_version
+        )  # Use default config for model_v1
+        cfg.training.test_size = test_size
+        cfg.training.save_checkpoint_every = (
+            20
+            if cfg.training.save_checkpoint_every <= 0
+            else cfg.training.save_checkpoint_every
+        )  # Default to saving every 20 epochs if not set
         history, G_AB, G_BA, D_A, D_B = train_v1(
             epoch_size=epoch_size,
             num_epochs=num_epochs,
             model_dir=model_dir,
             val_dir=val_dir,
             test_size=test_size,
+            cfg=cfg,
         )
+    else:
+        raise ValueError("Invalid model version selected. Please choose 1, 2, 3, or 4.")
 
     # Persist training history in both visual and CSV form.
     history_visualizer = visualize_history

@@ -862,7 +862,7 @@ def train_v4(
                 "LR/Discriminator_B", lr_scheduler_D_B.get_last_lr()[0], epoch + 1
             )
 
-        if (epoch + 1) % tcfg.save_every == 0:
+        if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
                 {

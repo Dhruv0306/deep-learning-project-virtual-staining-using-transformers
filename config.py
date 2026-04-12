@@ -121,6 +121,7 @@ class TrainingConfig:
     validation_size: int = 100
     validation_fid_samples: int = 200
     validation_fid_min_samples: int = 50
+    save_checkpoint_every: int = 20
 
 
 @dataclass
@@ -408,9 +409,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2    # effective batch = 4
-    cfg.data.num_workers = 4
+    cfg.data.batch_size = 1
+    cfg.training.accumulate_grads = 4    # effective batch = 4
+    cfg.data.num_workers = 10
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.0
@@ -423,6 +424,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.disc_base_channels = 128
     cfg.diffusion.disc_global_base_channels = 32
     cfg.diffusion.disc_n_layers = 4
+    cfg.training.validation_warmup_epochs = 5
 
     return cfg
 
@@ -502,7 +504,7 @@ class V4TrainingConfig:
         early_stopping_min_delta: Minimum SSIM gain required to reset patience.
         divergence_threshold: Loss explosion ratio vs best loss baseline.
         divergence_patience: Consecutive divergence checks before hard stop.
-        save_every:         Save a checkpoint every N epochs.
+        save_checkpoint_every:         Save a checkpoint every N epochs.
     """
 
     num_epochs: int = 200
@@ -515,7 +517,7 @@ class V4TrainingConfig:
     use_amp: bool = True
     accumulate_grads: int = 1
     log_every: int = 50
-    save_every: int = 20
+    save_checkpoint_every: int = 20
     validation_every: int = 5
     validation_samples: int = 10
     validation_max_batches: int = 50

@@ -610,7 +610,7 @@ def train_v2(
             history.clear()
 
         # ---- Periodic checkpoint (every 20 epochs) ----
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
                 {

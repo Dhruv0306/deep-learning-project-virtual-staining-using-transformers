@@ -26,10 +26,16 @@ from model_v1.losses import CycleGANLoss
 from shared.metrics import MetricsCalculator
 from shared.testing import run_testing
 from shared.validation import calculate_metrics, run_validation
+from config import get_default_config
 
 
 def train(
-    epoch_size=None, num_epochs=None, model_dir=None, val_dir=None, test_size=None
+    epoch_size=None,
+    num_epochs=None,
+    model_dir=None,
+    val_dir=None,
+    test_size=None,
+    cfg=None,
 ):
     """
     Train v1 generators and discriminators.
@@ -52,6 +58,10 @@ def train(
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+    # if cfg is not None:
+    cfg = cfg if cfg is not None else get_default_config(model_version=1)
+    tcfg = cfg.training
 
     # Load training and test data.
     train_loader, test_loader = getDataLoader(
@@ -242,7 +252,7 @@ def train(
             history.clear()
 
         # Save checkpoints every 20 epochs.
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -426,7 +436,6 @@ def train(
 
     writer.close()
     return history, G_AB, G_BA, D_A, D_B
-
 
 
 def train_v1(*args, **kwargs):

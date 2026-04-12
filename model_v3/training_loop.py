@@ -1000,7 +1000,7 @@ def train_v3(
             append_history_to_csv_v3(history, history_csv_path)
             history.clear()
 
-        if (epoch + 1) % 20 == 0:
+        if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
                 {
