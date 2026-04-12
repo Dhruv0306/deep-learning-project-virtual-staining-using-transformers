@@ -24,13 +24,19 @@ stitching artifacts.
 
 ## Checkpoint Loading Paths
 
+- `load_v1_components(checkpoint_path, device)`
+  - loads `ViTUNetGenerator` pair; falls back to `get_default_config(1)` for legacy checkpoints
+
+- `load_v2_components(checkpoint_path, device)`
+  - loads `ViTUNetGeneratorV2` pair; architecture (`vit_depth`, `use_cross_domain`) is
+    auto-inferred from checkpoint keys by `_infer_v2_kwargs`
+  - applies key-remapping compatibility fallback for pre-v2.2 checkpoints (`res_bot.*` → `res_bot_pre.*`)
+
 - `load_model(checkpoint_path, device, model_version)`
-  - supports v1/v2
-  - v2 architecture (`vit_depth`, `use_cross_domain`) is auto-inferred from
-    checkpoint keys by `_infer_v2_kwargs`
+  - thin wrapper over `load_v1_components` / `load_v2_components`; returns `(G_AB, G_BA)` only
 
 - `load_v3_components(checkpoint_path, device)`
-  - loads DiT, VAE wrapper, DDPM scheduler, DDIM sampler
+  - loads DiT model (prefers EMA weights), frozen VAE wrapper, DDPM scheduler, DDIM sampler
   - uses checkpoint `config` if available, else `get_dit_config().diffusion`
 
 - `load_v4_components(checkpoint_path, device, image_size)`
@@ -66,12 +72,21 @@ stitching artifacts.
 - v3: A→B only (unstained→stained) via DDIM sampling with `target_domain=1`
 - v4: bidirectional (`A -> B` and `B -> A`)
 
+## Translation Modes
+
+When prompted `Run full unstained to stained translation? (y/n)`:
+
+- `n` — single-image mode: prompts for individual image paths, runs both directions
+  (A→B and B→A) for v1/v2/v4; A→B only for v3
+- `y` — full dataset mode: iterates all images in `Un_Stained/`, runs A→B only,
+  skips failures and continues; v3 uses batched DDIM sampling
+
 ## Outputs
 
-Stained output (all versions):
+Stained output (all versions, both modes):
 - `data/E_Staining_DermaRepo/H_E-Staining_dataset/<model_dir>/V_Stained/<input_filename>`
 
-Unstained output (v1/v2/v4 only):
+Unstained output (v1/v2/v4 single-image mode only):
 - `data/reconstructed_unstained_output.png`
 
 ## CLI Usage
@@ -84,5 +99,6 @@ Prompts:
 
 - model checkpoint path
 - model version (1, 2, 3, or 4)
-- unstained image path
-- stained image path (for v1/v2/v4)
+- run full dataset translation? (y/n)
+- unstained image path (single-image mode)
+- stained image path (single-image mode, v1/v2/v4 only)

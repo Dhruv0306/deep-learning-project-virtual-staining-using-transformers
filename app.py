@@ -39,8 +39,10 @@ Model-version behavior:
     - v4 runs bidirectional translation using the Transformer + PatchNCE generators.
 
 Outputs are written to:
-  - ``data/reconstructed_stained_output.png``
+  - ``data/E_Staining_DermaRepo/H_E-Staining_dataset/<model_dir>/V_Stained/<filename>``
+    (stained output, all versions)
   - ``data/reconstructed_unstained_output.png``
+    (unstained output, v1/v2/v4 only)
 """
 
 import os
@@ -759,6 +761,8 @@ def translate_image_from_patches(
     patch_size=256,
     stride=256,
     device="cpu",
+    log_progress=True,
+    log_interval=100,
 ):
     """
     Translate a whole-slide image by applying a generator patch-by-patch.
@@ -807,8 +811,8 @@ def translate_image_from_patches(
             translated_patch = model(patch_tensor).cpu().squeeze(0)
             translated_patches.append(translated_patch)
 
-            if (
-                translated_patches.__len__() % 100 == 0
+            if log_progress and (
+                translated_patches.__len__() % log_interval == 0
                 or translated_patches.__len__() == input_patches.__len__()
             ):
                 print(
@@ -849,6 +853,8 @@ def translate_image_from_patches_v3(
     num_steps=50,
     prediction_type="v",
     cfg_scale=1.0,
+    log_progress=True,
+    log_interval=100,
 ):
     """
     Translate a whole-slide image using the v3 diffusion pipeline.
@@ -913,8 +919,9 @@ def translate_image_from_patches_v3(
             for j in range(fake_B.size(0)):
                 translated_patches.append(fake_B[j].cpu())
 
-            if len(translated_patches) % 100 == 0 or len(translated_patches) == len(
-                input_patches
+            if log_progress and (
+                len(translated_patches) % log_interval == 0
+                or len(translated_patches) == len(input_patches)
             ):
                 print(
                     f"Processed {len(translated_patches)} / {len(input_patches)} patches"
@@ -959,7 +966,9 @@ if __name__ == "__main__":
             "Enter 1 for Hybrid UVCGAN based, 2 for True-UVCGAN based, 3 for DiT diffusion, 4 for v4 Transformer: "
         )
     )
-
+    run_full_unstained_to_stained_translation = (
+        input("Run full unstained to stained translation? (y/n): ").lower() == "y"
+    )
     dataset_root = os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset")
 
     if model_version == 3:
@@ -972,49 +981,109 @@ if __name__ == "__main__":
         stride = patch_size // 2
         transform = _build_transform(patch_size)
 
-        unstained_image_path = input("Provide Path to Unstained Image: ")
-        unstained_image_path = (
-            os.path.join(
-                dataset_root,
-                "Un_Stained",
-                "HC21-01338(A3-1).10X unstained.jpg",
+        if not run_full_unstained_to_stained_translation:
+            unstained_image_path = input("Provide Path to Unstained Image: ")
+            unstained_image_path = (
+                os.path.join(
+                    dataset_root,
+                    "Un_Stained",
+                    "HC21-01338(A3-1).10X unstained.jpg",
+                )
+                if not unstained_image_path
+                else os.path.normpath(unstained_image_path)
             )
-            if not unstained_image_path
-            else os.path.normpath(unstained_image_path)
-        )
-        print(f"Unstained Image Path: {unstained_image_path}")
-        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
-        model_dir_name = os.path.basename(os.path.dirname(model_path))
-        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
-        os.makedirs(output_path, exist_ok=True)
-        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
-
-        batch_size = 4 if device == "cuda" else 1
-        original_size, padded_size, num_patches, stained_output_path = (
-            translate_image_from_patches_v3(
-                input_image_path=unstained_image_path,
-                dit_model=dit_model,
-                cond_encoder=cond_encoder,
-                vae=vae,
-                sampler=sampler,
-                transform=transform,
-                output_path=output_path,
-                patch_size=patch_size,
-                stride=stride,
-                device=device,
-                batch_size=batch_size,
-                num_steps=diff_cfg.num_inference_steps,
-                prediction_type=diff_cfg.prediction_type,
-                cfg_scale=diff_cfg.cfg_scale,
+            print(f"Unstained Image Path: {unstained_image_path}")
+            # Output path is dataset_root / model_dir_name / V_Stained / original_filename
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_path, exist_ok=True)
+            output_path = os.path.join(
+                output_path, os.path.basename(unstained_image_path)
             )
-        )
 
-        print(f"[Stain/v3] Original Image size: {original_size}")
-        print(f"[Stain/v3] Padded Image size: {padded_size}")
-        print(f"[Stain/v3] Num patches: {num_patches}")
-        print(f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}")
-        print(f"[Stain/v3] Patch stride: {stride}")
+            batch_size = 4 if device == "cuda" else 1
+            original_size, padded_size, num_patches, stained_output_path = (
+                translate_image_from_patches_v3(
+                    input_image_path=unstained_image_path,
+                    dit_model=dit_model,
+                    cond_encoder=cond_encoder,
+                    vae=vae,
+                    sampler=sampler,
+                    transform=transform,
+                    output_path=output_path,
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=device,
+                    batch_size=batch_size,
+                    num_steps=diff_cfg.num_inference_steps,
+                    prediction_type=diff_cfg.prediction_type,
+                    cfg_scale=diff_cfg.cfg_scale,
+                )
+            )
+
+            print(f"[Stain/v3] Original Image size: {original_size}")
+            print(f"[Stain/v3] Padded Image size: {padded_size}")
+            print(f"[Stain/v3] Num patches: {num_patches}")
+            print(
+                f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}"
+            )
+            print(f"[Stain/v3] Patch stride: {stride}")
+        else:
+            print("Running full dataset translation...")
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_dir = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Get all unstained images
+            unstained_dir = os.path.join(dataset_root, "Un_Stained")
+            if not os.path.exists(unstained_dir):
+                raise FileNotFoundError(
+                    f"Unstained directory not found: {unstained_dir}"
+                )
+
+            unstained_images = [
+                f
+                for f in os.listdir(unstained_dir)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+
+            unstained_images.sort()  # consistent processing order
+
+            for i, img_name in enumerate(unstained_images):
+                print(f"Processing image {i+1}/{len(unstained_images)}: {img_name}")
+                unstained_path = os.path.join(unstained_dir, img_name)
+                output_path = os.path.join(output_dir, img_name)
+                batch_size = 4 if device == "cuda" else 1
+
+                try:
+                    original_size, padded_size, num_patches, stained_output_path = (
+                        translate_image_from_patches_v3(
+                            input_image_path=unstained_path,
+                            dit_model=dit_model,
+                            cond_encoder=cond_encoder,
+                            vae=vae,
+                            sampler=sampler,
+                            transform=transform,
+                            output_path=output_path,
+                            patch_size=patch_size,
+                            stride=stride,
+                            device=device,
+                            batch_size=batch_size,
+                            num_steps=diff_cfg.num_inference_steps,
+                            prediction_type=diff_cfg.prediction_type,
+                            cfg_scale=diff_cfg.cfg_scale,
+                            log_progress=True,
+                            log_interval=1000,
+                        )
+                    )
+                    print(
+                        f"[Stain/v3] Saved reconstructed stained image at: {stained_output_path}"
+                    )
+                except Exception as e:
+                    print(f"[Error] Failed to process {img_name}: {e}")
+                    continue
     elif model_version == 4:
+        # v4: CUT + Transformer/ResNet generators, bidirectional translation
         if not model_path or not model_path.strip():
             raise ValueError("Checkpoint_path is required")
         G_AB, G_BA, v4_cfg = load_v4_components(
@@ -1024,75 +1093,129 @@ if __name__ == "__main__":
         stride = patch_size // 2
         transform = _build_transform(patch_size)
 
-        unstained_image_path = input("Provide Path to Unstained Image: ")
-        stained_image_path = input("Provide Path to Stained Image: ")
-        unstained_image_path = (
-            os.path.join(
-                dataset_root,
-                "Un_Stained",
-                "HC21-01338(A3-1).10X unstained.jpg",
+        if not run_full_unstained_to_stained_translation:
+            unstained_image_path = input("Provide Path to Unstained Image: ")
+            stained_image_path = input("Provide Path to Stained Image: ")
+            unstained_image_path = (
+                os.path.join(
+                    dataset_root,
+                    "Un_Stained",
+                    "HC21-01338(A3-1).10X unstained.jpg",
+                )
+                if not unstained_image_path
+                else os.path.normpath(unstained_image_path)
             )
-            if not unstained_image_path
-            else os.path.normpath(unstained_image_path)
-        )
-        stained_image_path = (
-            os.path.join(
-                dataset_root,
-                "C_Stained",
-                "HC21-01338(A3-2).10X unstained.jpg",
+            stained_image_path = (
+                os.path.join(
+                    dataset_root,
+                    "C_Stained",
+                    "HC21-01338(A3-2).10X unstained.jpg",
+                )
+                if not stained_image_path
+                else os.path.normpath(stained_image_path)
             )
-            if not stained_image_path
-            else os.path.normpath(stained_image_path)
-        )
 
-        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
-        model_dir_name = os.path.basename(os.path.dirname(model_path))
-        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
-        os.makedirs(output_path, exist_ok=True)
-        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
-
-        print(f"Unstained Image Path: {unstained_image_path}")
-        print(f"Stained Image Path: {stained_image_path}")
-
-        # A -> B (unstained -> stained)
-        original_size, padded_size, num_patches, stained_output_path = (
-            translate_image_from_patches(
-                input_image_path=unstained_image_path,
-                model=G_AB,
-                transform=transform,
-                output_path=output_path,
-                patch_size=patch_size,
-                stride=stride,
-                device=device,
+            # stained output: <dataset_root>/<model_dir>/V_Stained/<filename>
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_path, exist_ok=True)
+            output_path = os.path.join(
+                output_path, os.path.basename(unstained_image_path)
             )
-        )
 
-        print(f"[Stain/v4] Original Image size: {original_size}")
-        print(f"[Stain/v4] Padded Image size: {padded_size}")
-        print(f"[Stain/v4] Num patches: {num_patches}")
-        print(f"[Stain/v4] Saved reconstructed stained image at: {stained_output_path}")
-        print(f"[Stain/v4] Patch stride: {stride}")
+            print(f"Unstained Image Path: {unstained_image_path}")
+            print(f"Stained Image Path: {stained_image_path}")
 
-        # B -> A (stained -> unstained)
-        original_size, padded_size, num_patches, unstained_output_path = (
-            translate_image_from_patches(
-                input_image_path=stained_image_path,
-                model=G_BA,
-                transform=transform,
-                output_path=os.path.join("data", "reconstructed_unstained_output.png"),
-                patch_size=patch_size,
-                stride=stride,
-                device=device,
+            # A -> B (unstained -> stained)
+            original_size, padded_size, num_patches, stained_output_path = (
+                translate_image_from_patches(
+                    input_image_path=unstained_image_path,
+                    model=G_AB,
+                    transform=transform,
+                    output_path=output_path,
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=device,
+                )
             )
-        )
-        print(f"[Unstain/v4] Original Image size: {original_size}")
-        print(f"[Unstain/v4] Padded Image size: {padded_size}")
-        print(f"[Unstain/v4] Num patches: {num_patches}")
-        print(
-            f"[Unstain/v4] Saved reconstructed unstained image at: {unstained_output_path}"
-        )
-        print(f"[Unstain/v4] Patch stride: {stride}")
+
+            print(f"[Stain/v4] Original Image size: {original_size}")
+            print(f"[Stain/v4] Padded Image size: {padded_size}")
+            print(f"[Stain/v4] Num patches: {num_patches}")
+            print(
+                f"[Stain/v4] Saved reconstructed stained image at: {stained_output_path}"
+            )
+            print(f"[Stain/v4] Patch stride: {stride}")
+
+            # B -> A (stained -> unstained)
+            original_size, padded_size, num_patches, unstained_output_path = (
+                translate_image_from_patches(
+                    input_image_path=stained_image_path,
+                    model=G_BA,
+                    transform=transform,
+                    output_path=os.path.join(
+                        "data", "reconstructed_unstained_output.png"
+                    ),
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=device,
+                )
+            )
+            print(f"[Unstain/v4] Original Image size: {original_size}")
+            print(f"[Unstain/v4] Padded Image size: {padded_size}")
+            print(f"[Unstain/v4] Num patches: {num_patches}")
+            print(
+                f"[Unstain/v4] Saved reconstructed unstained image at: {unstained_output_path}"
+            )
+            print(f"[Unstain/v4] Patch stride: {stride}")
+        else:
+            # Full dataset mode: translate every image in Un_Stained/ (A -> B only)
+            print("Running full dataset translation...")
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_dir = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_dir, exist_ok=True)
+
+            unstained_dir = os.path.join(dataset_root, "Un_Stained")
+            if not os.path.exists(unstained_dir):
+                raise FileNotFoundError(
+                    f"Unstained directory not found: {unstained_dir}"
+                )
+
+            unstained_images = [
+                f
+                for f in os.listdir(unstained_dir)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+            unstained_images.sort()
+
+            for i, img_name in enumerate(unstained_images):
+                print(f"Processing image {i+1}/{len(unstained_images)}: {img_name}")
+                unstained_path = os.path.join(unstained_dir, img_name)
+                output_path = os.path.join(output_dir, img_name)
+
+                try:
+                    original_size, padded_size, num_patches, stained_output_path = (
+                        translate_image_from_patches(
+                            input_image_path=unstained_path,
+                            model=G_AB,
+                            transform=transform,
+                            output_path=output_path,
+                            patch_size=patch_size,
+                            stride=stride,
+                            device=device,
+                            log_progress=True,
+                            log_interval=1000,
+                        )
+                    )
+                    print(
+                        f"[Stain/v4] Saved reconstructed stained image at: {stained_output_path}"
+                    )
+                except Exception as e:
+                    print(f"[Error] Failed to process {img_name}: {e}")
+                    continue
+
     elif model_version in (1, 2):
+        # v1: hybrid UVCGAN + CycleGAN  |  v2: true UVCGAN v2, bidirectional
         if not model_path or not model_path.strip():
             raise ValueError("Checkpoint_path is required")
         if model_version == 1:
@@ -1104,73 +1227,125 @@ if __name__ == "__main__":
         stride = patch_size // 2
         transform = _build_transform(patch_size)
 
-        unstained_image_path = input("Provide Path to Unstained Image: ")
-        stained_image_path = input("Provide Path to Stained Image: ")
-        unstained_image_path = (
-            os.path.join(
-                dataset_root,
-                "Un_Stained",
-                "HC21-01338(A3-1).10X unstained.jpg",
+        if not run_full_unstained_to_stained_translation:
+            unstained_image_path = input("Provide Path to Unstained Image: ")
+            stained_image_path = input("Provide Path to Stained Image: ")
+            unstained_image_path = (
+                os.path.join(
+                    dataset_root,
+                    "Un_Stained",
+                    "HC21-01338(A3-1).10X unstained.jpg",
+                )
+                if not unstained_image_path
+                else os.path.normpath(unstained_image_path)
             )
-            if not unstained_image_path
-            else os.path.normpath(unstained_image_path)
-        )
-        stained_image_path = (
-            os.path.join(
-                dataset_root,
-                "C_Stained",
-                "HC21-01338(A3-2).10X unstained.jpg",
+            stained_image_path = (
+                os.path.join(
+                    dataset_root,
+                    "C_Stained",
+                    "HC21-01338(A3-2).10X unstained.jpg",
+                )
+                if not stained_image_path
+                else os.path.normpath(stained_image_path)
             )
-            if not stained_image_path
-            else os.path.normpath(stained_image_path)
-        )
-        # Output path is dataset_root / model_dir_name / V_Stained / original_filename
-        model_dir_name = os.path.basename(os.path.dirname(model_path))
-        output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
-        os.makedirs(output_path, exist_ok=True)
-        output_path = os.path.join(output_path, os.path.basename(unstained_image_path))
-
-        print(f"Unstained Image Path: {unstained_image_path}")
-        print(f"Stained Image Path: {stained_image_path}")
-
-        # A -> B (unstained -> stained)
-        original_size, padded_size, num_patches, stained_output_path = (
-            translate_image_from_patches(
-                input_image_path=unstained_image_path,
-                model=G_AB,
-                transform=transform,
-                output_path=output_path,
-                patch_size=patch_size,
-                stride=stride,
-                device=device,
+            # stained output: <dataset_root>/<model_dir>/V_Stained/<filename>
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_path = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_path, exist_ok=True)
+            output_path = os.path.join(
+                output_path, os.path.basename(unstained_image_path)
             )
-        )
 
-        print(f"[Stain] Original Image size: {original_size}")
-        print(f"[Stain] Padded Image size: {padded_size}")
-        print(f"[Stain] Num patches: {num_patches}")
-        print(f"[Stain] Saved reconstructed stained image at: {stained_output_path}")
-        print(f"[Stain] Patch stride: {stride}")
+            print(f"Unstained Image Path: {unstained_image_path}")
+            print(f"Stained Image Path: {stained_image_path}")
 
-        # B -> A (stained -> unstained)
-        original_size, padded_size, num_patches, unstained_output_path = (
-            translate_image_from_patches(
-                input_image_path=stained_image_path,
-                model=G_BA,
-                transform=transform,
-                output_path=os.path.join("data", "reconstructed_unstained_output.png"),
-                patch_size=patch_size,
-                stride=stride,
-                device=device,
+            # A -> B (unstained -> stained)
+            original_size, padded_size, num_patches, stained_output_path = (
+                translate_image_from_patches(
+                    input_image_path=unstained_image_path,
+                    model=G_AB,
+                    transform=transform,
+                    output_path=output_path,
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=device,
+                )
             )
-        )
-        print(f"[Unstain] Original Image size: {original_size}")
-        print(f"[Unstain] Padded Image size: {padded_size}")
-        print(f"[Unstain] Num patches: {num_patches}")
-        print(
-            f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}"
-        )
-        print(f"[Unstain] Patch stride: {stride}")
+
+            print(f"[Stain] Original Image size: {original_size}")
+            print(f"[Stain] Padded Image size: {padded_size}")
+            print(f"[Stain] Num patches: {num_patches}")
+            print(
+                f"[Stain] Saved reconstructed stained image at: {stained_output_path}"
+            )
+            print(f"[Stain] Patch stride: {stride}")
+
+            # B -> A (stained -> unstained)
+            original_size, padded_size, num_patches, unstained_output_path = (
+                translate_image_from_patches(
+                    input_image_path=stained_image_path,
+                    model=G_BA,
+                    transform=transform,
+                    output_path=os.path.join(
+                        "data", "reconstructed_unstained_output.png"
+                    ),
+                    patch_size=patch_size,
+                    stride=stride,
+                    device=device,
+                )
+            )
+            print(f"[Unstain] Original Image size: {original_size}")
+            print(f"[Unstain] Padded Image size: {padded_size}")
+            print(f"[Unstain] Num patches: {num_patches}")
+            print(
+                f"[Unstain] Saved reconstructed unstained image at: {unstained_output_path}"
+            )
+            print(f"[Unstain] Patch stride: {stride}")
+        else:
+            # Full dataset mode: translate every image in Un_Stained/ (A -> B only)
+            print("Running full dataset translation...")
+            model_dir_name = os.path.basename(os.path.dirname(model_path))
+            output_dir = os.path.join(dataset_root, model_dir_name, "V_Stained")
+            os.makedirs(output_dir, exist_ok=True)
+
+            unstained_dir = os.path.join(dataset_root, "Un_Stained")
+            if not os.path.exists(unstained_dir):
+                raise FileNotFoundError(
+                    f"Unstained directory not found: {unstained_dir}"
+                )
+
+            unstained_images = [
+                f
+                for f in os.listdir(unstained_dir)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+            unstained_images.sort()
+
+            for i, img_name in enumerate(unstained_images):
+                print(f"Processing image {i+1}/{len(unstained_images)}: {img_name}")
+                unstained_path = os.path.join(unstained_dir, img_name)
+                output_path = os.path.join(output_dir, img_name)
+
+                try:
+                    original_size, padded_size, num_patches, stained_output_path = (
+                        translate_image_from_patches(
+                            input_image_path=unstained_path,
+                            model=G_AB,
+                            transform=transform,
+                            output_path=output_path,
+                            patch_size=patch_size,
+                            stride=stride,
+                            device=device,
+                            log_progress=True,
+                            log_interval=1000,
+                        )
+                    )
+                    print(
+                        f"[Stain/v{model_version}] Saved reconstructed stained image at: {stained_output_path}"
+                    )
+                except Exception as e:
+                    print(f"[Error] Failed to process {img_name}: {e}")
+                    continue
     else:
         raise ValueError(
             f"Invalid model_version: {model_version}. Must be 1, 2, 3, or 4."
