@@ -1,5 +1,5 @@
 """
-model_v3/training_loop.py — v3 training loop for the CycleDiT latent diffusion model.
+model_v3/training_loop.py — v3 CycleDiT latent diffusion training loop.
 
 Component structure:
     1) LR schedule helper
@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import pickle
 from typing import Callable, Optional
 
 import torch
@@ -58,6 +59,25 @@ from model_v3.losses import (
 )
 
 
+def _load_checkpoint_compat(checkpoint_path: str, map_location):
+    """
+    Load a local checkpoint safely across PyTorch versions.
+
+    PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints that
+    contain config dataclasses.  Falls back gracefully for older versions.
+    """
+    try:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+
+
 def _make_cosine_warmup_lambda(
     warmup: int, total: int, lr_min_ratio: float
 ) -> Callable[[int], float]:
@@ -65,8 +85,8 @@ def _make_cosine_warmup_lambda(
     Return a LambdaLR multiplier with linear warmup then cosine decay.
 
     Schedule:
-        [0, warmup)       — linear ramp from ~0 to 1
-        [warmup, total)   — cosine decay from 1 down to lr_min_ratio
+        [0, warmup)     — linear ramp from ~0 to 1.
+        [warmup, total) — cosine decay from 1 down to lr_min_ratio.
 
     Args:
         warmup:       Number of warmup epochs.
@@ -88,7 +108,7 @@ def _make_cosine_warmup_lambda(
 
 def _global_grad_norm(parameters) -> float:
     """
-    Compute the global L2 gradient norm across all parameters with a grad.
+    Return the global L2 gradient norm across all parameters with a grad.
 
     Returns a plain Python float for logging; no clipping is applied.
     """
@@ -412,7 +432,7 @@ def train_v3(
     )
 
     # ---- Models ----
-    # VAE is frozen throughout training; only the DiT and discriminators are updated.
+    # VAE is frozen throughout; only the DiT and discriminators are updated.
     vae = VAEWrapper(dcfg.vae_model_id).to(device)
     vae.eval()
 
@@ -439,7 +459,7 @@ def train_v3(
     sampler = DDIMSampler(scheduler)
 
     # ---- Optimizers ----
-    # AdamW for the DiT generator (weight decay stabilises large Transformer models);
+    # AdamW for the DiT generator (weight decay stabilises large Transformers);
     # standard Adam for discriminators (matching v2 convention).
     optimizer_G = torch.optim.AdamW(
         list(dit_model.parameters()),
@@ -520,7 +540,7 @@ def train_v3(
                 f"resume_checkpoint does not exist: {resume_checkpoint}"
             )
         print(f"[train_v3] Resuming from checkpoint: {resume_checkpoint}")
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
+        checkpoint = _load_checkpoint_compat(resume_checkpoint, map_location=device)
 
         if "dit_state_dict" not in checkpoint:
             raise KeyError("Checkpoint missing 'dit_state_dict' for v3 resume.")
@@ -619,8 +639,8 @@ def train_v3(
                 optimizer_G.zero_grad(set_to_none=True)
 
             # Generator step precedes discriminator steps.
-            # Split into Stage 1 (diffusion) and Stage 2 (adversarial/cycle/identity)
-            # so Stage 1 activations are freed before the larger Stage 2 graph is built.
+            # Stage 1 (diffusion) activations are freed before Stage 2
+            # (adversarial/cycle/identity) graph is built to reduce peak VRAM.
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
 
@@ -734,7 +754,7 @@ def train_v3(
 
                 z0_fake_B = out_A2B["x0_pred"]
                 z0_fake_A = out_B2A["x0_pred"]
-                # Decode x0 predictions to pixel space; fp32 avoids dtype mismatches in conv layers.
+                # Decode x0 predictions to pixel space; fp32 avoids dtype mismatches.
                 fake_B_img = vae.decode(z0_fake_B).clamp(-1.0, 1.0).float()
                 fake_A_img = vae.decode(z0_fake_A).clamp(-1.0, 1.0).float()
                 loss_adv_G_B = _lsgan_gen_loss(D_B(fake_B_img))
@@ -928,6 +948,7 @@ def train_v3(
                         f"GradNorm: {grad_norm:.4f}"
                     )
 
+        # ---- Epoch-level aggregation ----
         n_batches = max(1, len(train_loader))
         avg_loss = epoch_loss / n_batches
         avg_loss_perc = epoch_loss_perc / n_batches

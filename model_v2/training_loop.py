@@ -1,27 +1,23 @@
 """
-UVCGAN v2 training loop (Prokopenko et al., 2023).
+model_v2/training_loop.py — UVCGAN v2 training loop (Prokopenko et al., 2023).
 
-Design decisions
-----------------
-GAN objective   : LSGAN — losses are always >= 0, numerically stable.
-Gradient penalty: one-sided GP, gamma=100, lambda=0.1 (UVCGANLoss).
-n_critic        : 1 — standard for LSGAN; no multi-step D updates.
+GAN objective   : LSGAN — losses are always ≥ 0, numerically stable.
+Gradient penalty: one-sided GP, gamma=100, lambda=0.1 (inside UVCGANLoss).
+n_critic        : 1 — standard for LSGAN.
 Adam betas      : (0.5, 0.999), lr=2e-4.
 AMP safety      : GP always runs in float32; autocast is disabled inside
                   UVCGANLoss.discriminator_loss regardless of use_amp.
 Cross-domain    : generator_loss() calls forward_with_cross_domain()
                   automatically when both generators support it.
 
-Engineering additions
----------------------
-- Three-phase LR schedule: linear warm-up → constant → linear decay.
-- Gradient clipping on G and D.
-- EarlyStopping on SSIM + loss-divergence detection.
-  LSGAN losses are always >= 0, so divergence check needs no sign fix.
-- Replay buffer for discriminator stabilisation.
-- Last-known-good G snapshot for non-finite loss rollback.
-- TensorBoard logging: losses, LR, grad norms, early-stopping counters.
-- Periodic CSV history flush and epoch checkpoints every 20 epochs.
+Engineering additions:
+    - Three-phase LR schedule: linear warm-up → constant → linear decay.
+    - Gradient clipping on G and D.
+    - EarlyStopping on SSIM + loss-divergence detection.
+    - Replay buffer for discriminator stabilisation.
+    - Last-known-good G snapshot for non-finite loss rollback.
+    - TensorBoard logging: losses, LR, grad norms, early-stopping counters.
+    - Periodic CSV history flush and epoch checkpoints.
 
 Entry point: train_v2().
 """
@@ -29,6 +25,7 @@ Entry point: train_v2().
 import math
 import os
 import copy
+import pickle
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
@@ -51,6 +48,49 @@ from model_v2.generator import getGeneratorsV2
 from shared.validation import calculate_metrics, run_validation
 
 
+def _load_checkpoint_compat(checkpoint_path: str, map_location):
+    """
+    Load a local checkpoint safely across PyTorch versions.
+
+    PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints that
+    contain config dataclasses.  Falls back gracefully for older versions.
+    """
+    try:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+
+
+def _load_state_dict_with_compat(module: torch.nn.Module, state_dict: dict, tag: str):
+    """
+    Load a state dict strictly when possible, else fall back to shape-compatible keys.
+
+    Helps resume from older checkpoints when the model schema has changed.
+    """
+    try:
+        module.load_state_dict(state_dict, strict=True)
+        return
+    except RuntimeError as exc:
+        model_state = module.state_dict()
+        compatible = {
+            key: value
+            for key, value in state_dict.items()
+            if key in model_state and model_state[key].shape == value.shape
+        }
+        module.load_state_dict(compatible, strict=False)
+        print(
+            f"[train_v2][warn] {tag}: strict load failed; loaded "
+            f"{len(compatible)}/{len(model_state)} shape-compatible tensors."
+        )
+        print(f"[train_v2][warn] {tag}: strict-load error: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Learning rate schedule
 # ---------------------------------------------------------------------------
@@ -60,23 +100,21 @@ def _make_lr_lambda(warmup: int, decay_start: int, total: int):
     """
     Return a LambdaLR callable implementing a three-phase LR schedule.
 
-    Phase 1 — warm-up  [0, warmup):        linear ramp from ~0 to 1.
+    Phase 1 — warm-up  [0, warmup):          linear ramp from ~0 to 1.
     Phase 2 — plateau  [warmup, decay_start): constant at 1.
     Phase 3 — decay    [decay_start, total):  linear decay from 1 to 0.
 
-    A floor of 1e-8 in phase 1 prevents an exactly-zero LR on step 0.
-
     Args:
-        warmup (int): Warm-up duration in epochs.
-        decay_start (int): First epoch of the linear decay phase.
-        total (int): Total training epochs.
+        warmup:      Warm-up duration in epochs.
+        decay_start: First epoch of the linear decay phase.
+        total:       Total training epochs.
 
     Returns:
         Callable[[int], float]: Multiplicative factor for LambdaLR.
     """
 
     def lr_lambda(epoch: int) -> float:
-        """Return the LR multiplier for *epoch* (0-based)."""
+        """Return the LR multiplier for epoch (0-based)."""
         if epoch < warmup:
             return max(1e-8, epoch / max(1, warmup))
         if epoch < decay_start:
@@ -96,10 +134,10 @@ def _make_lr_lambda(warmup: int, decay_start: int, total: int):
 
 def _global_grad_norm(parameters) -> float:
     """
-    Return the global L2 gradient norm across *parameters* as a float.
+    Return the global L2 gradient norm across parameters as a float.
 
-    Parameters with None gradients are skipped. Returns 0.0 when no
-    parameter has a gradient. Equivalent to clip_grad_norm_ with no clip.
+    Parameters with None gradients are skipped.  Returns 0.0 when no
+    parameter has a gradient.
     """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
@@ -109,9 +147,9 @@ def _global_grad_norm(parameters) -> float:
 
 def _snapshot_module_to_cpu(module: torch.nn.Module) -> dict:
     """
-    Return a detached CPU copy of *module*'s state_dict for rollback.
+    Return a detached CPU copy of module's state_dict for rollback.
 
-    Tensors are moved to CPU to avoid holding extra GPU memory between steps.
+    CPU placement avoids holding extra GPU memory between steps.
     """
     return {k: v.detach().cpu().clone() for k, v in module.state_dict().items()}
 
@@ -122,12 +160,12 @@ def _snapshot_optimizer_state(optimizer: torch.optim.Optimizer) -> dict:
 
 
 def _snapshot_scaler_state(scaler: GradScaler) -> dict:
-    """Deep-copy AMP GradScaler state for rollback."""
+    """Deep-copy AMP GradScaler state for rollback alongside the G snapshot."""
     return copy.deepcopy(scaler.state_dict())
 
 
 def _module_parameters_are_finite(module: torch.nn.Module) -> bool:
-    """Return True if all parameters in *module* are finite."""
+    """Return True if every parameter in module is finite."""
     return all(torch.isfinite(p).all() for p in module.parameters())
 
 
@@ -142,6 +180,7 @@ def train_v2(
     model_dir=None,
     val_dir=None,
     test_size=None,
+    resume_checkpoint=None,
     cfg: Optional[UVCGANConfig] = None,
 ):
     """
@@ -153,6 +192,7 @@ def train_v2(
         model_dir:  Output directory for checkpoints and logs (overrides cfg.model_dir).
         val_dir:    Directory for validation images (overrides cfg.val_dir).
         test_size:  Number of test samples to export (overrides cfg.training.test_size).
+        resume_checkpoint: Path to a checkpoint to resume from.
         cfg:        UVCGANConfig instance. Defaults to get_default_config(model_version=2).
 
     Returns:
@@ -173,6 +213,30 @@ def train_v2(
         cfg.val_dir = val_dir
     if test_size is not None:
         cfg.training.test_size = test_size
+
+    if resume_checkpoint:
+        if not os.path.exists(resume_checkpoint):
+            raise FileNotFoundError(
+                f"resume_checkpoint does not exist: {resume_checkpoint}"
+            )
+        print(f"[train_v2] Resuming from checkpoint: {resume_checkpoint}")
+        checkpoint = _load_checkpoint_compat(resume_checkpoint, map_location="cpu")
+        ckpt_cfg = checkpoint.get("config")
+        if isinstance(ckpt_cfg, UVCGANConfig):
+            cfg = copy.deepcopy(ckpt_cfg)
+            if epoch_size is not None:
+                cfg.training.epoch_size = epoch_size
+            if num_epochs is not None:
+                cfg.training.num_epochs = num_epochs
+            if test_size is not None:
+                cfg.training.test_size = test_size
+            if model_dir is not None:
+                cfg.model_dir = model_dir
+            if val_dir is not None:
+                cfg.val_dir = val_dir
+        print("[train_v2] Using training config from checkpoint.")
+    else:
+        checkpoint = None
 
     tcfg = cfg.training
     lcfg = cfg.loss
@@ -234,8 +298,8 @@ def train_v2(
     )
 
     # ---- AMP ----
-    # G step uses AMP when available; D step (including GP) always runs in
-    # float32 — autocast(enabled=False) inside discriminator_loss handles this.
+    # G step uses AMP; D step (including GP) always runs in float32 via
+    # autocast(enabled=False) inside discriminator_loss.
     use_amp = tcfg.use_amp and device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
 
@@ -252,6 +316,7 @@ def train_v2(
     )
 
     # ---- Optimisers ----
+    # AdamW for G (Transformer bottleneck); Adam for discriminators.
     optimizer_G = optim.AdamW(
         list(G_AB.parameters()) + list(G_BA.parameters()),
         lr=tcfg.lr,
@@ -285,8 +350,81 @@ def train_v2(
     os.makedirs(tb_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tb_dir)
     history_csv_path = os.path.join(model_dir, "training_history.csv")
-    if os.path.exists(history_csv_path):
+    if os.path.exists(history_csv_path) and not resume_checkpoint:
         os.remove(history_csv_path)
+
+    start_epoch = 0
+    if resume_checkpoint:
+        if checkpoint is None:
+            raise ValueError(f"Failed to load checkpoint: {resume_checkpoint}")
+        # Support both old key names ("G_AB") and new ones ("G_AB_state_dict").
+        G_AB_state = checkpoint.get("G_AB") or checkpoint.get("G_AB_state_dict")
+        G_BA_state = checkpoint.get("G_BA") or checkpoint.get("G_BA_state_dict")
+        D_A_state = checkpoint.get("D_A") or checkpoint.get("D_A_state_dict")
+        D_B_state = checkpoint.get("D_B") or checkpoint.get("D_B_state_dict")
+        if G_AB_state is None or G_BA_state is None:
+            raise KeyError(
+                "Checkpoint missing generator weights required for v2 resume."
+            )
+
+        _load_state_dict_with_compat(G_AB, G_AB_state, "G_AB")
+        _load_state_dict_with_compat(G_BA, G_BA_state, "G_BA")
+        if D_A_state is not None:
+            _load_state_dict_with_compat(D_A, D_A_state, "D_A")
+        if D_B_state is not None:
+            _load_state_dict_with_compat(D_B, D_B_state, "D_B")
+
+        if "optimizer_G" in checkpoint:
+            try:
+                optimizer_G.load_state_dict(checkpoint["optimizer_G"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v2][warn] optimizer_G state is incompatible; starting fresh. "
+                    f"Details: {exc}"
+                )
+        if "optimizer_D_A" in checkpoint:
+            try:
+                optimizer_D_A.load_state_dict(checkpoint["optimizer_D_A"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v2][warn] optimizer_D_A state is incompatible; starting fresh. "
+                    f"Details: {exc}"
+                )
+        if "optimizer_D_B" in checkpoint:
+            try:
+                optimizer_D_B.load_state_dict(checkpoint["optimizer_D_B"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v2][warn] optimizer_D_B state is incompatible; starting fresh. "
+                    f"Details: {exc}"
+                )
+
+        resume_epoch = int(checkpoint.get("epoch", 0))
+        if "lr_scheduler_G_state_dict" in checkpoint:
+            lr_scheduler_G.load_state_dict(checkpoint["lr_scheduler_G_state_dict"])
+        else:
+            lr_scheduler_G.last_epoch = max(-1, resume_epoch - 1)
+        if "lr_scheduler_D_A_state_dict" in checkpoint:
+            lr_scheduler_D_A.load_state_dict(checkpoint["lr_scheduler_D_A_state_dict"])
+        else:
+            lr_scheduler_D_A.last_epoch = max(-1, resume_epoch - 1)
+        if "lr_scheduler_D_B_state_dict" in checkpoint:
+            lr_scheduler_D_B.load_state_dict(checkpoint["lr_scheduler_D_B_state_dict"])
+        else:
+            lr_scheduler_D_B.last_epoch = max(-1, resume_epoch - 1)
+
+        if use_amp and checkpoint.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+        if "early_stopping_state" in checkpoint:
+            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+
+        start_epoch = resume_epoch
+        if start_epoch >= tcfg.num_epochs:
+            raise ValueError(
+                f"num_epochs ({tcfg.num_epochs}) must be greater than checkpoint epoch ({start_epoch})."
+            )
+        print(f"[train_v2] Resume start epoch: {start_epoch + 1}")
 
     num_epochs = tcfg.num_epochs
     history = {}
@@ -316,7 +454,7 @@ def train_v2(
             "[train_v2] Gradient checkpointing enabled: ~30-40% less activation VRAM, ~20% slower backward."
         )
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         print()
         G_AB.train()
         G_BA.train()
@@ -337,10 +475,10 @@ def train_v2(
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
 
-            # Skip batches with non-finite values; warn on near-uniform patches.
-            if not (real_A.isfinite().all() and real_B.isfinite().all()):
-                print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
-                continue
+        # Skip batches with non-finite values; warn on near-uniform patches.
+        if not (real_A.isfinite().all() and real_B.isfinite().all()):
+            print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
+            continue
 
             real_A_std = real_A.std(dim=[1, 2, 3])
             real_B_std = real_B.std(dim=[1, 2, 3])
@@ -609,12 +747,13 @@ def train_v2(
             append_history_to_csv(history, history_csv_path)
             history.clear()
 
-        # ---- Periodic checkpoint (every 20 epochs) ----
+        # ---- Periodic checkpoint ----
         if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             ckpt_path = os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(
                 {
                     "epoch": epoch + 1,
+                    "config": cfg,
                     "G_AB": G_AB.state_dict(),
                     "G_BA": G_BA.state_dict(),
                     "D_A": D_A.state_dict(),
@@ -622,6 +761,11 @@ def train_v2(
                     "optimizer_G": optimizer_G.state_dict(),
                     "optimizer_D_A": optimizer_D_A.state_dict(),
                     "optimizer_D_B": optimizer_D_B.state_dict(),
+                    "lr_scheduler_G_state_dict": lr_scheduler_G.state_dict(),
+                    "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
+                    "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
+                    "scaler_state_dict": scaler.state_dict() if use_amp else None,
+                    "early_stopping_state": early_stopping.state_dict(),
                 },
                 ckpt_path,
             )
@@ -717,6 +861,7 @@ def train_v2(
     torch.save(
         {
             "epoch": stopped_epoch,
+            "config": cfg,
             "G_AB": G_AB.state_dict(),
             "G_BA": G_BA.state_dict(),
             "D_A": D_A.state_dict(),
@@ -724,6 +869,11 @@ def train_v2(
             "optimizer_G": optimizer_G.state_dict(),
             "optimizer_D_A": optimizer_D_A.state_dict(),
             "optimizer_D_B": optimizer_D_B.state_dict(),
+            "lr_scheduler_G_state_dict": lr_scheduler_G.state_dict(),
+            "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
+            "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
+            "scaler_state_dict": scaler.state_dict() if use_amp else None,
+            "early_stopping_state": early_stopping.state_dict(),
         },
         final_ckpt,
     )

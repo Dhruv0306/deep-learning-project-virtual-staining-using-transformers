@@ -1,12 +1,25 @@
 """
-Training loop for the v1 hybrid CycleGAN/UVCGAN pipeline.
+model_v1/training_loop.py — v1 hybrid CycleGAN/UVCGAN training loop.
 
-Handles data loading, model setup, loss computation, optimization, logging,
-validation, early stopping, checkpointing, and final testing.
+Entry points:
+    train(...)    — primary implementation.
+    train_v1(...) — thin alias for import consistency with v2/v3/v4.
+
+Per-batch update order:
+    1. Generator step   — freeze D, compute loss_G via CycleGANLoss, AMP backward.
+    2. Discriminator A  — unfreeze D, compute loss_D_A, AMP backward.
+    3. Discriminator B  — compute loss_D_B, AMP backward.
+
+Loss terms (CycleGANLoss):
+    LSGAN (1.0) + cycle (λ=10) + identity (λ=5, decays after 50%) +
+    perceptual cycle (λ=0.2) + perceptual identity (λ=0.1) + two-sided GP (λ=10).
+
+Scheduler: LambdaLR — constant until epoch 100, then linear decay to 0.
 """
 
 import os
 import math
+import pickle
 
 # Disable OneDNN optimizations to avoid numerical differences across systems.
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
@@ -29,50 +42,64 @@ from shared.validation import calculate_metrics, run_validation
 from config import get_default_config
 
 
+def _load_checkpoint_compat(checkpoint_path: str, map_location):
+    """
+    Load a local checkpoint safely across PyTorch versions.
+
+    PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints that
+    contain config dataclasses.  Falls back gracefully for older versions.
+    """
+    try:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+
+
 def train(
     epoch_size=None,
     num_epochs=None,
     model_dir=None,
     val_dir=None,
     test_size=None,
+    resume_checkpoint=None,
     cfg=None,
 ):
     """
     Train v1 generators and discriminators.
 
     Args:
-        epoch_size (int | None): Max samples per epoch (defaults to loader default).
-        num_epochs (int | None): Number of epochs to train.
-        model_dir (str | None): Directory for checkpoints and logs.
-        val_dir (str | None): Directory for validation image outputs.
-        test_size (float | None): Number of test samples to export in testing.
+        epoch_size: Max samples per epoch (defaults to 3000).
+        num_epochs:  Total training epochs (defaults to 200).
+        model_dir:   Output directory for checkpoints and logs.
+        val_dir:     Directory for per-epoch validation image grids.
+        test_size:   Images exported during final test-set inference.
+        resume_checkpoint: Path to a v1 .pth checkpoint to resume from.
+        cfg:         UVCGANConfig instance (defaults to get_default_config(1)).
 
     Returns:
         tuple: (history, G_AB, G_BA, D_A, D_B)
-
-    Notes:
-        This function is the primary implementation for v1 training and is
-        exported through ``train_v1`` below as a compatibility alias.
     """
-    # Backend tuning for faster convolutions on GPU.
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    # if cfg is not None:
     cfg = cfg if cfg is not None else get_default_config(model_version=1)
     tcfg = cfg.training
 
-    # Load training and test data.
     train_loader, test_loader = getDataLoader(
         epoch_size=3000 if epoch_size is None else epoch_size
     )
-    # Initialize models.
     G_AB, G_BA = getGenerators()
     D_A, D_B = getDiscriminators()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Composite CycleGAN loss with perceptual components and gradient penalty.
+    # CycleGANLoss bundles LSGAN + cycle + identity + perceptual + two-sided GP.
     loss_fn = CycleGANLoss(
         lambda_cycle=10.0,
         lambda_identity=5.0,
@@ -82,16 +109,13 @@ def train(
         perceptual_resize=160,
         device=device,
     )
-    # Mixed precision is used only when CUDA is available.
     use_amp = device.type == "cuda"
     scaler = GradScaler("cuda", enabled=use_amp)
     metrics_calculator = MetricsCalculator(device=device)
-    # Early-stopping checks are periodic; patience is expressed in epochs and
-    # converted to check intervals below.
+    # Patience is in epochs; convert to check-count for EarlyStopping.
     early_stopping_check_interval = 10
     early_stopping_patience_epochs = 40
     early_stopping_warmup_epochs = 80
-    # Early stopping is triggered by validation SSIM and loss trends.
     early_stopping = EarlyStopping(
         patience=max(
             1, math.ceil(early_stopping_patience_epochs / early_stopping_check_interval)
@@ -101,14 +125,12 @@ def train(
         divergence_patience=2,
     )
 
-    # Move models to the selected device.
     G_AB = G_AB.to(device)
     G_BA = G_BA.to(device)
     D_A = D_A.to(device)
     D_B = D_B.to(device)
 
-    # Optimizers share the standard CycleGAN hyperparameters; AdamW for the
-    # Transformer-based generator, Adam for discriminators.
+    # AdamW for the Transformer-based generator; Adam for discriminators.
     lr = 0.0002
     beta1 = 0.5
     optimizer_G = optim.AdamW(
@@ -120,7 +142,7 @@ def train(
     optimizer_D_A = optim.Adam(D_A.parameters(), lr=lr, betas=(beta1, 0.999))
     optimizer_D_B = optim.Adam(D_B.parameters(), lr=lr, betas=(beta1, 0.999))
 
-    # Linear learning rate decay after epoch 100.
+    # Constant LR until epoch 100, then linear decay to 0.
     lr_scheduler_G = optim.lr_scheduler.LambdaLR(
         optimizer_G, lr_lambda=lambda epoch: 1.0 - max(0, epoch - 100) / 100
     )
@@ -134,7 +156,6 @@ def train(
     num_epochs = 200 if num_epochs is None else num_epochs
     history = {}
 
-    # Set up output directories and TensorBoard logging.
     model_dir = (
         os.path.join("data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models")
         if model_dir is None
@@ -145,14 +166,75 @@ def train(
     os.makedirs(tb_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tb_dir)
     history_csv_path = os.path.join(model_dir, "training_history.csv")
-    if os.path.exists(history_csv_path):
+    if os.path.exists(history_csv_path) and not resume_checkpoint:
         os.remove(history_csv_path)
 
+    start_epoch = 0
+    if resume_checkpoint:
+        if not os.path.exists(resume_checkpoint):
+            raise FileNotFoundError(
+                f"resume_checkpoint does not exist: {resume_checkpoint}"
+            )
+        print(f"[train_v1] Resuming from checkpoint: {resume_checkpoint}")
+        checkpoint = _load_checkpoint_compat(resume_checkpoint, map_location=device)
+
+        # Support both old key names ("G_AB") and new ones ("G_AB_state_dict").
+        G_AB_state = checkpoint.get("G_AB") or checkpoint.get("G_AB_state_dict")
+        G_BA_state = checkpoint.get("G_BA") or checkpoint.get("G_BA_state_dict")
+        D_A_state = checkpoint.get("D_A") or checkpoint.get("D_A_state_dict")
+        D_B_state = checkpoint.get("D_B") or checkpoint.get("D_B_state_dict")
+        if G_AB_state is None or G_BA_state is None:
+            raise KeyError(
+                "Checkpoint missing generator weights required for v1 resume."
+            )
+
+        G_AB.load_state_dict(G_AB_state)
+        G_BA.load_state_dict(G_BA_state)
+        if D_A_state is not None:
+            D_A.load_state_dict(D_A_state)
+        if D_B_state is not None:
+            D_B.load_state_dict(D_B_state)
+
+        if "optimizer_G" in checkpoint:
+            optimizer_G.load_state_dict(checkpoint["optimizer_G"])
+        if "optimizer_D_A" in checkpoint:
+            optimizer_D_A.load_state_dict(checkpoint["optimizer_D_A"])
+        if "optimizer_D_B" in checkpoint:
+            optimizer_D_B.load_state_dict(checkpoint["optimizer_D_B"])
+
+        resume_epoch = int(checkpoint.get("epoch", 0))
+        if "lr_scheduler_G_state_dict" in checkpoint:
+            lr_scheduler_G.load_state_dict(checkpoint["lr_scheduler_G_state_dict"])
+        else:
+            lr_scheduler_G.last_epoch = max(-1, resume_epoch - 1)
+
+        if "lr_scheduler_D_A_state_dict" in checkpoint:
+            lr_scheduler_D_A.load_state_dict(checkpoint["lr_scheduler_D_A_state_dict"])
+        else:
+            lr_scheduler_D_A.last_epoch = max(-1, resume_epoch - 1)
+
+        if "lr_scheduler_D_B_state_dict" in checkpoint:
+            lr_scheduler_D_B.load_state_dict(checkpoint["lr_scheduler_D_B_state_dict"])
+        else:
+            lr_scheduler_D_B.last_epoch = max(-1, resume_epoch - 1)
+
+        if use_amp and checkpoint.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+        if "early_stopping_state" in checkpoint:
+            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+
+        start_epoch = resume_epoch
+        if start_epoch >= num_epochs:
+            raise ValueError(
+                f"num_epochs ({num_epochs}) must be greater than checkpoint epoch ({start_epoch})."
+            )
+        print(f"[train_v1] Resume start epoch: {start_epoch + 1}")
+
     stopped_epoch = num_epochs
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         print("\n")
 
-        # Switch all networks to train mode each epoch.
         G_AB.train()
         G_BA.train()
         D_A.train()
@@ -170,10 +252,8 @@ def train(
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
 
-            # -----------------------------
-            # Generator step
-            # -----------------------------
-            # Freeze discriminators so they do not update during generator loss.
+            # ---- Generator step ----
+            # Freeze D so its gradients are not computed during G backward.
             for p in D_A.parameters():
                 p.requires_grad_(False)
             for p in D_B.parameters():
@@ -189,10 +269,7 @@ def train(
             scaler.step(optimizer=optimizer_G)
             scaler.update()
 
-            # -----------------------------
-            # Discriminator steps
-            # -----------------------------
-            # Re-enable discriminator gradients.
+            # ---- Discriminator steps ----
             for p in D_A.parameters():
                 p.requires_grad_(True)
             for p in D_B.parameters():
@@ -226,7 +303,6 @@ def train(
             epoch_loss_D_A += loss_D_A.item()
             epoch_loss_D_B += loss_D_B.item()
 
-            # Progress log every 50 batches (and at ends).
             if i == 1 or i == len(train_loader) or i % 50 == 0:
                 print(
                     f"Epoch [{epoch + 1}/{num_epochs}] "
@@ -236,7 +312,6 @@ def train(
                     f"Loss_D_B: {loss_D_B.item():.4f}"
                 )
 
-        # Store batch-level history for this epoch.
         history[epoch + 1] = epoch_step
         writer.add_scalar("Loss/Generator", epoch_loss_G / len(train_loader), epoch + 1)
         writer.add_scalar(
@@ -246,12 +321,12 @@ def train(
             "Loss/Discriminator_B", epoch_loss_D_B / len(train_loader), epoch + 1
         )
 
-        # Periodically flush training history to CSV to avoid large memory usage.
+        # Flush history to CSV every 5 epochs to bound in-memory growth.
         if (epoch + 1) % 5 == 0:
             append_history_to_csv(history, history_csv_path)
             history.clear()
 
-        # Save checkpoints every 20 epochs.
+        # Periodic checkpoint (every save_checkpoint_every epochs).
         if (epoch + 1) % tcfg.save_checkpoint_every == 0:
             torch.save(
                 {
@@ -268,7 +343,6 @@ def train(
             )
             writer.add_scalar("Checkpoint saved", epoch + 1, epoch + 1)
 
-        # Step learning rate schedulers.
         lr_scheduler_G.step()
         lr_scheduler_D_A.step()
         lr_scheduler_D_B.step()
@@ -294,7 +368,29 @@ def train(
             epoch + 1,
         )
 
-        # Run qualitative validation image generation each epoch.
+        # Full checkpoint with optimizer/scheduler/scaler states for resume.
+        if (epoch + 1) % tcfg.save_checkpoint_every == 0:
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "config": cfg,
+                    "G_AB": G_AB.state_dict(),
+                    "G_BA": G_BA.state_dict(),
+                    "D_A": D_A.state_dict(),
+                    "D_B": D_B.state_dict(),
+                    "optimizer_G": optimizer_G.state_dict(),
+                    "optimizer_D_A": optimizer_D_A.state_dict(),
+                    "optimizer_D_B": optimizer_D_B.state_dict(),
+                    "lr_scheduler_G_state_dict": lr_scheduler_G.state_dict(),
+                    "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
+                    "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
+                    "scaler_state_dict": scaler.state_dict() if use_amp else None,
+                    "early_stopping_state": early_stopping.state_dict(),
+                },
+                os.path.join(model_dir, f"checkpoint_epoch_{epoch + 1}.pth"),
+            )
+            writer.add_scalar("Checkpoint saved", epoch + 1, epoch + 1)
+
         if val_dir is None:
             val_dir = os.path.join(model_dir, "validation_images")
         save_dir = os.path.join(val_dir, f"epoch_{epoch+1}")
@@ -310,7 +406,7 @@ def train(
             writer=writer,
         )
 
-        # Compute validation metrics and check early stopping at intervals.
+        # Compute metrics and check early stopping every check_interval epochs.
         if (epoch + 1) % early_stopping_check_interval == 0:
             avg_metrics = calculate_metrics(
                 calculator=metrics_calculator,
@@ -389,7 +485,6 @@ def train(
                 break
 
     print("\n")
-    # Final metrics on the best/last checkpoint.
     calculate_metrics(
         calculator=metrics_calculator,
         G_AB=G_AB,
@@ -400,7 +495,6 @@ def train(
         epoch=stopped_epoch,
     )
 
-    # Run test set inference and save example outputs.
     test_dir = os.path.join(model_dir, "test_images")
     writer.add_scalar("Testing Started", stopped_epoch, stopped_epoch)
     run_testing(
@@ -414,7 +508,6 @@ def train(
         num_samples=200 if test_size is None else int(test_size),
     )
 
-    # Save final checkpoint.
     writer.add_scalar("Training Completed", stopped_epoch, stopped_epoch)
     torch.save(
         {
@@ -426,11 +519,15 @@ def train(
             "optimizer_G": optimizer_G.state_dict(),
             "optimizer_D_A": optimizer_D_A.state_dict(),
             "optimizer_D_B": optimizer_D_B.state_dict(),
+            "lr_scheduler_G_state_dict": lr_scheduler_G.state_dict(),
+            "lr_scheduler_D_A_state_dict": lr_scheduler_D_A.state_dict(),
+            "lr_scheduler_D_B_state_dict": lr_scheduler_D_B.state_dict(),
+            "scaler_state_dict": scaler.state_dict() if use_amp else None,
+            "early_stopping_state": early_stopping.state_dict(),
         },
         os.path.join(model_dir, f"final_checkpoint_epoch_{stopped_epoch}.pth"),
     )
 
-    # Persist any remaining history and reload for a consistent return value.
     append_history_to_csv(history, history_csv_path)
     history = load_history_from_csv(history_csv_path)
 
@@ -439,7 +536,5 @@ def train(
 
 
 def train_v1(*args, **kwargs):
-    """
-    Alias for the v1 training loop to keep import paths consistent.
-    """
+    """Alias for train() — keeps import paths consistent with v2/v3/v4."""
     return train(*args, **kwargs)

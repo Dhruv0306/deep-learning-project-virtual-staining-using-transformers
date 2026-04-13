@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import os
+import pickle
 from typing import Optional
 
 import torch
@@ -38,18 +39,87 @@ from model_v4.patch_sampler import PatchSampler
 from model_v4.nce_loss import PatchNCELoss
 
 
+def _load_checkpoint_compat(checkpoint_path: str, map_location):
+    """
+    Load a local checkpoint safely across PyTorch versions.
+
+    PyTorch 2.6+ defaults weights_only=True, which breaks checkpoints that
+    contain config dataclasses.  Falls back gracefully for older versions.
+    """
+    try:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError:
+        return torch.load(
+            checkpoint_path, map_location=map_location, weights_only=False
+        )
+
+
+def _build_v4_model_config_from_checkpoint(checkpoint: dict):
+    """
+    Return a model config object reconstructed from checkpoint payload.
+
+    Supports checkpoints that store either a V4ModelConfig dataclass instance
+    or a plain dict under the ``config`` key.
+    """
+    from config import V4ModelConfig
+
+    ckpt_cfg = checkpoint.get("config")
+    if ckpt_cfg is None:
+        return None
+    if isinstance(ckpt_cfg, V4ModelConfig):
+        return copy.deepcopy(ckpt_cfg)
+    if isinstance(ckpt_cfg, dict):
+        valid_fields = V4ModelConfig.__dataclass_fields__.keys()
+        filtered = {k: v for k, v in ckpt_cfg.items() if k in valid_fields}
+        try:
+            return V4ModelConfig(**filtered)
+        except TypeError:
+            return None
+    return None
+
+
+def _load_state_dict_with_compat(
+    module: torch.nn.Module, state_dict: dict, tag: str
+) -> None:
+    """
+    Load weights strictly when possible, else fall back to shape-compatible keys.
+
+    This helps resume from older checkpoints when the model schema changed
+    (for example, newly introduced layers).
+    """
+    try:
+        module.load_state_dict(state_dict, strict=True)
+        return
+    except RuntimeError as exc:
+        model_state = module.state_dict()
+        compatible = {
+            key: value
+            for key, value in state_dict.items()
+            if key in model_state and model_state[key].shape == value.shape
+        }
+        module.load_state_dict(compatible, strict=False)
+        print(
+            f"[train_v4][warn] {tag}: strict load failed; loaded "
+            f"{len(compatible)}/{len(model_state)} shape-compatible tensors."
+        )
+        print(f"[train_v4][warn] {tag}: strict-load error: {exc}")
+
+
 def _set_requires_grad(module: torch.nn.Module, flag: bool) -> None:
-    """Enable or disable gradient computation for all parameters in *module*."""
+    """Enable or disable gradient computation for all parameters in module."""
     for p in module.parameters():
         p.requires_grad = flag
 
 
 def _global_grad_norm(parameters) -> float:
     """
-    Compute the global L2 gradient norm across all parameters that have a grad.
+    Return the global L2 gradient norm across all parameters with a grad.
 
-    Equivalent to ``torch.nn.utils.clip_grad_norm_`` with no clipping, but
-    returns a plain Python float for logging.
+    Returns a plain Python float for logging; no clipping is applied.
     """
     grads = [p.grad.detach().float() for p in parameters if p.grad is not None]
     if not grads:
@@ -313,6 +383,34 @@ def train_v4(
         cfg.model_dir = model_dir
     if val_dir is not None:
         cfg.val_dir = val_dir
+
+    resume_payload = None
+    if resume_checkpoint:
+        if not os.path.exists(resume_checkpoint):
+            raise FileNotFoundError(
+                f"resume_checkpoint does not exist: {resume_checkpoint}"
+            )
+        print(f"[train_v4] Resuming from checkpoint: {resume_checkpoint}")
+        resume_payload = _load_checkpoint_compat(resume_checkpoint, map_location="cpu")
+
+        resume_model_cfg = _build_v4_model_config_from_checkpoint(resume_payload)
+        if resume_model_cfg is not None:
+            cfg.model = resume_model_cfg
+            print(
+                "[train_v4] Using model architecture from checkpoint config: "
+                f"base_channels={resume_model_cfg.base_channels}, "
+                f"disc_base_channels={resume_model_cfg.disc_base_channels}, "
+                f"patch_size={resume_model_cfg.patch_size}, "
+                f"encoder_dim={resume_model_cfg.encoder_dim}, "
+                f"encoder_depth={resume_model_cfg.encoder_depth}, "
+                f"encoder_heads={resume_model_cfg.encoder_heads}"
+            )
+        else:
+            print(
+                "[train_v4][warn] Checkpoint has no valid model config; "
+                "using runtime config architecture."
+            )
+
     tcfg = cfg.training
     dcfg = cfg.data
     mcfg = cfg.model
@@ -390,13 +488,22 @@ def train_v4(
     )
 
     # ---- Print model parameters ----
-    print(f"[train_v4] G_AB params: {sum(p.numel() for p in G_AB.parameters()) / 1e6:.2f}M")
-    print(f"[train_v4] G_BA params: {sum(p.numel() for p in G_BA.parameters()) / 1e6:.2f}M")
-    print(f"[train_v4] D_A params:  {sum(p.numel() for p in D_A.parameters()) / 1e6:.2f}M")
-    print(f"[train_v4] D_B params:  {sum(p.numel() for p in D_B.parameters()) / 1e6:.2f}M")
+    print(
+        f"[train_v4] G_AB params: {sum(p.numel() for p in G_AB.parameters()) / 1e6:.2f}M"
+    )
+    print(
+        f"[train_v4] G_BA params: {sum(p.numel() for p in G_BA.parameters()) / 1e6:.2f}M"
+    )
+    print(
+        f"[train_v4] D_A params:  {sum(p.numel() for p in D_A.parameters()) / 1e6:.2f}M"
+    )
+    print(
+        f"[train_v4] D_B params:  {sum(p.numel() for p in D_B.parameters()) / 1e6:.2f}M"
+    )
 
     # ---- Optimizers ----
-    # Single optimizer for both generators so their gradients accumulate together.
+    # AdamW for G when Transformer encoder is used (weight decay helps large models);
+    # plain Adam otherwise.  Single optimizer covers both generators.
     if mcfg.use_transformer_encoder:
         optimizer_G = torch.optim.AdamW(
             list(G_AB.parameters()) + list(G_BA.parameters()),
@@ -441,16 +548,14 @@ def train_v4(
     scaler = GradScaler("cuda", enabled=use_amp)
 
     # ---- EMA ----
-    # Maintain exponential moving average copies of both generators for
-    # smoother validation outputs.  EMA weights are not used during training.
+    # EMA copies are used for validation/test; not updated during training steps.
     ema_G_AB = copy.deepcopy(G_AB).to(device)
     ema_G_BA = copy.deepcopy(G_BA).to(device)
     ema_G_AB.requires_grad_(False)
     ema_G_BA.requires_grad_(False)
 
     # ---- Metrics / PatchNCE ----
-    # Shared SSIM/PSNR calculator reused across validation calls.
-    # early_stopping_interval converts epoch-based patience to check-based patience.
+    # Convert epoch-based patience to check-count for EarlyStopping.
     metrics_calculator = MetricsCalculator(device=device)
     early_stopping_interval = max(1, tcfg.early_stopping_interval)
     early_stopping = EarlyStopping(
@@ -483,7 +588,6 @@ def train_v4(
     replay_B = ReplayBuffer(tcfg.replay_buffer_size) if tcfg.use_replay_buffer else None
 
     # ---- Output dirs / TensorBoard ----
-    # Fall back to a default path when model_dir was not supplied via cfg.
     model_dir = cfg.model_dir or os.path.join(
         "data", "E_Staining_DermaRepo", "H_E-Staining_dataset", "models_v4"
     )
@@ -500,43 +604,60 @@ def train_v4(
     accumulate = max(1, tcfg.accumulate_grads)
     accum_count = 0
 
-    if resume_checkpoint:
-        if not os.path.exists(resume_checkpoint):
-            raise FileNotFoundError(
-                f"resume_checkpoint does not exist: {resume_checkpoint}"
-            )
-        print(f"[train_v4] Resuming from checkpoint: {resume_checkpoint}")
-        checkpoint = torch.load(resume_checkpoint, map_location=device)
+    if resume_payload is not None:
+        checkpoint = resume_payload
 
         if "G_AB_state_dict" not in checkpoint or "G_BA_state_dict" not in checkpoint:
             raise KeyError(
                 "Checkpoint missing generator weights required for v4 resume."
             )
 
-        G_AB.load_state_dict(checkpoint["G_AB_state_dict"])
-        G_BA.load_state_dict(checkpoint["G_BA_state_dict"])
+        _load_state_dict_with_compat(G_AB, checkpoint["G_AB_state_dict"], "G_AB")
+        _load_state_dict_with_compat(G_BA, checkpoint["G_BA_state_dict"], "G_BA")
 
         if "D_A_state_dict" in checkpoint:
-            D_A.load_state_dict(checkpoint["D_A_state_dict"])
+            _load_state_dict_with_compat(D_A, checkpoint["D_A_state_dict"], "D_A")
         if "D_B_state_dict" in checkpoint:
-            D_B.load_state_dict(checkpoint["D_B_state_dict"])
+            _load_state_dict_with_compat(D_B, checkpoint["D_B_state_dict"], "D_B")
 
         if tcfg.use_ema and ema_G_AB is not None and ema_G_BA is not None:
             if checkpoint.get("ema_G_AB_state_dict") is not None:
-                ema_G_AB.load_state_dict(checkpoint["ema_G_AB_state_dict"])
+                _load_state_dict_with_compat(
+                    ema_G_AB, checkpoint["ema_G_AB_state_dict"], "ema_G_AB"
+                )
             else:
                 ema_G_AB.load_state_dict(G_AB.state_dict())
             if checkpoint.get("ema_G_BA_state_dict") is not None:
-                ema_G_BA.load_state_dict(checkpoint["ema_G_BA_state_dict"])
+                _load_state_dict_with_compat(
+                    ema_G_BA, checkpoint["ema_G_BA_state_dict"], "ema_G_BA"
+                )
             else:
                 ema_G_BA.load_state_dict(G_BA.state_dict())
 
         if "optimizer_G_state_dict" in checkpoint:
-            optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+            try:
+                optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v4][warn] optimizer_G state is incompatible with current model; "
+                    f"starting optimizer_G fresh. Details: {exc}"
+                )
         if "optimizer_D_A_state_dict" in checkpoint:
-            optimizer_D_A.load_state_dict(checkpoint["optimizer_D_A_state_dict"])
+            try:
+                optimizer_D_A.load_state_dict(checkpoint["optimizer_D_A_state_dict"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v4][warn] optimizer_D_A state incompatible; "
+                    f"starting optimizer_D_A fresh. Details: {exc}"
+                )
         if "optimizer_D_B_state_dict" in checkpoint:
-            optimizer_D_B.load_state_dict(checkpoint["optimizer_D_B_state_dict"])
+            try:
+                optimizer_D_B.load_state_dict(checkpoint["optimizer_D_B_state_dict"])
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    "[train_v4][warn] optimizer_D_B state incompatible; "
+                    f"starting optimizer_D_B fresh. Details: {exc}"
+                )
 
         if (
             lr_scheduler_G is not None
@@ -600,8 +721,7 @@ def train_v4(
                 continue
 
             # ---- Discriminator steps ----
-            # Freeze generators to avoid computing their gradients here;
-            # generate fakes under no_grad to skip storing the computation graph.
+            # Freeze generators; generate fakes under no_grad to skip the graph.
             _set_requires_grad(D_A, True)
             _set_requires_grad(D_B, True)
             _set_requires_grad(G_AB, False)
@@ -654,17 +774,14 @@ def train_v4(
             optimizer_D_B.step()
 
             # ---- Generator step ----
-            # Unfreeze generators, freeze discriminators so D gradients
-            # are not computed during the generator backward pass.
+            # Unfreeze generators, freeze discriminators.
             _set_requires_grad(D_A, False)
             _set_requires_grad(D_B, False)
             _set_requires_grad(G_AB, True)
             _set_requires_grad(G_BA, True)
 
             if accum_count == 0:
-                optimizer_G.zero_grad(
-                    set_to_none=True
-                )  # reset at start of accumulation window
+                optimizer_G.zero_grad(set_to_none=True)  # reset at start of accumulation window
 
             with autocast("cuda", enabled=use_amp):
                 fake_B, feats_real_A = G_AB(
@@ -721,9 +838,7 @@ def train_v4(
                     + tcfg.lambda_nce * loss_nce
                     + tcfg.lambda_identity * loss_id
                 )
-                loss_G_scaled = (
-                    loss_G / accumulate
-                )  # normalise for gradient accumulation
+                loss_G_scaled = loss_G / accumulate  # normalise for gradient accumulation
 
             if not torch.isfinite(loss_G):
                 print(
@@ -739,8 +854,7 @@ def train_v4(
                 loss_G_scaled.backward()
             accum_count += 1
 
-            # Step optimizer once the accumulation window is full or the
-            # epoch ends with a partial window.
+            # Step once the accumulation window is full or the epoch ends.
             if accum_count == accumulate or (
                 i == len(train_loader) and accum_count > 0
             ):
@@ -955,7 +1069,7 @@ def train_v4(
                 stopped_epoch = epoch + 1
                 break
 
-    final_ckpt = os.path.join(model_dir, "final_checkpoint.pth")
+    final_ckpt = os.path.join(model_dir, f"final_checkpoint_{stopped_epoch}.pth")
     torch.save(
         {
             "epoch": stopped_epoch,

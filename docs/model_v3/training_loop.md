@@ -1,371 +1,529 @@
-# model_v3/training_loop.py - v3 Training Loop
+# model_v3/training_loop.py — Detailed Reference
 
-Source of truth: ../../model_v3/training_loop.py
+Source: `../../model_v3/training_loop.py`  
+Model: CycleDiT latent diffusion (v3)  
+Primary entry point: `train_v3(...)`
 
-This module trains the v3 CycleDiT pipeline with two-stage generator updates,
-dual discriminators, EMA, replay buffers, AMP, gradient accumulation, periodic
-validation, and resume support.
+---
 
-## Public Components
+## Table of Contents
 
-1. `_make_cosine_warmup_lambda`
-2. `_global_grad_norm`
-3. `_set_requires_grad`
-4. `_run_validation_v3`
-5. `train_v3`
+1. [Module-level Data Flow](#1-module-level-data-flow)
+2. [Imports and Dependencies](#2-imports-and-dependencies)
+3. [Helper Function: `_load_checkpoint_compat`](#3-helper-function-_load_checkpoint_compat)
+4. [Helper Function: `_make_cosine_warmup_lambda`](#4-helper-function-_make_cosine_warmup_lambda)
+5. [Helper Function: `_global_grad_norm`](#5-helper-function-_global_grad_norm)
+6. [Helper Function: `_set_requires_grad`](#6-helper-function-_set_requires_grad)
+7. [Function: `_run_validation_v3`](#7-function-_run_validation_v3)
+   - [7A Signature](#7a-signature)
+   - [7B Parameters](#7b-parameters)
+   - [7C Validation Flow](#7c-validation-flow)
+   - [7D Return Value](#7d-return-value)
+8. [Function: `train_v3`](#8-function-train_v3)
+   - [8A Signature and Return](#8a-signature-and-return)
+   - [8B Parameters](#8b-parameters)
+   - [8C Setup Phase](#8c-setup-phase)
+   - [8D Resume Phase](#8d-resume-phase)
+   - [8E Per-epoch Loop](#8e-per-epoch-loop)
+   - [8F Two-stage Generator Update](#8f-two-stage-generator-update)
+   - [8G Discriminator Update](#8g-discriminator-update)
+   - [8H Epoch-end Logging and Checkpointing](#8h-epoch-end-logging-and-checkpointing)
+   - [8I Validation and Early Stopping](#8i-validation-and-early-stopping)
+   - [8J Finalization](#8j-finalization)
+9. [Tensor Shape Reference](#9-tensor-shape-reference)
+10. [Loss Components and Schedules](#10-loss-components-and-schedules)
+11. [Optimizer and LR Schedule Reference](#11-optimizer-and-lr-schedule-reference)
+12. [Checkpoint Payload Reference](#12-checkpoint-payload-reference)
+13. [TensorBoard Scalar Reference](#13-tensorboard-scalar-reference)
+14. [Artifact Layout](#14-artifact-layout)
 
-## `_make_cosine_warmup_lambda`
+---
 
-Creates a learning-rate multiplier with linear warmup followed by cosine decay
-to a small minimum ratio.
+## 1. Module-level Data Flow
 
-## `_global_grad_norm`
+```text
+getDataLoader(...) -> train_loader, test_loader
+VAEWrapper(...) -> frozen VAE
+getGeneratorV3(...) -> dit_model
+copy.deepcopy(dit_model) -> ema_model
+getDiscriminatorsV3(...) -> D_A, D_B
+DDPMScheduler + DDIMSampler
 
-Returns the L2 norm of all available gradients as a Python float for logging.
+---- per batch ---------------------------------------------------------------
+real_A, real_B: (N,3,256,256)
+  -> vae.encode -> z0_A, z0_B: (N,4,32,32)
+  -> scheduler.add_noise -> z_t_A, z_t_B
 
-## `_run_validation_v3`
+Stage 1 (diffusion objective):
+  dit_model(z_t_A, t_A, cond=real_A, target_domain=1) -> out_A2B
+  dit_model(z_t_B, t_B, cond=real_B, target_domain=0) -> out_B2A
+  compute_diffusion_loss(...) for both directions
 
-Runs validation or test-time export on the A/B paired test loader.
+Stage 2 (auxiliary objectives, fresh forward):
+  recompute out_A2B/out_B2A
+  decode x0_pred via VAE -> fake_B_img, fake_A_img
+  adversarial + cycle + identity
 
-Behavior:
+Discriminator stage:
+  replay-buffer fake_A/fake_B
+  _lsgan_disc_loss(D_A(real_A), D_A(fake_A_buffer))
+  _lsgan_disc_loss(D_B(real_B), D_B(fake_B_buffer))
+  optional R1 penalty
 
-1. use the EMA generator when available
-2. sample A→B and B→A translations with DDIM
-3. decode latents through the VAE
-4. compute SSIM, PSNR, and optionally FID for both domains
-5. save comparison grids to the output directory
+---- epoch end ---------------------------------------------------------------
+log losses/weights/LR/diagnostics
+periodic checkpoint
+validation pass with ema_model via DDIM
+periodic early-stopping checks on mean SSIM
 
-The validation path now tracks both domains instead of only the B domain.
-
-## `train_v3`
-
-Signature highlights:
-
-- `resume_checkpoint` is supported
-- `cfg` defaults to `get_dit_8gb_config()` when omitted
-- return value is `(history, dit_model, ema_model, None)`
-
-### Setup
-
-The loop constructs:
-
-- frozen VAE wrapper
-- trainable DiT generator
-- EMA generator copy
-- dual `ProjectionDiscriminator` instances
-- DDPM scheduler and DDIM sampler
-- replay buffers
-- optional VGG perceptual loss
-
-### Resume Support
-
-When `resume_checkpoint` is provided, the loop restores:
-
-- model weights
-- EMA weights
-- discriminator weights
-- optimizer state
-- scheduler state
-- AMP scaler state when available
-- early-stopping state when available
-- starting epoch
-
-### Per-Batch Flow
-
-For each batch the code now performs:
-
-1. encode real images to VAE latents
-2. sample timesteps and noise
-3. run diffusion-only generator loss first
-4. run a fresh forward pass for adversarial, cycle, and identity losses
-5. update the EMA model after generator stepping
-6. update discriminators with replay-buffer fakes and optional R1 penalty
-
-This ordering matches the current implementation and is intended to reduce
-peak VRAM by freeing diffusion activations before the auxiliary graph is built.
-
-### Loss Terms
-
-- diffusion loss from `compute_diffusion_loss`
-- adversarial loss from `_lsgan_gen_loss`
-- cycle loss from `_compute_cycle_loss`
-- identity loss from `_compute_identity_loss`
-- discriminator losses from `_lsgan_disc_loss`
-- optional R1 penalty from `_r1_penalty_loss`
-
-### Logging and Checkpointing
-
-Per-batch history now stores:
-
-- `Loss_DiT_A2B`
-- `Loss_DiT_B2A`
-- `Loss_DiT`
-- `Loss_G_Adv`
-- `Loss_Cyc`
-- `Loss_Id`
-- `Loss_D_A`
-- `Loss_D_B`
-- `Lambda_Adv`
-- `Lambda_Id`
-- `Loss_Perceptual`
-- `Loss Total`
-- `GradNorm`
-
-The history is written to CSV and visualized through `model_v3/history_utils.py`.
-
-### Validation and Early Stopping
-
-Validation runs after the configured warmup and uses the averaged SSIM score
-from both domains for early-stopping decisions.
-
-Early-stopping checks are gated by:
-
-- `early_stopping_interval`
-- `early_stopping_warmup`
-- presence of validation metrics for the current epoch
-
-The loss dictionary passed into `EarlyStopping` is `{"DiT": avg_loss}`.
-Early-stopping counters are also logged to TensorBoard.
-
-### Returned Values
-
-- `history`: nested epoch -> batch loss dictionary
-- `dit_model`: raw generator weights
-- `ema_model`: EMA generator weights
-- `None`: placeholder to preserve compatibility with the v1/v2/v4-style tuple
-
-**Replay Buffer**:
-
-```
-fake_A_buffer = replay_A.push_and_pop(fake_A_img.detach())
-fake_B_buffer = replay_B.push_and_pop(fake_B_img.detach())
-# Returns mix of current-batch fakes + older fakes from history
-```
-
-**Discriminator A Loss**:
-
-```
-loss_D_A = LSGAN_disc_loss(
-    D_A(real_A),         # discriminator real
-    D_A(fake_A_buffer)   # discriminator fake
-)
-
-# Optional: R1 penalty (every r1_interval steps)
-if use_r1_penalty and global_step % r1_interval == 0:
-    r1_A = R1_penalty_loss(D_A, real_A, r1_gamma=100)
-    loss_D_A += r1_A
-```
-
-Same for discriminator B.
-
-**Adaptive Discriminator Update**:
-
-```
-if not (adaptive_d_update and loss_D_A < adaptive_d_loss_threshold):
-    # Standard backward + step
-    scaler.scale(loss_D_A).backward()
-    scaler.step(optimizer_D_A)
-else:
-    # Skip update if discriminator loss is already low
-    pass
+---- finalization ------------------------------------------------------------
+save final checkpoint
+run test-time validation/export using ema_model
+flush + reload history CSV
+return history, dit_model, ema_model, None
 ```
 
 ---
 
-### 4C) Gradient Accumulation & AMP
+## 2. Imports and Dependencies
 
-**Accumulation** (when `accumulate_grads > 1`):
-
-```
-effective_batch = accumulate_grads * batch_size
-loss_scaled = loss / accumulate_grads
-scaler.scale(loss_scaled).backward()
-accum_count += 1
-
-if accum_count == accumulate_grads:
-    [clip gradients if grad_clip > 0]
-    scaler.step(optimizer)
-    scaler.update()
-```
+| Symbol | Source | Purpose |
+|---|---|---|
+| `get_dit_8gb_config` | `config` | Default v3 config |
+| `getDataLoader` | `shared.data_loader` | Unpaired data pipeline |
+| `VAEWrapper` | `model_v3.vae_wrapper` | Frozen latent encoder/decoder |
+| `getGeneratorV3` | `model_v3.generator` | CycleDiT generator |
+| `getDiscriminatorsV3` | `model_v3.discriminator` | Projection discriminators |
+| `DDPMScheduler`, `DDIMSampler` | `model_v3.noise_scheduler` | Noise process + deterministic sampler |
+| `compute_diffusion_loss`, `_compute_cycle_loss`, `_compute_identity_loss`, etc. | `model_v3.losses` | Core diffusion and GAN/cycle/id losses |
+| `VGGPerceptualLossV2` | `model_v2.losses` | Optional perceptual loss |
+| `ReplayBuffer` | `shared.replay_buffer` | Discriminator stabilization |
+| `MetricsCalculator` | `shared.metrics` | SSIM/PSNR/FID |
+| `save_images_with_title` | `shared.validation` | Validation grid export |
+| `append_history_to_csv_v3`, `load_history_from_csv_v3` | `model_v3.history_utils` | v3 history persistence |
+| `EarlyStopping` | `shared.EarlyStopping` | Stopping on SSIM + divergence |
 
 ---
 
-### 4D) EMA Update
+## 3. Helper Function: `_load_checkpoint_compat`
 
-**After generator step**:
+### Signature
 
 ```python
-for ema_p, p in zip(ema_model.parameters(), dit_model.parameters()):
-    ema_p.data = 0.9999 * ema_p.data + (1 - 0.9999) * p.data
-    # Exponential moving average decay: 0.9999
+_load_checkpoint_compat(checkpoint_path: str, map_location) -> dict
 ```
+
+### Purpose
+
+Cross-version-safe checkpoint loading with fallback for PyTorch 2.6+ `weights_only` behavior.
+
+### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `checkpoint_path` | `str` | Path to `.pth` file |
+| `map_location` | `str | torch.device` | Device remapping |
+
+### Return
+
+Checkpoint dict.
+
+### Sample I/O
+
+- Input: `checkpoint_path=".../checkpoint_epoch_120.pth"`, `map_location="cpu"`
+- Output (example keys): `epoch`, `dit_state_dict`, `ema_state_dict`, `optimizer_G_state_dict`, `scaler_state_dict`
 
 ---
 
-### 4E) Logging & Checkpointing
+## 4. Helper Function: `_make_cosine_warmup_lambda`
 
-**Per-batch logging** (every 50 batches + first & last):
-
-```
-Loss_DiT_A2B, Loss_DiT_B2A, Loss_DiT [avg]
-Loss_G_Adv [generator adversarial]
-Loss_Cyc [cycle consistency]
-Loss_Id [identity, may be 0 if lambda=0]
-Loss_D_A, Loss_D_B [discriminator losses]
-Lambda_Adv, Lambda_Id [current schedule values]
-Loss_Perceptual
-Loss Total [weighted sum]
-GradNorm
-```
-
-**Per-epoch logging** (TensorBoard):
-
-```
-Epoch, avg Loss_DiT, avg Loss_Perceptual, avg GradNorm
-Metrics from validation run (SSIM, PSNR, FID)
-LR values for all optimizers
-```
-
-**Checkpoint Saving** (every `checkpoint_interval` epochs):
+### Signature
 
 ```python
-torch.save({
-    'dit_state_dict': dit_model.state_dict(),
-    'ema_state_dict': ema_model.state_dict(),
-    'D_A_state_dict': D_A.state_dict(),
-    'D_B_state_dict': D_B.state_dict(),
-    'optimizer_G_state_dict': optimizer_G.state_dict(),
-    'optimizer_D_A_state_dict': optimizer_D_A.state_dict(),
-    'optimizer_D_B_state_dict': optimizer_D_B.state_dict(),
-    'lr_scheduler_G_state_dict': lr_scheduler_G.state_dict(),
-    'lr_scheduler_D_A_state_dict': lr_scheduler_D_A.state_dict(),
-    'lr_scheduler_D_B_state_dict': lr_scheduler_D_B.state_dict(),
-    'scaler_state_dict': scaler.state_dict(),
-    'early_stopping_state': early_stopping.state_dict(),
-    'epoch': epoch,
-    ...
-}, checkpoint_path)
+_make_cosine_warmup_lambda(warmup: int, total: int, lr_min_ratio: float) -> Callable[[int], float]
 ```
+
+### Purpose
+
+Builds LR multiplier with:
+
+1. Linear warmup in `[0, warmup)`
+2. Cosine decay in `[warmup, total)` down to `lr_min_ratio`
+
+### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `warmup` | `int` | Warmup epochs |
+| `total` | `int` | Total epochs |
+| `lr_min_ratio` | `float` | Minimum LR as ratio of base LR |
+
+### Sample I/O
+
+- Input: `(warmup=10, total=200, lr_min_ratio=1e-2)`
+- Output examples: `epoch=0 -> ~0.1`, `epoch=10 -> 1.0`, late epochs approach `0.01`
 
 ---
 
-### 4F) Validation & Early Stopping
+## 5. Helper Function: `_global_grad_norm`
 
-**Per-epoch validation** (every `validation_interval` epochs after `validation_warmup_epochs`):
-
-```
-test_metrics = _run_validation_v3(...)
-history update with {ssim_B, psnr_B, fid_B}
-```
-
-**Early Stopping Criteria**:
-
-1. **SSIM Plateau**: no improvement > `min_delta` for `patience` epochs
-2. **Loss Divergence**: generator loss > `divergence_threshold` for `divergence_patience` epochs
-
-**Resume Training**:
+### Signature
 
 ```python
-train_v3(resume_checkpoint="models_v3/.../checkpoint_epoch_60.pth")
-# Loads all model states, optimizer states, schedulers, scaler,
-# early-stopping state, and epoch number
-# Continues from next epoch
+_global_grad_norm(parameters) -> float
 ```
 
+### Purpose
+
+Computes global L2 norm of existing gradients for monitoring.
+
+### Return
+
+`float`, returns `0.0` when no gradients exist.
+
+### Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `parameters` | `Iterable[nn.Parameter]` | Parameter iterator whose `.grad` fields are inspected |
+
+### Sample I/O
+
+- Input: parameters from `dit_model`
+- Output: scalar grad norm (example `2.84`)
+
 ---
 
-## Key Hyperparameters (from config)
+## 6. Helper Function: `_set_requires_grad`
 
-| Parameter | Role | Default |
-|-----------|------|---------|
-| `lambda_denoising` | Diffusion loss weight | 1.0 |
-| `lambda_adv_v3` | Generator adversarial weight | 0.1 |
-| `lambda_adv_warmup_steps` | Ramp-up diffusion → adversarial | 500 |
-| `lambda_cycle_v3` | Cycle consistency weight | 1.0 |
-| `lambda_identity_v3_start` | Initial identity weight | 0.5 |
-| `lambda_identity_v3_end` | Final identity weight | 0.1 |
-| `identity_decay_end_ratio` | Decay over first N% of training | 0.5 |
-| `lambda_perceptual_v3` | Perceptual loss weight | 0.01 |
-| `use_r1_penalty` | Enable R1 discriminator regularization | true |
-| `r1_gamma` | R1 penalty strength | 100 |
-| `r1_interval` | Run R1 every N steps | 16 |
-| `cycle_ddim_steps` | DDIM steps for Phase 2 cycle | 5 |
-| `min_snr_gamma` | Min-SNR weighting threshold | 5.0 |
-
----
-
-## Returns
+### Signature
 
 ```python
-history, dit_model, ema_model, cond_tokenizer = train_v3(...)
+_set_requires_grad(module: nn.Module, flag: bool) -> None
 ```
 
-- `history`: dict of epoch → metrics
-- `dit_model`: final trained generator (before EMA)
-- `ema_model`: EMA-averaged generator (recommended for inference)
-- fourth return: currently `None` (reserved compatibility slot)
-- real_B: (N,3,256,256)
+### Purpose
 
-Step 1: encode target image to latent
-- z0 = vae.encode(real_B): (N,4,32,32)
+Bulk enables/disables gradients to control which networks are trainable during each stage.
 
-Step 2: sample timestep and noise
-- t: (N,)
-- noise: (N,4,32,32)
+### Parameters
 
-Step 3: create noisy latent
-- z_t = scheduler.add_noise(z0, noise, t): (N,4,32,32)
+| Parameter | Type | Description |
+|---|---|---|
+| `module` | `nn.Module` | Target module |
+| `flag` | `bool` | `True` enable gradients, `False` freeze |
 
-Step 4: condition and prediction
-- c = cond_encoder(real_A): (N,Hd)
-- eps_pred = dit_model(z_t, t, c): (N,4,32,32)
+### Sample I/O
 
-Step 5: loss
-- compute_diffusion_loss returns scalar total and scalar components
-
-Step 6: backward/step
-- optional gradient accumulation
-- grad clipping on dit_model + cond_encoder params
-- optimizer step via GradScaler
-
-Step 7: EMA update
-- ema_model params updated from dit_model params
-
-### 4C) Epoch-end dataflow
-
-1. aggregate scalar means
-2. log losses, grad norm, LR
-3. periodic history CSV append
-4. periodic checkpoint save
-
-Checkpoint content includes:
-- dit_state_dict
-- cond_encoder_state_dict
-- ema_state_dict
-- optimizer_state_dict
-- diffusion config
-
-### 4D) Validation and stopping
-
-1. run _run_validation_v3 after validation warmup
-2. every early-stopping interval:
-   - use ssim_B scalar
-   - call EarlyStopping with loss dictionary
-3. possibly break early
-
-### 4E) Finalization
-
-1. save final checkpoint
-2. run final test export via _run_validation_v3 (is_test=True)
-3. append and reload history
-4. close writer
+- Input: `module=D_A`, `flag=False`
+- Effect: all discriminator parameters in `D_A` are frozen for generator stage
 
 ---
 
-## Batch Shape Summary
+## 7. Function: `_run_validation_v3`
 
-With train batch size N:
-- real_A, real_B: (N,3,256,256)
-- z0, z_t, noise, eps_pred: (N,4,32,32)
-- c: (N,Hd)
-- decoded fake_B: (N,3,256,256)
+### 7A Signature
+
+```python
+_run_validation_v3(
+    epoch,
+    ema_model,
+    vae,
+    sampler,
+    test_loader,
+    device,
+    save_dir,
+    calculator,
+    num_steps,
+    writer,
+    max_batches=50,
+    num_samples=6,
+    fid_max_samples=200,
+    fid_min_samples=50,
+    prediction_type="v",
+    cfg_scale=1.0,
+    is_test=False,
+) -> dict
+```
+
+### 7B Parameters
+
+| Parameter | Type | Description |
+|---|---|---|
+| `epoch` | `int` | Logging and file naming step |
+| `ema_model` | `nn.Module` | EMA CycleDiT model used for inference |
+| `vae` | `VAEWrapper` | Frozen latent decoder |
+| `sampler` | `DDIMSampler` | DDIM generation sampler |
+| `test_loader` | `DataLoader` | Batch dicts with keys `A`, `B` |
+| `device` | `torch.device` | Inference device |
+| `save_dir` | `str` | Output dir for image grids |
+| `calculator` | `MetricsCalculator` | SSIM/PSNR/FID helper |
+| `num_steps` | `int` | DDIM denoising steps |
+| `writer` | `SummaryWriter` | TensorBoard writer |
+| `max_batches` | `int` | Maximum evaluated batches |
+| `num_samples` | `int` | Number of saved qualitative grids |
+| `fid_max_samples` | `int` | FID upper sample cap |
+| `fid_min_samples` | `int` | FID minimum sample threshold |
+| `prediction_type` | `str` | Diffusion parameterization (`v` or `eps`) |
+| `cfg_scale` | `float` | CFG guidance scale |
+| `is_test` | `bool` | Switches TensorBoard prefix to `Testing` |
+
+### 7C Validation Flow
+
+1. Runs A->B generation across up to `max_batches`.
+2. Computes SSIM/PSNR for domain B every evaluated batch.
+3. For first `num_samples` batches, additionally:
+   - runs B->A generation
+   - runs both cycle reconstructions
+   - writes 4-panel image grids:
+     - row A: `Real A | Fake B | Rec A | Real B`
+     - row B: `Real B | Fake A | Rec B | Real A`
+4. Optionally computes FID for both directions if sample thresholds allow.
+5. Logs metrics into TensorBoard under `Validation/` or `Testing/`.
+
+### 7D Return Value
+
+Dictionary with averaged metrics:
+
+- always: `ssim_A`, `psnr_A`, `ssim_B`, `psnr_B`
+- optional: `fid_A`, `fid_B`
+
+---
+
+## 8. Function: `train_v3`
+
+### 8A Signature and Return
+
+```python
+train_v3(
+    epoch_size=None,
+    num_epochs=None,
+    model_dir=None,
+    val_dir=None,
+    test_size=None,
+    resume_checkpoint=None,
+    cfg=None,
+) -> tuple[dict, nn.Module, nn.Module, None]
+```
+
+Returns `(history, dit_model, ema_model, None)`.
+
+### 8B Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `epoch_size` | `int | None` | from cfg | Samples per epoch |
+| `num_epochs` | `int | None` | from cfg | Total epochs |
+| `model_dir` | `str | None` | from cfg | Output root |
+| `val_dir` | `str | None` | from cfg | Validation images root |
+| `test_size` | `int | None` | from cfg | Number of test batches/images in final run |
+| `resume_checkpoint` | `str | None` | `None` | Resume path |
+| `cfg` | `UVCGANConfig | None` | `get_dit_8gb_config()` | v3 config object |
+
+### 8C Setup Phase
+
+- Applies argument overrides to config.
+- Asserts required fields (`num_epochs`, `epoch_size`, `validation_size`, warmup consistency).
+- Creates dataloaders (`train_loader`, `test_loader`).
+- Instantiates:
+  - frozen `VAEWrapper`
+  - trainable `dit_model`
+  - non-trainable EMA `ema_model`
+  - discriminators `D_A`, `D_B`
+  - replay buffers
+  - `DDPMScheduler` + `DDIMSampler`
+- Configures optimizers:
+  - `AdamW` for DiT
+  - `Adam` for both discriminators
+- Configures cosine-warmup LR schedulers.
+- Configures AMP scaler.
+- Configures `MetricsCalculator`, `EarlyStopping`, optional `VGGPerceptualLossV2`.
+- Creates output directories + TensorBoard writer + history CSV path.
+
+### 8D Resume Phase
+
+On resume:
+
+1. Loads checkpoint and validates presence of `dit_state_dict`.
+2. Restores `dit_model`, `ema_model`, `D_A`, `D_B`.
+3. Restores optimizer/scheduler/scaler/early-stopping states.
+4. Supports legacy `optimizer_state_dict` alias for generator optimizer.
+5. Sets `start_epoch` from checkpoint `epoch`.
+
+### 8E Per-epoch Loop
+
+Each epoch:
+
+1. Sets `dit_model.train()`.
+2. Resets accumulators and `accum_count`.
+3. Iterates batches; skips non-finite input batches.
+4. Performs two-stage generator update then discriminator updates.
+5. Stores per-batch metrics in `history`.
+
+### 8F Two-stage Generator Update
+
+#### Stage 1: Diffusion denoising
+
+- Encodes images to latents (`z0_A`, `z0_B`).
+- Samples timesteps `t_A`, `t_B` and noises.
+- Generates noisy latents `z_t_A`, `z_t_B`.
+- Runs DiT forward for both directions.
+- Computes diffusion loss via `compute_diffusion_loss` for A->B and B->A.
+- Backpropagates `loss_denoise / accumulate`.
+- Frees stage-1 forward outputs.
+
+#### Stage 2: Adversarial + cycle + identity
+
+- Re-runs DiT forward to build fresh computation graph.
+- Decodes predicted clean latents to pixel images.
+- Computes:
+  - adversarial generator loss (`_lsgan_gen_loss`)
+  - cycle-consistency loss (`_compute_cycle_loss`)
+  - identity loss (`_compute_identity_loss`) if enabled
+- Combines with scheduled weights:
+  - `lambda_adv_curr`
+  - `lambda_cycle_v3`
+  - `lambda_identity_curr`
+- Backpropagates `aux_loss / accumulate`.
+- At accumulation boundary:
+  - gradient clipping
+  - optimizer step
+  - EMA update
+
+### 8G Discriminator Update
+
+After generator stage:
+
+- Unfreezes discriminators.
+- Uses replay-buffer detached fakes.
+- Computes LSGAN discriminator losses for `D_A`, `D_B`.
+- Optional R1 penalty every `r1_interval` steps.
+- Adaptive update option skips D backward when loss is below threshold.
+- Calls `scaler.step` for performed steps and `scaler.update` once if any optimizer stepped.
+
+### 8H Epoch-end Logging and Checkpointing
+
+- Aggregates epoch means (`Loss/DiT`, `Loss/Perceptual`, grad norms).
+- Logs last-batch GAN/cycle/identity losses and lambda weights.
+- Logs timestep distribution diagnostics (`TimestepMean`, `TimestepStd`).
+- Steps all LR schedulers.
+- Flushes history CSV every 5 epochs.
+- Saves checkpoint every `save_checkpoint_every` epochs.
+
+### 8I Validation and Early Stopping
+
+- Runs `_run_validation_v3(...)` after `validation_warmup_epochs`.
+- On every `early_stopping_interval` after warmup:
+  - score = `0.5 * (ssim_A + ssim_B)`
+  - `EarlyStopping(ssim=score, losses={"DiT": avg_loss})`
+- Logs early stopping counters.
+- Stops when criteria are met.
+
+### 8J Finalization
+
+1. Saves `final_checkpoint_epoch_{stopped_epoch}.pth`.
+2. Runs test-time `_run_validation_v3(..., is_test=True)` into `test_images/`.
+3. Logs final TensorBoard markers.
+4. Flushes and reloads full CSV history.
+5. Closes writer.
+
+---
+
+## 9. Tensor Shape Reference
+
+| Tensor | Shape | Notes |
+|---|---|---|
+| `real_A`, `real_B` | `(N,3,256,256)` | Input images |
+| `z0_A`, `z0_B` | `(N,4,32,32)` | VAE latent |
+| `z_t_A`, `z_t_B` | `(N,4,32,32)` | Noisy latent |
+| `out["v_pred"]` | `(N,4,32,32)` | DiT output for diffusion objective |
+| `z0_fake_A`, `z0_fake_B` | `(N,4,32,32)` | Predicted clean latent |
+| `fake_A_img`, `fake_B_img` | `(N,3,256,256)` | Decoded pixel-space fakes |
+| `loss_*` | scalar | Loss terms used in optimization |
+
+---
+
+## 10. Loss Components and Schedules
+
+| Component | Symbol | Notes |
+|---|---|---|
+| Diffusion denoising | `loss_denoise` | Weighted MSE + optional Min-SNR + optional perceptual |
+| Adversarial | `loss_adv_G` | LSGAN generator loss |
+| Cycle | `loss_cyc` | DDIM-shortcut-based cycle penalty |
+| Identity | `loss_id` | Optional identity consistency |
+| Total Stage 2 | `aux_loss` | `lambda_adv_curr * adv + lambda_cycle * cyc + lambda_id_curr * id` |
+
+Schedules:
+
+- `lambda_adv_curr`: linear warmup by global step
+- `lambda_identity_curr`: epoch-based decay from start to end value
+- LR: warmup + cosine decay via `_make_cosine_warmup_lambda`
+
+---
+
+## 11. Optimizer and LR Schedule Reference
+
+| Optimizer | Params | Type | LR |
+|---|---|---|---|
+| `optimizer_G` | `dit_model` | AdamW | `1e-4` |
+| `optimizer_D_A` | `D_A` | Adam | `tcfg.lr` |
+| `optimizer_D_B` | `D_B` | Adam | `tcfg.lr` |
+
+All 3 use LambdaLR cosine-warmup schedule.
+
+---
+
+## 12. Checkpoint Payload Reference
+
+Periodic and final checkpoint keys:
+
+| Key | Description |
+|---|---|
+| `checkpoint_format_version` | Format marker (`2`) |
+| `epoch` | Completed epoch |
+| `dit_state_dict` | DiT model weights |
+| `ema_state_dict` | EMA model weights |
+| `D_A_state_dict`, `D_B_state_dict` | Discriminator weights |
+| `optimizer_state_dict` | Legacy alias of generator optimizer |
+| `optimizer_G_state_dict` | Generator optimizer |
+| `optimizer_D_A_state_dict`, `optimizer_D_B_state_dict` | Discriminator optimizers |
+| `lr_scheduler_G_state_dict`, `lr_scheduler_D_A_state_dict`, `lr_scheduler_D_B_state_dict` | Scheduler states |
+| `scaler_state_dict` | AMP scaler state |
+| `early_stopping_state` | EarlyStopping state |
+| `config` | Diffusion config snapshot (`dcfg`) |
+
+---
+
+## 13. TensorBoard Scalar Reference
+
+| Scalar | Frequency |
+|---|---|
+| `Epoch` | Every epoch |
+| `Loss/DiT` | Every epoch |
+| `Loss/Perceptual` | Every epoch |
+| `Loss/G_adv`, `Loss/D_A`, `Loss/D_B` | Every epoch (from last batch snapshot) |
+| `Loss/Cycle`, `Loss/Identity` | Every epoch (from last batch snapshot) |
+| `Weights/lambda_adv_current`, `Weights/lambda_adv_epoch_avg` | Every epoch |
+| `Weights/lambda_identity_current`, `Weights/lambda_identity_epoch_avg` | Every epoch |
+| `Diagnostics/GradNorm` | Every epoch |
+| `Diagnostics/TimestepMean`, `Diagnostics/TimestepStd` | Every epoch |
+| `LR/DiT`, `LR/D_A`, `LR/D_B` | Every epoch |
+| `Validation/*` | Validation runs |
+| `Testing/*` | Final test run |
+| `EarlyStopping/ssim`, `EarlyStopping/counter`, `EarlyStopping/divergence_counter` | Early-stopping intervals |
+| `Testing Started`, `Training Completed` | Finalization |
+
+---
+
+## 14. Artifact Layout
+
+```text
+model_dir/
+  tensorboard_logs/
+  training_history.csv
+  checkpoint_epoch_*.pth
+  final_checkpoint_epoch_*.pth
+  validation_images/
+    epoch_*/
+  test_images/
+```
