@@ -475,10 +475,10 @@ def train_v2(
             real_A = batch["A"].to(device, non_blocking=True)
             real_B = batch["B"].to(device, non_blocking=True)
 
-        # Skip batches with non-finite values; warn on near-uniform patches.
-        if not (real_A.isfinite().all() and real_B.isfinite().all()):
-            print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
-            continue
+            # Skip batches with non-finite values; warn on near-uniform patches.
+            if not (real_A.isfinite().all() and real_B.isfinite().all()):
+                print(f"[warn] non-finite input at epoch {epoch+1} batch {i}, skipping")
+                continue
 
             real_A_std = real_A.std(dim=[1, 2, 3])
             real_B_std = real_B.std(dim=[1, 2, 3])
