@@ -66,3 +66,4 @@ The v1, v2, v3, and v4 folders now include folder-level dataflow pipeline pages 
 | `preprocess_data.py` | [preprocess_data.md](preprocess_data.md) | Whole-slide patch extraction, tissue filtering, train/test split |
 | `trainModel.py` | [train_model.md](train_model.md) | Interactive training entry point. Prompts for parameters and dispatches to v1/v2/v3/v4 loops |
 | `app.py` | [app.md](app.md) | Patch-based whole-slide inference with overlap blending. Supports v1/v2/v3/v4 |
+| `compare_three_folder_metrics.py` | [compare_three_folder_metrics.md](compare_three_folder_metrics.md) | Three-folder evaluator: filename-aligned per-image SSIM/PSNR/MAE and dataset-level FID; exports CSV + Markdown report |
