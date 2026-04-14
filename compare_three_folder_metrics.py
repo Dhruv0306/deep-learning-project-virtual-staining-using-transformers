@@ -1,8 +1,9 @@
 """
 Compare image quality metrics across three folders with matched filenames.
+FULLY GPU-OPTIMIZED VERSION - All operations run on GPU.
 
 Usage example:
-    python compare_three_folder_metrics.py \
+    python compare_three_folder_metrics_gpu_optimized.py \
         --source_dir data/E_Staining_DermaRepo/H_E-Staining_dataset/testA \
         --generated1_dir data/E_Staining_DermaRepo/H_E-Staining_dataset/models_v2_xxx/validation_images/genA \
         --generated2_dir data/E_Staining_DermaRepo/H_E-Staining_dataset/models_v4_xxx/validation_images/genA
@@ -23,11 +24,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Sequence, Tuple
 
-import numpy as np
 import torch
-import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 from PIL import Image, ImageFile
-from scipy import linalg
+from torchvision import io as tv_io
+from torchvision.transforms import functional as TF
 
 from shared.metrics import MetricsCalculator
 
@@ -56,12 +57,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare source folder with two generated folders using matched filenames. "
-            "Computes per-image SSIM/PSNR/MAE and dataset-level FID."
+            "Computes per-image SSIM/PSNR/MAE and dataset-level FID. FULLY GPU-OPTIMIZED."
         )
     )
-    parser.add_argument("--source_dir", required=True, help="Path to source/original images")
-    parser.add_argument("--generated1_dir", required=True, help="Path to generated image folder 1")
-    parser.add_argument("--generated2_dir", required=True, help="Path to generated image folder 2")
+    parser.add_argument(
+        "--source_dir", required=True, help="Path to source/original images"
+    )
+    parser.add_argument(
+        "--generated1_dir", required=True, help="Path to generated image folder 1"
+    )
+    parser.add_argument(
+        "--generated2_dir", required=True, help="Path to generated image folder 2"
+    )
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -90,6 +97,11 @@ def parse_args() -> argparse.Namespace:
             "Filename matching mode: exact uses full filename (case-insensitive, with extension), "
             "prefix uses text before first dot in filename (recommended when generated files append suffixes)."
         ),
+    )
+    parser.add_argument(
+        "--use_torchvision_io",
+        action="store_true",
+        help="Use torchvision.io for direct GPU image loading (faster, but may have compatibility issues with some formats)",
     )
     return parser.parse_args()
 
@@ -129,7 +141,9 @@ def get_match_key(filename: str, match_mode: str) -> str:
     return re.sub(r"\s+", " ", prefix)
 
 
-def build_keyed_map(images: Dict[str, str], match_mode: str, folder_label: str) -> Dict[str, str]:
+def build_keyed_map(
+    images: Dict[str, str], match_mode: str, folder_label: str
+) -> Dict[str, str]:
     keyed: Dict[str, str] = {}
     duplicates = 0
     for name, path in sorted(images.items()):
@@ -146,52 +160,88 @@ def build_keyed_map(images: Dict[str, str], match_mode: str, folder_label: str) 
     return keyed
 
 
-def to_normalized_tensor(image: Image.Image) -> torch.Tensor:
-    tensor = TF.to_tensor(image)
-    return TF.normalize(tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+def load_image_gpu_torchvision(image_path: str, device: torch.device) -> torch.Tensor:
+    """Load image directly to GPU using torchvision.io (faster but less compatible)."""
+    # Read image as uint8 tensor [C, H, W] on CPU
+    img = tv_io.read_image(image_path, mode=tv_io.ImageReadMode.RGB)
+    # Convert to float32 and normalize to [-1, 1]
+    img = img.to(device=device, dtype=torch.float32) / 255.0
+    img = (img - 0.5) / 0.5
+    return img
+
+
+def load_image_gpu_pil(image_path: str, device: torch.device) -> torch.Tensor:
+    """Load image using PIL then transfer to GPU (more compatible, slightly slower)."""
+    img = Image.open(image_path).convert("RGB")
+    # Convert to tensor on CPU, then move to GPU
+    tensor = TF.to_tensor(img).to(device=device, non_blocking=True)
+    # Normalize to [-1, 1]
+    tensor = (tensor - 0.5) / 0.5
+    return tensor
 
 
 def load_triplet_tensors(
     src_path: str,
     gen1_path: str,
     gen2_path: str,
+    device: torch.device,
+    use_torchvision_io: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    src_img = Image.open(src_path).convert("RGB")
-    gen1_img = Image.open(gen1_path).convert("RGB")
-    gen2_img = Image.open(gen2_path).convert("RGB")
+    """Load three images and return normalized tensors on GPU."""
 
-    if gen1_img.size != src_img.size:
-        gen1_img = gen1_img.resize(src_img.size, Image.Resampling.BICUBIC)
-    if gen2_img.size != src_img.size:
-        gen2_img = gen2_img.resize(src_img.size, Image.Resampling.BICUBIC)
+    load_fn = load_image_gpu_torchvision if use_torchvision_io else load_image_gpu_pil
 
-    src_t = to_normalized_tensor(src_img)
-    gen1_t = to_normalized_tensor(gen1_img)
-    gen2_t = to_normalized_tensor(gen2_img)
+    src_t = load_fn(src_path, device)
+    gen1_t = load_fn(gen1_path, device)
+    gen2_t = load_fn(gen2_path, device)
+
+    # Resize if needed (on GPU)
+    if gen1_t.shape[1:] != src_t.shape[1:]:
+        gen1_t = F.interpolate(
+            gen1_t.unsqueeze(0),
+            size=src_t.shape[1:],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze(0)
+
+    if gen2_t.shape[1:] != src_t.shape[1:]:
+        gen2_t = F.interpolate(
+            gen2_t.unsqueeze(0),
+            size=src_t.shape[1:],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze(0)
 
     return src_t, gen1_t, gen2_t
 
 
-def compute_mae(img1: torch.Tensor, img2: torch.Tensor) -> float:
-    return torch.mean(torch.abs(img1 - img2)).item()
+def compute_mae_gpu(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+    """Compute MAE on GPU, return GPU tensor."""
+    return torch.mean(torch.abs(img1 - img2))
 
 
-def compute_psnr_torch(img1: torch.Tensor, img2: torch.Tensor, data_range: float = 2.0) -> float:
+def compute_psnr_gpu(
+    img1: torch.Tensor, img2: torch.Tensor, data_range: float = 2.0
+) -> torch.Tensor:
+    """Compute PSNR on GPU, return GPU tensor."""
     mse = torch.mean((img1 - img2) ** 2)
     if torch.isclose(mse, torch.tensor(0.0, device=mse.device, dtype=mse.dtype)):
-        return float("inf")
-    psnr = 20.0 * torch.log10(torch.tensor(data_range, device=mse.device, dtype=mse.dtype))
+        return torch.tensor(float("inf"), device=mse.device, dtype=mse.dtype)
+
+    psnr = 20.0 * torch.log10(
+        torch.tensor(data_range, device=mse.device, dtype=mse.dtype)
+    )
     psnr -= 10.0 * torch.log10(mse)
-    return float(psnr.item())
+    return psnr
 
 
-def compute_ssim_torch(
+def compute_ssim_gpu(
     img1: torch.Tensor,
     img2: torch.Tensor,
     data_range: float = 2.0,
     kernel_size: int = 11,
-) -> float:
-    """Compute SSIM on GPU using channel-wise pooling to avoid huge CPU allocations."""
+) -> torch.Tensor:
+    """Compute SSIM on GPU using channel-wise pooling, return GPU tensor."""
     if img1.shape != img2.shape:
         raise ValueError("SSIM input tensors must have the same shape.")
     if img1.ndim != 4:
@@ -207,24 +257,23 @@ def compute_ssim_torch(
         x = img1[:, ch : ch + 1]
         y = img2[:, ch : ch + 1]
 
-        mu_x = torch.nn.functional.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=pad)
-        mu_y = torch.nn.functional.avg_pool2d(y, kernel_size=kernel_size, stride=1, padding=pad)
+        mu_x = F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=pad)
+        mu_y = F.avg_pool2d(y, kernel_size=kernel_size, stride=1, padding=pad)
 
         mu_x_sq = mu_x * mu_x
         mu_y_sq = mu_y * mu_y
         mu_xy = mu_x * mu_y
 
         sigma_x_sq = (
-            torch.nn.functional.avg_pool2d(x * x, kernel_size=kernel_size, stride=1, padding=pad)
+            F.avg_pool2d(x * x, kernel_size=kernel_size, stride=1, padding=pad)
             - mu_x_sq
         )
         sigma_y_sq = (
-            torch.nn.functional.avg_pool2d(y * y, kernel_size=kernel_size, stride=1, padding=pad)
+            F.avg_pool2d(y * y, kernel_size=kernel_size, stride=1, padding=pad)
             - mu_y_sq
         )
         sigma_xy = (
-            torch.nn.functional.avg_pool2d(x * y, kernel_size=kernel_size, stride=1, padding=pad)
-            - mu_xy
+            F.avg_pool2d(x * y, kernel_size=kernel_size, stride=1, padding=pad) - mu_xy
         )
 
         numerator = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
@@ -232,12 +281,18 @@ def compute_ssim_torch(
         ssim_map = numerator / (denominator + 1e-12)
         channel_scores.append(ssim_map.mean())
 
-    return float(torch.stack(channel_scores).mean().item())
+    return torch.stack(channel_scores).mean()
 
 
-def compute_fid_from_features(real_features: np.ndarray, fake_features: np.ndarray) -> float:
+def compute_fid_from_features_gpu(
+    real_features: torch.Tensor, fake_features: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute FID entirely on GPU using PyTorch operations.
+    Returns GPU tensor.
+    """
     if real_features.ndim != 2 or fake_features.ndim != 2:
-        raise ValueError("Features must be 2D arrays of shape [N, D].")
+        raise ValueError("Features must be 2D tensors of shape [N, D].")
 
     if real_features.shape[1] != fake_features.shape[1]:
         raise ValueError("Feature dimensions do not match for FID computation.")
@@ -245,47 +300,91 @@ def compute_fid_from_features(real_features: np.ndarray, fake_features: np.ndarr
     if real_features.shape[0] < 2 or fake_features.shape[0] < 2:
         raise ValueError("FID requires at least 2 images in each set.")
 
-    mu1 = real_features.mean(axis=0)
-    mu2 = fake_features.mean(axis=0)
+    # Compute means
+    mu1 = real_features.mean(dim=0)
+    mu2 = fake_features.mean(dim=0)
 
-    sigma1 = np.cov(real_features, rowvar=False)
-    sigma2 = np.cov(fake_features, rowvar=False)
+    # Compute covariance matrices (on GPU)
+    real_centered = real_features - mu1
+    fake_centered = fake_features - mu2
 
+    sigma1 = (real_centered.T @ real_centered) / (real_features.shape[0] - 1)
+    sigma2 = (fake_centered.T @ fake_centered) / (fake_features.shape[0] - 1)
+
+    # Add small epsilon for numerical stability
     eps = 1e-4
-    sigma1 = sigma1 + eps * np.eye(sigma1.shape[0], dtype=sigma1.dtype)
-    sigma2 = sigma2 + eps * np.eye(sigma2.shape[0], dtype=sigma2.dtype)
+    sigma1 = sigma1 + eps * torch.eye(
+        sigma1.shape[0], device=sigma1.device, dtype=sigma1.dtype
+    )
+    sigma2 = sigma2 + eps * torch.eye(
+        sigma2.shape[0], device=sigma2.device, dtype=sigma2.dtype
+    )
 
+    # Compute difference of means
     diff = mu1 - mu2
 
-    covmean_result = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-    covmean = covmean_result[0] if isinstance(covmean_result, tuple) else covmean_result
-    if np.iscomplexobj(covmean):
-        covmean = np.real(covmean)
+    # Compute sqrt of product of covariance matrices using eigendecomposition
+    # sqrtm(A @ B) using eigendecomposition for symmetric positive definite matrices
+    product = sigma1 @ sigma2
 
-    fid = diff.dot(diff) + np.trace(sigma1 + sigma2 - 2.0 * covmean)
-    return float(fid)
+    # For symmetric matrices, we can use torch.linalg.eigh (faster and more stable)
+    try:
+        eigenvalues, eigenvectors = torch.linalg.eigh(product)
+        # Ensure eigenvalues are positive (numerical stability)
+        eigenvalues = torch.clamp(eigenvalues, min=0)
+        sqrt_eigenvalues = torch.sqrt(eigenvalues)
+        covmean = eigenvectors @ torch.diag(sqrt_eigenvalues) @ eigenvectors.T
+    except:
+        # Fallback: use general square root (slower but more robust)
+        covmean = torch.linalg.matrix_power(product, 0.5)
+
+    # Handle potential complex values by taking real part
+    if torch.is_complex(covmean):
+        covmean = covmean.real
+
+    # Compute FID
+    fid = diff @ diff + torch.trace(sigma1 + sigma2 - 2.0 * covmean)
+
+    return fid
 
 
-def batched_inception_features(
+def batched_inception_features_gpu(
     calculator: MetricsCalculator,
-    tensors: Sequence[torch.Tensor],
+    tensors: List[torch.Tensor],
     batch_size: int,
-) -> np.ndarray:
-    features: List[np.ndarray] = []
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Extract inception features in batches, keeping everything on GPU.
+    Returns GPU tensor instead of NumPy array.
+    """
+    features_list: List[torch.Tensor] = []
+
     for i in range(0, len(tensors), batch_size):
-        batch_slice: List[torch.Tensor] = list(tensors[i : i + batch_size])
-        batch = torch.stack(batch_slice, dim=0)
-        features.append(calculator.get_inception_features(batch))
-    return np.concatenate(features, axis=0)
+        batch_tensors = tensors[i : i + batch_size]
+        # Stack tensors (all already on GPU)
+        batch = torch.stack(batch_tensors, dim=0)
+
+        # Get features - modify calculator to return torch tensor
+        batch_features = calculator.get_inception_features(batch)
+
+        # If calculator returns numpy, convert to torch and move to GPU
+        if isinstance(batch_features, torch.Tensor):
+            features_list.append(batch_features)
+        else:
+            # Convert numpy to torch tensor on GPU
+            features_list.append(torch.from_numpy(batch_features).to(device))
+
+    # Concatenate all features on GPU
+    return torch.cat(features_list, dim=0)
 
 
 def to_float(value: Any) -> float:
+    """Convert tensor/array to Python float."""
     if isinstance(value, torch.Tensor):
+        return float(value.cpu().item())
+    elif hasattr(value, "item"):
         return float(value.item())
-    if isinstance(value, np.ndarray):
-        return float(np.asarray(value).reshape(-1)[0])
-    if isinstance(value, np.generic):
-        return float(value)
     return float(value)
 
 
@@ -373,13 +472,14 @@ def write_markdown(
 def main() -> None:
     args = parse_args()
 
-    print("[DEBUG] Starting three-folder comparison...")
+    print("[DEBUG] Starting three-folder comparison (GPU-OPTIMIZED)...")
     print(f"[DEBUG] source_dir: {args.source_dir}")
     print(f"[DEBUG] generated1_dir: {args.generated1_dir}")
     print(f"[DEBUG] generated2_dir: {args.generated2_dir}")
     print(f"[DEBUG] match_mode: {args.match_mode}")
     print(f"[DEBUG] batch_size: {args.batch_size}")
     print(f"[DEBUG] device arg: {args.device}")
+    print(f"[DEBUG] use_torchvision_io: {args.use_torchvision_io}")
 
     source_map = list_images_by_name(args.source_dir)
     gen1_map = list_images_by_name(args.generated1_dir)
@@ -429,66 +529,102 @@ def main() -> None:
     gen2_tensors: List[torch.Tensor] = []
 
     skipped = 0
-    for idx, match_key in enumerate(matched_keys, start=1):
-        src_path = source_keyed[match_key]
-        gen1_path = gen1_keyed[match_key]
-        gen2_path = gen2_keyed[match_key]
-        image_name = os.path.basename(src_path)
 
-        print(f"[DEBUG] [{idx}/{len(matched_keys)}] key='{match_key}' image='{image_name}'")
+    # Process images with GPU operations
+    with torch.no_grad():  # Disable gradient computation for inference
+        for idx, match_key in enumerate(matched_keys, start=1):
+            src_path = source_keyed[match_key]
+            gen1_path = gen1_keyed[match_key]
+            gen2_path = gen2_keyed[match_key]
+            image_name = os.path.basename(src_path)
 
-        try:
-            src_t, gen1_t, gen2_t = load_triplet_tensors(src_path, gen1_path, gen2_path)
-        except Exception as exc:
-            skipped += 1
-            print(f"[WARN] Skipping unreadable image '{image_name}' (key='{match_key}'): {exc}")
-            continue
-
-        src_b = src_t.unsqueeze(0).to(device, non_blocking=True)
-        gen1_b = gen1_t.unsqueeze(0).to(device, non_blocking=True)
-        gen2_b = gen2_t.unsqueeze(0).to(device, non_blocking=True)
-
-        ssim_1 = to_float(compute_ssim_torch(src_b, gen1_b))
-        psnr_1 = to_float(compute_psnr_torch(src_b, gen1_b))
-        mae_1 = to_float(compute_mae(src_b, gen1_b))
-
-        ssim_2 = to_float(compute_ssim_torch(src_b, gen2_b))
-        psnr_2 = to_float(compute_psnr_torch(src_b, gen2_b))
-        mae_2 = to_float(compute_mae(src_b, gen2_b))
-
-        print(
-            "[DEBUG] "
-            f"key='{match_key}' | src-vs-gen1: SSIM={ssim_1:.6f}, PSNR={psnr_1:.6f}, MAE={mae_1:.6f} | "
-            f"src-vs-gen2: SSIM={ssim_2:.6f}, PSNR={psnr_2:.6f}, MAE={mae_2:.6f}"
-        )
-
-        per_image_rows.append(
-            PairMetrics(
-                image_name=image_name,
-                ssim_src_gen1=ssim_1,
-                psnr_src_gen1=psnr_1,
-                mae_src_gen1=mae_1,
-                ssim_src_gen2=ssim_2,
-                psnr_src_gen2=psnr_2,
-                mae_src_gen2=mae_2,
+            print(
+                f"[DEBUG] [{idx}/{len(matched_keys)}] key='{match_key}' image='{image_name}'"
             )
-        )
 
-        src_tensors.append(src_t)
-        gen1_tensors.append(gen1_t)
-        gen2_tensors.append(gen2_t)
+            try:
+                src_t, gen1_t, gen2_t = load_triplet_tensors(
+                    src_path, gen1_path, gen2_path, device, args.use_torchvision_io
+                )
+            except Exception as exc:
+                skipped += 1
+                print(
+                    f"[WARN] Skipping unreadable image '{image_name}' (key='{match_key}'): {exc}"
+                )
+                continue
+
+            # Add batch dimension for metrics computation
+            src_b = src_t.unsqueeze(0)
+            gen1_b = gen1_t.unsqueeze(0)
+            gen2_b = gen2_t.unsqueeze(0)
+
+            # Compute metrics (all on GPU)
+            ssim_1_tensor = compute_ssim_gpu(src_b, gen1_b)
+            psnr_1_tensor = compute_psnr_gpu(src_b, gen1_b)
+            mae_1_tensor = compute_mae_gpu(src_b, gen1_b)
+
+            ssim_2_tensor = compute_ssim_gpu(src_b, gen2_b)
+            psnr_2_tensor = compute_psnr_gpu(src_b, gen2_b)
+            mae_2_tensor = compute_mae_gpu(src_b, gen2_b)
+
+            # Convert to float only when needed for display
+            ssim_1 = to_float(ssim_1_tensor)
+            psnr_1 = to_float(psnr_1_tensor)
+            mae_1 = to_float(mae_1_tensor)
+            ssim_2 = to_float(ssim_2_tensor)
+            psnr_2 = to_float(psnr_2_tensor)
+            mae_2 = to_float(mae_2_tensor)
+
+            print(
+                "[DEBUG] "
+                f"key='{match_key}' | src-vs-gen1: SSIM={ssim_1:.6f}, PSNR={psnr_1:.6f}, MAE={mae_1:.6f} | "
+                f"src-vs-gen2: SSIM={ssim_2:.6f}, PSNR={psnr_2:.6f}, MAE={mae_2:.6f}"
+            )
+
+            per_image_rows.append(
+                PairMetrics(
+                    image_name=image_name,
+                    ssim_src_gen1=ssim_1,
+                    psnr_src_gen1=psnr_1,
+                    mae_src_gen1=mae_1,
+                    ssim_src_gen2=ssim_2,
+                    psnr_src_gen2=psnr_2,
+                    mae_src_gen2=mae_2,
+                )
+            )
+
+            # Store tensors on GPU for FID computation
+            src_tensors.append(src_t)
+            gen1_tensors.append(gen1_t)
+            gen2_tensors.append(gen2_t)
 
     if len(src_tensors) < 2:
-        raise ValueError("Less than 2 valid matched images after filtering unreadable files.")
+        raise ValueError(
+            "Less than 2 valid matched images after filtering unreadable files."
+        )
 
-    src_features = batched_inception_features(calculator, src_tensors, args.batch_size)
-    gen1_features = batched_inception_features(calculator, gen1_tensors, args.batch_size)
-    gen2_features = batched_inception_features(calculator, gen2_tensors, args.batch_size)
+    print("[DEBUG] Computing Inception features on GPU...")
+    src_features = batched_inception_features_gpu(
+        calculator, src_tensors, args.batch_size, device
+    )
+    gen1_features = batched_inception_features_gpu(
+        calculator, gen1_tensors, args.batch_size, device
+    )
+    gen2_features = batched_inception_features_gpu(
+        calculator, gen2_tensors, args.batch_size, device
+    )
 
     print("[DEBUG] Finished Inception feature extraction for dataset-level FID.")
+    print("[DEBUG] Computing FID on GPU...")
 
-    fid_src_gen1 = compute_fid_from_features(src_features, gen1_features)
-    fid_src_gen2 = compute_fid_from_features(src_features, gen2_features)
+    # Compute FID entirely on GPU
+    with torch.no_grad():
+        fid_src_gen1_tensor = compute_fid_from_features_gpu(src_features, gen1_features)
+        fid_src_gen2_tensor = compute_fid_from_features_gpu(src_features, gen2_features)
+
+    # Convert to float only for output
+    fid_src_gen1 = to_float(fid_src_gen1_tensor)
+    fid_src_gen2 = to_float(fid_src_gen2_tensor)
 
     write_csv(csv_path, per_image_rows)
     write_markdown(
