@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1600 1650" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <style>
+            .box { fill: #f2f1ee; stroke: #7d1916; stroke-width: 2; }
+            .subgraph { fill: none; stroke: #7d1916; stroke-width: 2; stroke-dasharray: 5,5; }
+            .text { font-family: Arial; font-size: 16px; text-anchor: middle; fill: #7d1916}
+            .title { font-weight: bold; font-size: 17px; }
+            .arrow { stroke: #7d1916; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+            .skip-arrow { stroke: #7d1916; stroke-width: 2; fill: none; stroke-dasharray: 5,5; marker-end: url(#arrowhead); }
+        </style>
+        <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+            <polygon points="0 0, 10 3, 0 6" fill="#333" />
+        </marker>
+    </defs>
+
+    <!-- Input -->
+    <rect x="550" y="20" width="300" height="80" class="box" rx="5"/>
+    <text x="700" y="50" class="text title">Input Image (x)</text>
+    <text x="700" y="70" class="text">Shape: (N, 3, 256, 256)</text>
+
+    <!-- Encoder Subgraph -->
+    <rect x="50" y="140" width="1300" height="400" class="subgraph" rx="10"/>
+    <text x="80" y="160" class="title">Encoder</text>
+
+    <!-- Encoder blocks -->
+    <rect x="80" y="190" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="215" class="text title">ConvBlock (e1)</text>
+    <text x="180" y="235" class="text">(N, 64, 256, 256)</text>
+
+    <rect x="350" y="190" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="215" class="text title">DownsampleBlock (d1)</text>
+    <text x="450" y="235" class="text">(N, 128, 128, 128)</text>
+
+    <rect x="620" y="190" width="200" height="80" class="box" rx="5"/>
+    <text x="720" y="215" class="text title">ConvBlock (e2)</text>
+    <text x="720" y="235" class="text">(N, 128, 128, 128)</text>
+
+    <rect x="890" y="190" width="200" height="80" class="box" rx="5"/>
+    <text x="990" y="215" class="text title">DownsampleBlock (d2)</text>
+    <text x="990" y="235" class="text">(N, 256, 64, 64)</text>
+
+    <rect x="1160" y="190" width="200" height="80" class="box" rx="5"/>
+    <text x="1260" y="215" class="text title">ConvBlock (e3)</text>
+    <text x="1260" y="235" class="text">(N, 256, 64, 64)</text>
+
+    <rect x="80" y="350" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="375" class="text title">DownsampleBlock (d3)</text>
+    <text x="180" y="395" class="text">(N, 512, 32, 32)</text>
+
+    <rect x="350" y="350" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="375" class="text title">ConvBlock (e4)</text>
+    <text x="450" y="395" class="text">(N, 512, 32, 32)</text>
+
+    <rect x="620" y="350" width="200" height="80" class="box" rx="5"/>
+    <text x="720" y="375" class="text title">DownsampleBlock (d4)</text>
+    <text x="720" y="395" class="text">(N, 512, 16, 16)</text>
+
+    <!-- Encoder arrows -->
+    <!-- Input to e1 -->
+    <polyline points="700,100 700,150 180,150 180,190" class="arrow"/>
+    <!-- e1 to d1 -->
+    <polyline points="280,230 350,230" class="arrow"/>
+    <!-- d1 to e2 -->
+    <polyline points="550,230 620,230" class="arrow"/>
+    <!-- e2 to d2 -->
+    <polyline points="820,230 890,230" class="arrow"/>
+    <!-- d2 to e3 -->
+    <polyline points="1090,230 1160,230" class="arrow"/>
+    <!-- e3 to d3 (wrap around) -->
+    <polyline points="1260,270 1260,330 180,330 180,350" class="arrow"/>
+    <!-- d3 to e4 -->
+    <polyline points="280,390 350,390" class="arrow"/>
+    <!-- e4 to d4 -->
+    <polyline points="550,390 620,390" class="arrow"/>
+    <!-- d4 to Bottleneck ConvBlock -->
+    <polyline points="720,430 720,560 20,560 20,670 150,670" class="arrow"/>
+
+    <!-- Bottleneck Subgraph -->
+    <rect x="50" y="580" width="1300" height="320" class="subgraph" rx="10"/>
+    <text x="80" y="600" class="title">Bottleneck</text>
+
+    <rect x="150" y="630" width="200" height="80" class="box" rx="5"/>
+    <text x="250" y="655" class="text title">ConvBlock</text>
+    <text x="250" y="675" class="text">(N, 512, 16, 16)</text>
+
+    <rect x="450" y="630" width="200" height="80" class="box" rx="5"/>
+    <text x="550" y="655" class="text title">Flatten &amp; Pos Embed</text>
+    <text x="550" y="675" class="text">(N, 256, 512)</text>
+
+    <rect x="750" y="630" width="220" height="80" class="box" rx="5"/>
+    <text x="860" y="655" class="text title">PixelwiseViT Blocks</text>
+    <text x="860" y="675" class="text">(N, 256, 512)</text>
+
+    <rect x="1050" y="630" width="200" height="80" class="box" rx="5"/>
+    <text x="1150" y="655" class="text title">Unflatten</text>
+    <text x="1150" y="675" class="text">(N, 512, 16, 16)</text>
+
+    <!-- Bottleneck connections -->
+    <!-- ConvBlock to Flatten & Pos Embed -->
+    <polyline points="350,670 450,670" class="arrow"/>
+    <!-- Flatten & Pos Embed to PixelwiseViT Blocks -->
+    <polyline points="650,670 750,670" class="arrow"/>
+    <!-- PixelwiseViT Blocks to Unflatten -->
+    <polyline points="970,670 1050,670" class="arrow"/>
+    <!-- Unflatten to u1 -->
+    <polyline points="1150,710 1150,910 20,910 20,1020 150,1020" class="arrow"/>
+
+    <!-- Decoder Subgraph -->
+    <rect x="50" y="930" width="1300" height="600" class="subgraph" rx="10"/>
+    <text x="80" y="950" class="title">Decoder</text>
+
+    <!-- Decoder blocks level 1 -->
+    <rect x="150" y="980" width="200" height="80" class="box" rx="5"/>
+    <text x="250" y="1005" class="text title">UpsampleBlock (u1)</text>
+    <text x="250" y="1025" class="text">(N, 512, 32, 32)</text>
+
+    <rect x="450" y="980" width="220" height="80" class="box" rx="5"/>
+    <text x="560" y="1005" class="text title">Concat + ConvBlock (dec1)</text>
+    <text x="560" y="1025" class="text">(N, 512, 32, 32)</text>
+
+    <!-- Decoder blocks level 2 -->
+    <rect x="150" y="1100" width="200" height="80" class="box" rx="5"/>
+    <text x="250" y="1125" class="text title">UpsampleBlock (u2)</text>
+    <text x="250" y="1145" class="text">(N, 256, 64, 64)</text>
+
+    <rect x="450" y="1100" width="220" height="80" class="box" rx="5"/>
+    <text x="560" y="1125" class="text title">Concat + ConvBlock (dec2)</text>
+    <text x="560" y="1145" class="text">(N, 256, 64, 64)</text>
+
+    <!-- Decoder blocks level 3 -->
+    <rect x="150" y="1220" width="200" height="80" class="box" rx="5"/>
+    <text x="250" y="1245" class="text title">UpsampleBlock (u3)</text>
+    <text x="250" y="1265" class="text">(N, 128, 128, 128)</text>
+
+    <rect x="450" y="1220" width="220" height="80" class="box" rx="5"/>
+    <text x="560" y="1245" class="text title">Concat + ConvBlock (dec3)</text>
+    <text x="560" y="1265" class="text">(N, 128, 128, 128)</text>
+
+    <!-- Decoder blocks level 4 -->
+    <rect x="150" y="1340" width="200" height="80" class="box" rx="5"/>
+    <text x="250" y="1365" class="text title">UpsampleBlock (u4)</text>
+    <text x="250" y="1385" class="text">(N, 64, 256, 256)</text>
+
+    <rect x="450" y="1340" width="220" height="80" class="box" rx="5"/>
+    <text x="560" y="1365" class="text title">Concat + ConvBlock (dec4)</text>
+    <text x="560" y="1385" class="text">(N, 64, 256, 256)</text>
+
+    <!-- Main decoder chain -->
+    <!-- u1 to dec1 -->
+    <polyline points="350,1020 450,1020" class="arrow"/>
+    <!-- dec1 to u2 -->
+    <polyline points="560,1060 560,1080 250,1080 250, 1100" class="arrow"/>
+    <!-- u2 to dec2 -->
+    <polyline points="350,1140 450,1140" class="arrow"/>
+    <!-- dec2 to u3 -->
+    <polyline points="560,1180 560,1200 250,1200 250,1220" class="arrow"/>
+    <!-- u3 to dec3 -->
+    <polyline points="350,1260 450,1260" class="arrow"/>
+    <!-- dec3 to u4 -->
+    <polyline points="560,1300 560,1320 250,1320 250,1340" class="arrow"/>
+    <!-- u4 to dec4 -->
+    <polyline points="350,1380 450,1380" class="arrow"/>
+    <!-- dec4 to output -->
+    <polyline points="560,1420 560,1460 650,1460 650,1550" class="arrow"/>
+    
+    <!-- Skip connections -->
+    <!-- e1 to dec4 -->
+    <polyline points="180,270 180,320 1550,320 1550,1380 670,1380" class="skip-arrow"/>
+    <!-- e2 to dec3 -->
+    <polyline points="720,270 720,300 1500,300 1500,1260 670,1260" class="skip-arrow"/>
+    <!-- e3 to dec2 -->
+    <polyline points="1360,230 1460,230 1460,1140 670,1140" class="skip-arrow"/>
+    <!-- e4 to dec1 -->
+    <polyline points="450,430 450,450 1400,450 1400,1020 670,1020" class="skip-arrow"/>
+
+    <!-- Output -->
+    <rect x="500" y="1550" width="300" height="80" class="box" rx="5"/>
+    <text x="650" y="1575" class="text title">Output Conv</text>
+    <text x="650" y="1595" class="text">(N, 3, 256, 256)</text>
+
+    <!-- <polyline points="560,1460 650,1550" class="arrow"/> -->
+</svg>

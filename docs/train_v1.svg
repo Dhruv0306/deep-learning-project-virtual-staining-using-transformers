@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1600 1200" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <style>
+            .box { fill: #f2f1ee; stroke: #7d1916; stroke-width: 2; }
+            .subgraph { fill: none; stroke: #7d1916; stroke-width: 2; stroke-dasharray: 5,5; }
+            .text { font-family: Arial; font-size: 16px; text-anchor: middle; fill: #7d1916}
+            .title { font-weight: bold; font-size: 18px; }
+            .arrow { stroke: #7d1916; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+            .dash-arrow { stroke: #7d1916; stroke-width: 2; fill: none; stroke-dasharray: 5,5; marker-end: url(#arrowhead); }
+        </style>
+        <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+            <polygon points="0 0, 10 3, 0 6" fill="#7d1916" />
+        </marker>
+    </defs>
+
+    <!-- Data Subgraph -->
+    <rect x="50" y="20" width="1500" height="140" class="subgraph" rx="10"/>
+    <text x="80" y="45" class="title">Data</text>
+    
+    <rect x="150" y="60" width="350" height="80" class="box" rx="5"/>
+    <text x="325" y="85" class="text title">Real A (Unstained)</text>
+    <text x="325" y="105" class="text">Shape: (N, 3, 256, 256)</text>
+    
+    <rect x="1050" y="60" width="350" height="80" class="box" rx="5"/>
+    <text x="1225" y="85" class="text title">Real B (Stained)</text>
+    <text x="1225" y="105" class="text">Shape: (N, 3, 256, 256)</text>
+
+    <!-- Generator Step Subgraph -->
+    <rect x="50" y="200" width="900" height="900" class="subgraph" rx="10"/>
+    <text x="80" y="225" class="title">Generator Step (Freeze D)</text>
+    
+    <!-- G_AB Generator -->
+    <rect x="120" y="270" width="200" height="60" class="box" rx="5"/>
+    <text x="220" y="300" class="text title">G_AB Generator</text>
+    
+    <!-- G_BA Generator -->
+    <rect x="420" y="270" width="200" height="60" class="box" rx="5"/>
+    <text x="520" y="300" class="text title">G_BA Generator</text>
+    
+    <!-- RA to G_AB -->
+    <polyline points="325,140 325,170 20,170 20,280 120,280" class="arrow"/>
+    
+    <!-- Real B to G_BA (Connection 3) -->
+    <polyline points="1205,140 1205,170 750,170 750,280 620,280" class="arrow"/>
+    
+    <!-- Fake B output from G_AB (Connection 2) -->
+    <rect x="420" y="360" width="200" height="80" class="box" rx="5"/>
+    <text x="520" y="385" class="text title">Fake B</text>
+    <text x="520" y="405" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="320,280 390,280 390,380 420,380" class="arrow"/>
+    
+    <!-- Fake A output from G_BA (Connection 4) -->
+    <rect x="120" y="360" width="200" height="80" class="box" rx="5"/>
+    <text x="220" y="385" class="text title">Fake A</text>
+    <text x="220" y="405" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="420,320 360,320 360,400 320,400" class="arrow"/>
+    
+    <!-- Fake B to G_BA for Reconstruction (Connection 5) -->
+    <polyline points="600,440 600,450 650,450 650,310 620,310" class="arrow"/>
+    
+    <!-- Reconstructed A output (Connection 6) -->
+    <rect x="720" y="360" width="200" height="80" class="box" rx="5"/>
+    <text x="820" y="385" class="text title">Reconstructed A</text>
+    <text x="820" y="405" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="600,270 600,250 680,250 680,400 720,400" class="arrow"/>
+    
+    <!-- Fake A to G_AB for Reconstruction (Connection 7) -->
+    <polyline points="120,400 60,400 60,320 120,320" class="arrow"/>
+    
+    <!-- Reconstructed B output (Connection 8) -->
+    <rect x="720" y="480" width="200" height="80" class="box" rx="5"/>
+    <text x="820" y="505" class="text title">Reconstructed B</text>
+    <text x="820" y="525" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="300,330 300,350 370,350 370,500 720,500" class="arrow"/>
+    
+    <!-- Real A to G_BA for Identity (Connection 9) -->
+    <polyline points="150,100 30,100 30,240 520,240 520,270" class="arrow"/>
+    
+    <!-- Identity A output (Connection 10) -->
+    <rect x="120" y="590" width="200" height="80" class="box" rx="5"/>
+    <text x="220" y="615" class="text title">Identity A</text>
+    <text x="220" y="635" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="440,330 440,350 400,350 400,550 280,550 280,590" class="arrow"/>
+    
+    <!-- Real B to G_AB for Identity (Connection 11) -->
+    <polyline points="1050,120 700,120 700,220 290,220 290,270" class="arrow"/>
+    
+    <!-- Identity B output (Connection 12) -->
+    <rect x="720" y="590" width="200" height="80" class="box" rx="5"/>
+    <text x="820" y="615" class="text title">Identity B</text>
+    <text x="820" y="635" class="text">Shape: (N, 3, 256, 256)</text>
+    <polyline points="320,300 380,300 380,630 720,630" class="arrow"/>
+    
+    <!-- Total G Loss -->
+    <rect x="400" y="760" width="300" height="100" class="box" rx="5"/>
+    <text x="550" y="785" class="text title">Total G Loss</text>
+    <text x="550" y="805" class="text">(LSGAN + Cycle +</text>
+    <text x="550" y="820" class="text">Identity + Perceptual)</text>
+    
+    <!-- Dashed connections to Loss (Connections 13-18) -->
+    <!-- Fake B to Loss (13) -->
+    <polyline points="520,440 520,760" class="dash-arrow"/>
+    <!-- Fake A to Loss (14) -->
+    <polyline points="200,440 200,460 100,460 100,800 400,800" class="dash-arrow"/>
+    <!-- Reconstructed A to Loss (15) -->
+    <polyline points="820,440 820,460 600,460 600,700 550,700 550,760" class="dash-arrow"/>
+    <!-- Reconstructed B to Loss (16) -->
+    <polyline points="720,520 650,520 650,760" class="dash-arrow"/>
+    <!-- Identity A to Loss (17) -->
+    <polyline points="220,670 220,770 400,770" class="dash-arrow"/>
+    <!-- Identity B to Loss (18) -->
+    <polyline points="820,670 820,800 700,800" class="dash-arrow"/>
+
+    <!-- Discriminator Steps Subgraph -->
+    <rect x="1000" y="200" width="500" height="520" class="subgraph" rx="10"/>
+    <text x="1030" y="225" class="title">Discriminator Steps (Unfreeze D)</text>
+    
+    <!-- Discriminator A -->
+    <rect x="1050" y="270" width="200" height="60" class="box" rx="5"/>
+    <text x="1150" y="300" class="text title">Discriminator A</text>
+    
+    <!-- Discriminator B -->
+    <rect x="1300" y="270" width="200" height="60" class="box" rx="5"/>
+    <text x="1400" y="300" class="text title">Discriminator B</text>
+    
+    <!-- Real A to DA (Connection 19) -->
+    <polyline points="325,140 325,180 970,180 970,240 1150,240 1150,270" class="arrow"/>
+    
+    <!-- Real B to DB (Connection 22) -->
+    <polyline points="1225,140 1225,180 1400,180 1400,270" class="arrow"/>
+    
+    <!-- Fake A dashed to DA (Connection 20) -->
+    <polyline points="220,440 220,570 980,570 980,300 1050,300" class="dash-arrow"/>
+    
+    <!-- Fake B dashed to DB (Connection 23) -->
+    <polyline points="500,440 500,580 1270,580 1270,300 1300,300" class="dash-arrow"/>
+    
+    <!-- Loss D_A (Connection 21) -->
+    <rect x="1050" y="380" width="200" height="80" class="box" rx="5"/>
+    <text x="1150" y="405" class="text title">Loss D_A &amp;</text>
+    <text x="1150" y="420" class="text">Backward</text>
+    <polyline points="1150,330 1150,380" class="arrow"/>
+    
+    <!-- Loss D_B (Connection 24) -->
+    <rect x="1300" y="380" width="200" height="80" class="box" rx="5"/>
+    <text x="1400" y="405" class="text title">Loss D_B &amp;</text>
+    <text x="1400" y="420" class="text">Backward</text>
+    <polyline points="1400,330 1400,380" class="arrow"/>
+
+    <!-- Update G -->
+    <rect x="350" y="1050" width="400" height="100" class="box" rx="5"/>
+    <text x="550" y="1075" class="text title">Update G_AB &amp; G_BA</text>
+    <text x="550" y="1095" class="text">(Backward + Optimizer Step)</text>
+    
+    <!-- Loss G to Update G (Connection 25) -->
+    <polyline points="550,860 550,1050" class="arrow"/>
+
+</svg>

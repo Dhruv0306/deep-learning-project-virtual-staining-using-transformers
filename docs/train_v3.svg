@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1600 2300" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <style>
+            .box { fill: #f2f1ee; stroke: #7d1916; stroke-width: 2; }
+            .subgraph { fill: none; stroke: #7d1916; stroke-width: 2; stroke-dasharray: 5,5; }
+            .text { font-family: Arial; font-size: 18px; text-anchor: middle; fill: #7d1916}
+            .title { font-weight: bold; font-size: 20px; }
+            .arrow { stroke: #7d1916; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+            .dash-arrow { stroke: #7d1916; stroke-width: 2; fill: none; stroke-dasharray: 5,5; marker-end: url(#arrowhead); }
+        </style>
+        <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto">
+            <polygon points="0 0, 10 5, 0 10" fill="#7d1916" />
+        </marker>
+    </defs>
+
+    <!-- Initialize Subgraph -->
+    <rect x="50" y="20" width="900" height="180" class="subgraph" rx="10"/>
+    <text x="80" y="45" class="title">Initialize</text>
+
+    <rect x="80" y="60" width="280" height="80" class="box" rx="5"/>
+    <text x="220" y="85" class="text title">Real A</text>
+    <text x="220" y="105" class="text">Shape: (N, 3, 256, 256)</text>
+
+    <rect x="410" y="60" width="280" height="80" class="box" rx="5"/>
+    <text x="550" y="85" class="text title">Real B</text>
+    <text x="550" y="105" class="text">Shape: (N, 3, 256, 256)</text>
+
+    <rect x="80" y="160" width="280" height="80" class="box" rx="5"/>
+    <text x="220" y="185" class="text title">VAE Encode (Frozen)</text>
+    <text x="220" y="205" class="text">Z_0 A (N, 4, 32, 32)</text>
+
+    <rect x="410" y="160" width="280" height="80" class="box" rx="5"/>
+    <text x="550" y="185" class="text title">VAE Encode (Frozen)</text>
+    <text x="550" y="205" class="text">Z_0 B (N, 4, 32, 32)</text>
+
+    <!-- Real A to VAE Encode A -->    
+    <polyline points="220,145 220,155 220,160" class="arrow"/>
+    <!-- Real B to VAE Encode B -->
+    <polyline points="550,145 550,155 550,160" class="arrow"/>
+
+    <!-- Stage 1: Diffusion Denoising -->
+    <rect x="50" y="300" width="900" height="400" class="subgraph" rx="10"/>
+    <text x="80" y="325" class="title">Stage 1: Diffusion Generator Denoising Objective</text>
+
+    <!-- Left branch: A to B -->
+    <rect x="80" y="360" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="385" class="text title">Add Noise (t_A)</text>
+    <text x="180" y="405" class="text">Z_t A</text>
+
+    <!-- Z0A to Add Noise A -->
+    <polyline points="220,250 220,340 180,340 180,360" class="arrow"/>
+
+    <rect x="80" y="470" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="495" class="text title">DiT Generator B2A</text>
+
+    <!-- Add Noise A to DiT B2A -->
+    <polyline points="180,440 180,450 180,470" class="arrow"/>
+
+    <rect x="80" y="580" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="600" class="text title">MSE/Perceptual</text>
+    <text x="180" y="620" class="text">Denoiser Loss A</text>
+
+    <!-- DiT B2A to Loss A -->
+    <polyline points="180,550 180,560 180,580" class="arrow"/>
+
+    <!-- Right branch: B to A -->
+    <rect x="410" y="360" width="200" height="80" class="box" rx="5"/>
+    <text x="510" y="385" class="text title">Add Noise (t_B)</text>
+    <text x="510" y="405" class="text">Z_t B</text>
+
+    <!-- Z0B to Add Noise B -->
+    <polyline points="550,250 550,340 510,340 510,360" class="arrow"/>
+
+    <rect x="410" y="470" width="200" height="80" class="box" rx="5"/>
+    <text x="510" y="495" class="text title">DiT Generator A2B</text>
+
+    <!-- Add Noise B to DiT A2B -->
+    <polyline points="510,440 510,450 510,470" class="arrow"/>
+
+    <rect x="410" y="580" width="200" height="80" class="box" rx="5"/>
+    <text x="510" y="600" class="text title">MSE/Perceptual</text>
+    <text x="510" y="620" class="text">Denoiser Loss B</text>
+
+    <!-- DiT A2B to Loss B -->
+    <polyline points="510,550 510,560 510,580" class="arrow"/>
+
+    <!-- Backward Stage 1 -->
+    <rect x="240" y="690" width="320" height="80" class="box" rx="5"/>
+    <text x="400" y="715" class="text title">Backward Stage 1</text>
+    <text x="400" y="735" class="text">(Activations freed)</text>
+
+    <!-- Loss A to Backward Stage 1 (left channel with clearance) -->\n    <polyline points="180,660 160,660 160,675 240,675 240,690" class="arrow"/>
+    <!-- Loss B to Backward Stage 1 (right channel with clearance) -->\n    <polyline points="510,660 530,660 530,675 560,675 560,690" class="arrow"/>
+
+    <!-- Stage 2: Adversarial & Cycle -->
+    <rect x="50" y="820" width="1450" height="600" class="subgraph" rx="10"/>
+    <text x="80" y="845" class="title">Stage 2: Adversarial &amp; Cycle Objectives</text>
+
+    <rect x="80" y="900" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="925" class="text title">Fresh Forward</text>
+    <text x="180" y="945" class="text">DiT A</text>
+
+    <!-- Z_t A to Fresh DiT A (from Stage 1) via dotted - route around left with clearance from subgraph -->
+    <polyline points="180,440 10,440 10,810 10,900 80,900" class="dash-arrow"/>
+
+    <rect x="80" y="1010" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="1035" class="text title">x0_pred A</text>
+    <text x="180" y="1055" class="text">(N, 4, 32, 32)</text>
+
+    <!-- Fresh DiT A to x0_pred A -->
+    <polyline points="180,980 180,990 180,1010" class="arrow"/>
+
+    <rect x="80" y="1120" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="1145" class="text title">VAE Decode</text>
+    <text x="180" y="1165" class="text">Fake Image B</text>
+
+    <!-- x0_pred A to VAE Decode -->
+    <polyline points="180,1090 180,1100 180,1120" class="arrow"/>
+
+    <!-- Fresh Forward DiT B -->
+    <rect x="350" y="900" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="925" class="text title">Fresh Forward</text>
+    <text x="450" y="945" class="text">DiT B</text>
+
+    <!-- Z_t B to Fresh DiT B (from Stage 1) via dotted - route around right with clearance from subgraph -->
+    <polyline points="510,440 1590,440 1590,810 1590,900 550,900" class="dash-arrow"/>
+
+    <rect x="350" y="1010" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="1035" class="text title">x0_pred B</text>
+    <text x="450" y="1055" class="text">(N, 4, 32, 32)</text>
+
+    <!-- Fresh DiT B to x0_pred B -->
+    <polyline points="450,980 450,990 450,1010" class="arrow"/>
+
+    <rect x="350" y="1120" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="1145" class="text title">VAE Decode</text>
+    <text x="450" y="1165" class="text">Fake Image A</text>
+
+    <!-- x0_pred B to VAE Decode -->
+    <polyline points="450,1090 450,1100 450,1120" class="arrow"/>
+
+    <!-- Discriminator Evaluation -->
+    <rect x="80" y="1240" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="1265" class="text title">D_B Evaluation</text>
+    <text x="180" y="1285" class="text">(Fake B)</text>
+
+    <polyline points="180,1200 160,1200 160,1220 180,1220 180,1240" class="arrow"/>
+
+    <rect x="350" y="1240" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="1265" class="text title">D_A Evaluation</text>
+    <text x="450" y="1285" class="text">(Fake A)</text>
+
+    <polyline points="450,1200 470,1200 470,1220 450,1220 450,1240" class="arrow"/>
+
+    <!-- Adversarial Losses -->
+    <rect x="80" y="1350" width="200" height="80" class="box" rx="5"/>
+    <text x="180" y="1375" class="text title">Adversarial</text>
+    <text x="180" y="1395" class="text">Loss B</text>
+
+    <polyline points="180,1320 160,1320 160,1335 180,1335 180,1350" class="arrow"/>
+
+    <rect x="350" y="1350" width="200" height="80" class="box" rx="5"/>
+    <text x="450" y="1375" class="text title">Adversarial</text>
+    <text x="450" y="1395" class="text">Loss A</text>
+
+    <polyline points="450,1320 470,1320 470,1335 450,1335 450,1350" class="arrow"/>
+
+    <!-- Cycle & Identity Loss -->
+    <rect x="800" y="1090" width="280" height="100" class="box" rx="5"/>
+    <text x="940" y="1115" class="text title">Cycle &amp; Identity</text>
+    <text x="940" y="1135" class="text">Losses</text>
+
+    <!-- Dotted connections to Cycle Loss (orthogonal routing around boxes) -->
+    <!-- Z_0 A to Cycle Loss (route around left edge with clearance) -->
+    <polyline points="220,250 5,250 5,1090 800,1090" class="dash-arrow"/>
+    <!-- Z_0 B to Cycle Loss (route around right edge with clearance) -->
+    <polyline points="550,250 1595,250 1595,1090 900,1090" class="dash-arrow"/>
+    <!-- x0_pred A to Cycle Loss (route around left, separate channel) -->
+    <polyline points="80,1050 15,1050 15,1075 800,1075 800,1090" class="dash-arrow"/>
+    <!-- x0_pred B to Cycle Loss (route around right, separate channel) -->
+    <polyline points="550,1050 1585,1050 1585,1075 880,1075 880,1090" class="dash-arrow"/>
+
+    <!-- Backward Stage 2 -->
+    <rect x="400" y="1470" width="380" height="100" class="box" rx="5"/>
+    <text x="590" y="1495" class="text title">Backward Stage 2</text>
+    <text x="590" y="1515" class="text">&amp; Step G Optimizer</text>
+
+    <!-- Adversarial Loss B to Backward Stage 2 (left channel) -->
+    <polyline points="180,1430 140,1430 140,1450 450,1450 450,1470" class="arrow"/>
+    <!-- Adversarial Loss A to Backward Stage 2 (right channel) -->
+    <polyline points="450,1430 480,1430 480,1455 520,1455 520,1470" class="arrow"/>
+    <!-- Cycle Loss to Backward Stage 2 (center channel) -->
+    <polyline points="940,1190 940,1410 590,1410 590,1470" class="arrow"/>
+
+    <!-- Discriminator Steps -->
+    <rect x="50" y="1700" width="1450" height="500" class="subgraph" rx="10"/>
+    <text x="80" y="1725" class="title">Discriminator Steps</text>
+
+    <!-- Real Data -->
+    <rect x="80" y="1760" width="260" height="80" class="box" rx="5"/>
+    <text x="210" y="1785" class="text title">D_A(Real A)</text>
+    <text x="210" y="1805" class="text">from Initialize</text>
+
+    <!-- Real A to D_A (route around left edge with clearance from subgraph) -->
+    <polyline points="220,250 10,250 10,1760 80,1760" class="dash-arrow"/>
+
+    <rect x="410" y="1760" width="260" height="80" class="box" rx="5"/>
+    <text x="540" y="1785" class="text title">D_B(Real B)</text>
+    <text x="540" y="1805" class="text">from Initialize</text>
+
+    <!-- Real B to D_B (route around right edge with clearance from subgraph) -->
+    <polyline points="550,250 1590,250 1590,1760 550,1760" class="dash-arrow"/>
+
+    <!-- Fake Buffers -->
+    <rect x="800" y="1760" width="260" height="80" class="box" rx="5"/>
+    <text x="930" y="1785" class="text title">Fake A Buffer</text>
+
+    <!-- Fake Image A to Fake A Buffer (route around left edge, separate channel) -->
+    <polyline points="80,1200 15,1200 15,1760 800,1760" class="dash-arrow"/>
+
+    <rect x="1140" y="1760" width="260" height="80" class="box" rx="5"/>
+    <text x="1270" y="1785" class="text title">Fake B Buffer</text>
+
+    <!-- Fake Image B to Fake B Buffer (route around right edge, separate channel) -->
+    <polyline points="550,1200 1585,1200 1585,1760 1140,1760" class="dash-arrow"/>
+
+    <!-- Fake Discriminator Evaluation -->
+    <rect x="800" y="1880" width="260" height="80" class="box" rx="5"/>
+    <text x="930" y="1905" class="text title">D_A(Fake A)</text>
+
+    <!-- Fake A Buffer to D_A(Fake A) (vertical connection with clearance) -->
+    <polyline points="930,1840 930,1865 930,1880" class="dash-arrow"/>
+
+    <rect x="1140" y="1880" width="260" height="80" class="box" rx="5"/>
+    <text x="1270" y="1905" class="text title">D_B(Fake B)</text>
+
+    <!-- Fake B Buffer to D_B(Fake B) (vertical connection with clearance) -->
+    <polyline points="1270,1840 1270,1865 1270,1880" class="dash-arrow"/>
+
+    <!-- D Losses -->
+    <rect x="100" y="2000" width="300" height="100" class="box" rx="5"/>
+    <text x="250" y="2025" class="text title">D_A Loss &amp; Step</text>
+    <text x="250" y="2045" class="text">(Including Optional</text>
+    <text x="250" y="2065" class="text">R1 Penalty)</text>
+
+    <!-- D_A(Real A) to D_A Loss (left channel with clearance) -->
+    <polyline points="210,1840 180,1840 180,1920 250,1920 250,2000" class="arrow"/>
+    <!-- D_A(Fake A) to D_A Loss (right channel with clearance) -->
+    <polyline points="930,1960 930,1990 320,1990 320,2000" class="arrow"/>
+
+    <rect x="520" y="2000" width="300" height="100" class="box" rx="5"/>
+    <text x="670" y="2025" class="text title">D_B Loss &amp; Step</text>
+    <text x="670" y="2045" class="text">(Including Optional</text>
+    <text x="670" y="2065" class="text">R1 Penalty)</text>
+
+    <!-- D_B(Real B) to D_B Loss (left channel with clearance) -->
+    <polyline points="540,1840 610,1840 610,1920 670,1920 670,2000" class="arrow"/>
+    <!-- D_B(Fake B) to D_B Loss (right channel with clearance) -->
+    <polyline points="1270,1960 1270,1990 620,1990 620,2000" class="arrow"/>
+
+</svg>
