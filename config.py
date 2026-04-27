@@ -409,22 +409,23 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.min_snr_gamma = 5.0
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 0.5
-    cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4    # effective batch = 4
-    cfg.data.num_workers = 10
+    cfg.data.batch_size = 2
+    cfg.training.accumulate_grads = 2    # effective batch = 4
+    cfg.data.num_workers = 8
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 0.0
-    cfg.training.validation_size = 20
+    cfg.training.validation_size = 50
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = False       # memory-intensive; disabled on 8 GB
+    cfg.diffusion.disc_use_fft = True       # memory-intensive; disabled on 8 GB
     cfg.diffusion.disc_use_global = True     # kept for global layout supervision
     cfg.diffusion.disc_use_local = True      # kept for local texture detail
     cfg.diffusion.disc_base_channels = 128
     cfg.diffusion.disc_global_base_channels = 32
     cfg.diffusion.disc_n_layers = 4
     cfg.training.validation_warmup_epochs = 5
+    cfg.training.save_checkpoint_every = 5
 
     return cfg
 
