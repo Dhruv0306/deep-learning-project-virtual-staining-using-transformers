@@ -37,6 +37,7 @@ from model_v4.generator import getGeneratorV4
 from model_v4.discriminator import getDiscriminatorV4
 from model_v4.patch_sampler import PatchSampler
 from model_v4.nce_loss import PatchNCELoss
+from model_v4.perceptual_loss import VGGPerceptualLoss
 
 
 def _load_checkpoint_compat(checkpoint_path: str, map_location):
@@ -582,6 +583,9 @@ def train_v4(
         temperature=tcfg.nce_temperature, proj_dim=tcfg.nce_proj_dim
     ).to(device)
     use_nce = tcfg.lambda_nce > 0.0
+    
+    # Perceptual loss
+    perceptual_criterion = VGGPerceptualLoss(resize_to=128).to(device) if tcfg.lambda_perceptual > 0.0 else None
 
     # ---- Replay buffers ----
     replay_A = ReplayBuffer(tcfg.replay_buffer_size) if tcfg.use_replay_buffer else None
@@ -703,6 +707,7 @@ def train_v4(
         epoch_loss_G_gan = 0.0
         epoch_loss_NCE = 0.0
         epoch_loss_Id = 0.0
+        epoch_loss_Perceptual = 0.0
         epoch_loss_G_AB = 0.0
         epoch_loss_G_BA = 0.0
         epoch_loss_D_A = 0.0
@@ -833,10 +838,17 @@ def train_v4(
                     idt_A = G_BA(real_A)
                     loss_id = idt_loss(idt_B, real_B) + idt_loss(idt_A, real_A)
 
+                loss_perceptual = torch.tensor(0.0, device=device)
+                if tcfg.lambda_perceptual > 0.0 and perceptual_criterion is not None:
+                    loss_perceptual_AB = perceptual_criterion(fake_B, real_B)
+                    loss_perceptual_BA = perceptual_criterion(fake_A, real_A)
+                    loss_perceptual = loss_perceptual_AB + loss_perceptual_BA
+
                 loss_G = (
                     tcfg.lambda_gan * loss_G_gan
                     + tcfg.lambda_nce * loss_nce
                     + tcfg.lambda_identity * loss_id
+                    + tcfg.lambda_perceptual * loss_perceptual
                 )
                 loss_G_scaled = loss_G / accumulate  # normalise for gradient accumulation
 
@@ -897,6 +909,7 @@ def train_v4(
                 "Loss_NCE_AB": float(loss_nce_AB.item()),
                 "Loss_NCE_BA": float(loss_nce_BA.item()),
                 "Loss_Id": float(loss_id.item()),
+                "Loss_Perceptual": float(loss_perceptual.item()),
                 "Loss_G_AB": float(loss_G_AB.item()),
                 "Loss_G_BA": float(loss_G_BA.item()),
                 "Loss_D_A": float(loss_D_A.item()),
@@ -907,6 +920,7 @@ def train_v4(
             epoch_loss_G_gan += float(loss_G_gan.item())
             epoch_loss_NCE += float(loss_nce.item())
             epoch_loss_Id += float(loss_id.item())
+            epoch_loss_Perceptual += float(loss_perceptual.item())
             epoch_loss_G_AB += float(loss_G_AB.item())
             epoch_loss_G_BA += float(loss_G_BA.item())
             epoch_loss_D_A += float(loss_D_A.item())
@@ -921,6 +935,7 @@ def train_v4(
                     f"Loss_G_GAN: {loss_G_gan.item():.4f} "
                     f"Loss_NCE: {loss_nce.item():.4f} "
                     f"Loss_Id: {loss_id.item():.4f} "
+                    f"Loss_Perceptual: {loss_perceptual.item():.4f} "
                     f"Loss_D_A: {loss_D_A.item():.4f} "
                     f"Loss_D_B: {loss_D_B.item():.4f} "
                     f"GradNorm_G: {grad_norm:.4f}"
@@ -932,6 +947,7 @@ def train_v4(
         avg_loss_G_gan = epoch_loss_G_gan / n_batches
         avg_loss_NCE = epoch_loss_NCE / n_batches
         avg_loss_Id = epoch_loss_Id / n_batches
+        avg_loss_Perceptual = epoch_loss_Perceptual / n_batches
         avg_loss_G_AB = epoch_loss_G_AB / n_batches
         avg_loss_G_BA = epoch_loss_G_BA / n_batches
         avg_loss_D_A = epoch_loss_D_A / n_batches
@@ -943,6 +959,7 @@ def train_v4(
         writer.add_scalar("Loss/GAN", avg_loss_G_gan, epoch + 1)
         writer.add_scalar("Loss/NCE", avg_loss_NCE, epoch + 1)
         writer.add_scalar("Loss/Identity", avg_loss_Id, epoch + 1)
+        writer.add_scalar("Loss/Perceptual", avg_loss_Perceptual, epoch + 1)
         writer.add_scalar("Loss/Generator_AB", avg_loss_G_AB, epoch + 1)
         writer.add_scalar("Loss/Generator_BA", avg_loss_G_BA, epoch + 1)
         writer.add_scalar("Loss/Discriminator_A", avg_loss_D_A, epoch + 1)
@@ -954,6 +971,7 @@ def train_v4(
             f"Avg Loss_G: {avg_loss_G:.4f} "
             f"Avg Loss_G_GAN: {avg_loss_G_gan:.4f} "
             f"Avg Loss_NCE: {avg_loss_NCE:.4f} "
+            f"Avg Loss_Perceptual: {avg_loss_Perceptual:.4f} "
             f"Avg Loss_D_A: {avg_loss_D_A:.4f} "
             f"Avg Loss_D_B: {avg_loss_D_B:.4f}"
         )

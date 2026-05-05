@@ -44,7 +44,9 @@ class GeneratorConfig:
     use_layerscale: bool = True
     layerscale_init: float = 1e-4
     use_cross_domain: bool = True
-    use_gradient_checkpointing: bool = False  # ~30–40% VRAM saving; ~20% slower backward
+    use_gradient_checkpointing: bool = (
+        False  # ~30–40% VRAM saving; ~20% slower backward
+    )
 
 
 @dataclass
@@ -332,10 +334,10 @@ def get_8gb_config() -> UVCGANConfig:
     cfg = UVCGANConfig(model_version=2)
 
     cfg.generator.use_gradient_checkpointing = True
-    cfg.generator.vit_depth = 4          # paper default is 4; reduced for 8 GB target
-    cfg.discriminator.num_scales = 4     # 2-scale PatchGAN lowers discriminator VRAM
+    cfg.generator.vit_depth = 4  # paper default is 4; reduced for 8 GB target
+    cfg.discriminator.num_scales = 4  # 2-scale PatchGAN lowers discriminator VRAM
     cfg.data.batch_size = 1
-    cfg.training.accumulate_grads = 4    # effective batch = 4
+    cfg.training.accumulate_grads = 4  # effective batch = 4
     cfg.loss.perceptual_resize = 128
     cfg.generator.use_cross_domain = True
     cfg.generator.use_layerscale = True
@@ -371,7 +373,7 @@ def get_dit_config() -> UVCGANConfig:
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 1
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2    # effective batch = 4
+    cfg.training.accumulate_grads = 2  # effective batch = 4
     cfg.training.validation_size = 100
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
@@ -410,7 +412,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.perceptual_every_n_steps = 1
     cfg.diffusion.perceptual_batch_fraction = 1
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2    # effective batch = 4
+    cfg.training.accumulate_grads = 2  # effective batch = 4
     cfg.data.num_workers = 2
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
@@ -418,9 +420,9 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.training.validation_size = 50
     cfg.training.validation_fid_samples = 600
     cfg.training.validation_fid_min_samples = 50
-    cfg.diffusion.disc_use_fft = True       # memory-intensive; disabled on 8 GB
-    cfg.diffusion.disc_use_global = True     # kept for global layout supervision
-    cfg.diffusion.disc_use_local = True      # kept for local texture detail
+    cfg.diffusion.disc_use_fft = True  # memory-intensive; disabled on 8 GB
+    cfg.diffusion.disc_use_global = True  # kept for global layout supervision
+    cfg.diffusion.disc_use_local = True  # kept for local texture detail
     cfg.diffusion.disc_base_channels = 128
     cfg.diffusion.disc_global_base_channels = 32
     cfg.diffusion.disc_n_layers = 4
@@ -463,14 +465,14 @@ class V4ModelConfig:
 
     input_nc: int = 3
     output_nc: int = 3
-    base_channels: int = 256
-    num_res_blocks: int = 15
+    base_channels: int = 284
+    num_res_blocks: int = 20
     disc_base_channels: int = 128
-    disc_n_layers: int = 4
+    disc_n_layers: int = 5
     use_transformer_encoder: bool = True
     image_size: int = 256
     patch_size: int = 8
-    encoder_dim: int = 512
+    encoder_dim: int = 768
     encoder_depth: int = 8
     encoder_heads: int = 16
     encoder_mlp_ratio: float = 4.0
@@ -518,7 +520,7 @@ class V4TrainingConfig:
     use_amp: bool = True
     accumulate_grads: int = 1
     log_every: int = 50
-    save_checkpoint_every: int = 20
+    save_checkpoint_every: int = 5
     validation_every: int = 5
     validation_samples: int = 10
     validation_max_batches: int = 50
@@ -531,10 +533,11 @@ class V4TrainingConfig:
     divergence_threshold: float = 5.0
     divergence_patience: int = 2
     lambda_gan: float = 5.0
-    lambda_nce: float = 2.0
+    lambda_nce: float = 4.0
     lambda_identity: float = 5.0
-    nce_layers: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
-    nce_num_patches: int = 256
+    lambda_perceptual: float = 0.5
+    nce_layers: tuple[int, ...] = (1, 2, 3, 4)
+    nce_num_patches: int = 512
     nce_temperature: float = 0.07
     nce_proj_dim: int = 256
     use_replay_buffer: bool = True
@@ -615,7 +618,7 @@ def get_v4_8gb_config() -> V4Config:
     """
     cfg = V4Config()
     cfg.data.batch_size = 2
-    cfg.training.accumulate_grads = 2    # effective batch = 4
+    cfg.training.accumulate_grads = 2  # effective batch = 4
 
     cfg.model.use_gradient_checkpointing = True
     return cfg
