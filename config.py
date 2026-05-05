@@ -411,7 +411,7 @@ def get_dit_8gb_config() -> UVCGANConfig:
     cfg.diffusion.perceptual_batch_fraction = 1
     cfg.data.batch_size = 2
     cfg.training.accumulate_grads = 2    # effective batch = 4
-    cfg.data.num_workers = 8
+    cfg.data.num_workers = 2
     cfg.data.prefetch_factor = 2
     cfg.loss.perceptual_resize = 256
     cfg.diffusion.lambda_perceptual_v3 = 1.0
@@ -560,7 +560,7 @@ class V4DataConfig:
 
     image_size: int = 256
     batch_size: int = 4
-    num_workers: int = 4
+    num_workers: int = 2
     prefetch_factor: int = 2
 
 
